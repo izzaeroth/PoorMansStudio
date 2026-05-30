@@ -1,0 +1,488 @@
+Poor Man's Studio - USER GUIDE
+==============================
+
+Version
+-------
+v0.56.0
+
+Illustrated PDF Guide
+---------------------
+The full illustrated guide is included as:
+
+workspace\docs\PoorMansStudio_User_Guide.pdf
+
+Use Help > Open User Guide PDF to open it from inside the app. This text file is kept as a lightweight plain-text reference.
+
+Purpose
+-------
+Poor Man's Studio is a local Windows desktop music workstation for importing, editing, previewing, recording, saving, and rendering music without needing a full commercial DAW.
+
+The app is built around tracks, sequences, and a workspace folder. MIDI/MusicXML material becomes MIDI tracks. Imported or recorded audio becomes AudioClip tracks.
+
+Core workflow:
+- open or import MusicXML, MXL, MIDI, audio, or an existing .mwproj project
+- organize music into tracks and sequences
+- assign instruments to MIDI tracks
+- record or import audio as AudioClip tracks
+- preview tracks, sequences, or the project
+- save the project as .mwproj
+- render final MIDI or audio output
+
+Main Features
+=============
+- Import MusicXML, MXL, MIDI, .mwproj, WAV, MP3, FLAC, and OGG files.
+- Add recorded audio through the AudioClip Recorder, including quick Record Test checks before committing a take.
+- Treat each imported or recorded audio file as one AudioClip track.
+- Use the built-in Custom Audio identity for AudioClip tracks.
+- Edit MIDI tracks and notes with the main UI, Track Manager, and Piano Roll.
+- Open multiple Piano Roll windows, limited to one window per track.
+- Use the Window menu to jump back to open tool windows and open Piano Roll windows; multiple open Piano Rolls are grouped under a Piano Rolls submenu.
+- Move tracks between sequences without closing open Piano Roll windows; unsaved Piano Roll note edits and pending track settings are preserved.
+- Keep Track Manager consoles and the Change Track Seq picker synchronized with current sequence membership, showing empty sequences explicitly.
+- Assign SF2, SF3, or SFZ libraries to MIDI tracks from the main UI or directly inside a Piano Roll window.
+- New blank MIDI tracks are assigned to the first available instrument in the project default library when possible.
+- See each Piano Roll track's current or pending instrument in the Piano Roll header.
+- Scroll the Piano Roll pitch view smoothly with the mouse wheel or scrollbar; note up/down buttons still move by note-range steps.
+- Save per-track instrument assignments, sequences, render settings, AudioClip metadata, and sequence thoughts in .mwproj.
+- Preview tracks, sequences, or the full project, including AudioClip tracks.
+- Render MIDI or audio output with FluidSynth, sfizz-render, and FFmpeg.
+- Set Parallel Stems from Render Settings as Auto (safe), 1, 2, 4, 6, 8, 12, or 16. This controls how many independent MIDI stem render jobs may run at the same time; it is not a literal CPU-core selector.
+- Use helper bubbles on buttons, fields, dropdowns, and labels by hovering for about 2 seconds. Helper bubbles are enabled by default and can be toggled from Help > Helper Bubbles, and the choice is saved for the next launch.
+
+Workspace And Project Folders
+=============================
+Poor Man's Studio uses a workspace folder. Projects should live under the workspace projects folder.
+
+Recommended project layout:
+
+workspace\
+  projects\
+    Project Name\
+      Project Name.mwproj
+      input\
+        midi\
+        mxl\
+        audio\
+          imported\
+          recorded\
+          temp\
+      output\
+      renders\
+
+Important rules:
+- The .mwproj file stores project metadata only.
+- Large imported or recorded audio files are not embedded in .mwproj.
+- AudioClip files live in the project folder under input\audio.
+- Move or share the whole project folder, not only the .mwproj file.
+- Save/open keeps the project folder name, .mwproj filename, project name, and base name synced.
+- Default project saves go under workspace\projects\Project Name\Project Name.mwproj.
+- Duplicate project names/folders should trigger a warning before overwrite.
+- Start From File checks for unsaved project/editor changes before replacing the current project.
+
+SFZ Pack Layout
+---------------
+Poor Man's Studio supports sidecar SFZ packs. If the selected file is:
+
+workspace\sfz\TheOpenSourceDrumKit-Complete-V1.sfz
+
+then the app also checks this pack root:
+
+workspace\sfz\TheOpenSourceDrumKit-Complete-V1\
+
+The pack root does not need to contain a samples folder. It may contain instrument or category folders directly, such as:
+
+workspace\sfz\TheOpenSourceDrumKit-Complete-V1\Kicks\
+workspace\sfz\TheOpenSourceDrumKit-Complete-V1\Snares\
+workspace\sfz\TheOpenSourceDrumKit-Complete-V1\Cymbals\
+
+Keep the .sfz file and the same-name folder together. The SFZ option list treats Name.sfz plus Name\ as one public pack option, and preflight/render checks sample= and #include paths from that pack root when needed.
+
+Basic Workflow
+==============
+1. Open Poor Man's Studio.
+2. Open an existing project or import MusicXML, MXL, MIDI, or audio.
+3. Review the project, track, and sequence info.
+4. Assign sound libraries to MIDI tracks.
+5. Use Track Manager to organize tracks and sequences.
+6. Use Piano Roll for note editing.
+7. Use Import Audio or Record Audio for AudioClip tracks.
+8. Preview Track, Preview Seq, or Preview Project.
+9. Save the project.
+10. Render the final output.
+
+Track Types
+===========
+
+MIDI Tracks
+-----------
+MIDI tracks contain note events and use SF2, SF3, or SFZ instruments.
+
+Use MIDI tracks for:
+- imported MIDI notes
+- MusicXML/MXL score content
+- Piano Roll editing
+- instrument assignment
+- MIDI export
+
+AudioClip Tracks
+----------------
+AudioClip tracks contain one imported or recorded audio file.
+
+Current rule:
+- 1 imported or recorded audio file = 1 AudioClip
+- 1 AudioClip = 1 AudioClip track
+
+AudioClip tracks use the built-in Custom Audio identity instead of a MIDI/SoundFont/SFZ instrument.
+
+Use AudioClip tracks for:
+- recorded vocals
+- recorded instruments
+- imported loops
+- imported audio references
+- audio takes that need to be placed in a sequence
+
+AudioClip metadata stored in .mwproj includes the clip name, track assignment, sequence assignment, start timing, duration, source type, saved format, relative media path, sample rate, channel count, gain/pan values, and missing-media state.
+
+Import Audio
+============
+Use the Import Audio button to bring existing audio into the project.
+
+Supported import formats:
+- WAV
+- MP3
+- FLAC
+- OGG
+
+Import behavior:
+- The imported file is copied or converted into the current project folder.
+- The project stores a relative media path in .mwproj.
+- The app creates an AudioClip track for the imported file.
+- The AudioClip is assigned to the active sequence and start position.
+- Free space is checked before committing large audio operations.
+
+Saved AudioClip formats:
+- WAV
+- FLAC
+- MP3
+- OGG
+
+Quality behavior:
+- WAV and FLAC are lossless choices.
+- MP3 and OGG use high-quality defaults when selected.
+- Compressed formats save storage space but are not lossless.
+
+Record Audio
+============
+Use Record Audio to create a new AudioClip from a microphone or other input device.
+
+Opening the recorder does not start recording. The recorder window must be opened first, then recording starts only after you choose Record, Record With Delay, or Record Test.
+
+Recorder controls:
+- Input dropdown: choose the detected audio input device. The dropdown choice applies immediately.
+- Refresh Devices: rescan for input devices without changing other recorder settings.
+- Mic Gain: software recording gain inside Poor Man's Studio, adjustable from -24.0 dB to +24.0 dB with - and + buttons and a 0 dB reset.
+- Record: starts recording after a short 0.25 second safety delay.
+- Record Test: runs a fixed 3 second countdown, records a 5 second temporary test sample, plays it back automatically, then deletes the temporary file. It does not create an AudioClip track and has no keep/delete controls.
+- Record With Delay: starts after a selected countdown delay.
+- Delay choices: 3 seconds, 5 seconds, 10 seconds, or Custom.
+- Custom delay: up to 99 seconds, limited to two digits.
+- Pause: pauses recording without writing silent gap audio.
+- Record or Record With Delay while paused: resumes and appends to the same take.
+- Stop: stops capture while keeping the take available to save or discard.
+- Save / Apply: saves the take into the project and creates an AudioClip track.
+- Redo From Top: discards the current temp take and restarts from the original start point.
+- Discard Take: removes the unsaved take and cleans up temp audio.
+- Close: if a take is dirty/unsaved, prompts to Save Take and Close, Discard and Close, or Cancel.
+
+Countdown overlay:
+- The countdown appears centered with a semi-transparent black background and white text.
+- The final countdown state shows GO! instead of 0.
+- Record Test always uses a fixed 3 second countdown before its 5 second temporary capture.
+
+Recording placement:
+- Record and Record With Delay record to the selected AudioClip track context or create a new AudioClip track when saved.
+- Record Test is only a microphone/input check; it never saves into the project.
+- Attaches the take to the active sequence.
+- Places the take at the active sequence start or selected start beat.
+
+Track Manager
+=============
+Track Manager is the main place to organize tracks, sequences, timing, preview actions, and AudioClip tracks. Rendering is kept on the main UI.
+
+Track Manager can be used to:
+- select tracks
+- select sequences
+- add/import tracks to the currently selected sequence
+- change sequence assignment
+- change start beat
+- duplicate tracks or beats
+- preview track, sequence, or project
+- edit sequence thoughts
+- manage AudioClip tracks like normal tracks
+- view the sequence map and overview/View bar
+
+Preview buttons are grouped together:
+- Preview Track
+- Preview Seq
+- Preview Project
+
+AudioClip tracks in Track Manager:
+- appear in the normal track list
+- show Custom Audio as their instrument identity
+- can be selected and previewed like other tracks
+- should be included in sequence/project preview and render
+- can be deleted as tracks while keeping managed media files in the project folder unless later cleanup is requested
+
+Sequence Map And View Bar
+=========================
+The Track Manager sequence map shows the timing layout of sequences and tracks.
+
+Expected behavior:
+- The map should account for MIDI and AudioClip duration.
+- The overview/View bar should scale to the full project/track/sequence extent.
+- The View bar stays plain black by default and does not add per-sequence markers when new sequences are imported.
+- When a sequence is selected/focused, the View bar highlights that sequence at its relative position and length within the full project.
+- Selecting or moving a sequence should repaint the map.
+- Undo actions that affect map state should repaint the map.
+- Maximizing or resizing the Track Manager should recalculate map layout and visible range.
+
+Sequence Thoughts
+=================
+Each sequence can have Thoughts/notes.
+
+Main UI:
+- Thoughts are shown as a read-only viewer.
+
+Track Manager:
+- Use Edit Thoughts to open a multiline editor.
+- OK saves changes.
+- Cancel or window close checks for unsaved edits first.
+- Thoughts save in the sequence notes metadata inside .mwproj.
+
+Active Sequence Picker
+======================
+The main UI Active Seq area is read-only and uses a Chg Seq button. When a track is selected, Chg Seq changes that selected track's sequence assignment and commits the membership immediately so changing away and back to the track retains the new sequence.
+
+Console/log panes can be copied with Ctrl+C after focusing the pane or by right-clicking and choosing Copy Console Text.
+
+Chg Seq opens a scrollable picker:
+- OK applies the selected existing sequence to the selected track when a track is active.
+- Create Blank Seq creates an empty sequence in the picker only; it does not create a blank track.
+- Cancel closes without changes.
+
+Long sequence names should remain readable by using vertical and horizontal scrolling in the picker.
+
+Piano Roll
+==========
+Use the Piano Roll for MIDI note editing.
+
+You can open multiple Piano Roll windows at the same time, with one Piano Roll window per track. Reopening Piano Roll for a track that already has an open roll brings that existing window to the front instead of reloading it, so local unapplied edits are preserved.
+
+Use the Window menu to jump to the main UI, Track Manager, Preview Player, Audio Recorder, Project Info, and open Piano Roll windows. If more than one Piano Roll is open, the Window menu groups them in a Piano Rolls submenu. Piano Roll windows with unsaved note edits or pending track settings show an asterisk in the window title and Window menu entry.
+
+Common controls:
+- The Piano Roll header shows the track name plus the current or pending instrument to the right of the track name.
+- The left pitch labels split octave and note name into separate columns, and sharp/flat-style rows show a small sharp accidental icon.
+- Library shows the sample library assigned to that Piano Roll track and includes the active SF2/SFZ backend in the text.
+- Change Library can choose the selected project SF2/SF3 default, the selected project SFZ default, or a custom SF2/SF3/SFZ file for that track. Click Apply Track Settings to confirm the change.
+- Instrument chooses the track instrument/preset. Click Apply Track Settings to confirm the change.
+- Undo and Redo in the Piano Roll handle note edits and confirmed Piano Roll instrument/library changes. Undo can also discard a pending unconfirmed Piano Roll track-setting selection.
+- Snap controls where notes can start, move, and resize.
+- Note Len controls the default length of newly added notes.
+- Shorter snap/note lengths allow shorter notes inside a beat.
+
+Use Apply Track Settings to confirm pending Piano Roll library and instrument selections. The library text shows whether the pending/current library is SF2 or SFZ. This does not reload the roll and does not discard unsaved note edits. Use Apply Changes to commit note edits from the Piano Roll to the project. Use Save Project to write confirmed track settings and applied note edits to disk.
+
+AudioClip tracks are not Piano Roll note-editing tracks.
+
+Preview Player
+==============
+Preview can be launched for a track, sequence, or project.
+
+Preview behavior:
+- Preview Track renders the selected track.
+- Preview Seq renders the currently active Track Manager sequence.
+- Preview Project renders the full project, not just the selected track.
+- The preview player shows current time and total length.
+- The player Preview button repeats the last preview scope: Piano Roll, selected track, active sequence, or project.
+- The current time field can be edited, then Apply Time jumps playback to a validated time.
+- The Preview Note Map should draw notes from the rendered preview scope and scale to that scope, including AudioClip-only previews.
+- Temporary preview files are cleaned up by the app-owned temp cleanup path.
+
+Sound Libraries For MIDI Tracks
+===============================
+
+Project Defaults
+----------------
+Project Defaults are the starting sound setup for new MIDI tracks. They do not automatically rewrite existing tracks.
+
+Track Sound Library
+-------------------
+Track Sound Library is the actual SF2, SF3, or SFZ file assigned to the selected MIDI track.
+
+Change Library
+--------------
+Change Library changes the selected MIDI track only.
+
+Apply Project Defaults
+----------------------
+Apply Project Defaults commits the current default setup so newly created MIDI tracks use that setup.
+
+AudioClip tracks do not use Change Library or MIDI instrument assignment. They use Custom Audio.
+
+Input Formats
+=============
+Supported input/project formats:
+- .musicxml
+- .xml
+- .mxl
+- .mid
+- .midi
+- .mwproj
+- .wav
+- .mp3
+- .flac
+- .ogg
+
+Output Formats
+==============
+Supported output formats:
+- WAV
+- FLAC
+- MP3
+- OGG
+- MIDI export
+
+Rendering And Export
+====================
+The app can render:
+- full project audio
+- selected track audio
+- selected sequence audio
+- MIDI export
+
+Rendering uses:
+- FluidSynth for SF2/SF3 MIDI tracks
+- sfizz-render for SFZ MIDI tracks
+- FFmpeg for encoding/mixdown and compressed formats
+- AudioClip media files for imported/recorded audio tracks
+
+Parallel Stems:
+- This setting is available from Render Settings and controls how many independent MIDI stem render jobs may run at the same time. It is not a literal CPU-core selector.
+- Auto (safe) chooses a conservative limit from the CPU hardware-thread count, then also limits by the number of eligible independent stems:
+  - 2-3 CPU threads: 1 parallel stem render
+  - 4-7 CPU threads: 2 parallel stem renders
+  - 8-11 CPU threads: 4 parallel stem renders
+  - 12-15 CPU threads: 6 parallel stem renders
+  - 16+ CPU threads: 8 parallel stem renders
+- Manual choices are 1, 2, 4, 6, 8, 12, and 16. Manual 12 or 16 is a hardcore override and should only be used when the computer can handle more simultaneous SoundFont/SFZ render jobs.
+- Independent MIDI stems can render in parallel. The final FFmpeg mix/encode step stays serial.
+- Cancel Render requests cancellation for all active parallel stem renders and terminates FluidSynth/sfizz-render child processes where supported.
+
+Render Settings:
+
+- The Render Settings popout controls which stem files are kept after successful user renders and how many parallel independent stem render jobs may run.
+- Click Render Settings, choose WAV audio stems and/or MIDI stem files, choose Parallel Stems, then click OK. Cancel closes without changing the saved settings.
+- Stem retention is a global setting stored as keepStemFiles=0, 1, 2, or 1,2:
+  - 0: keep no stem files
+  - 1: keep WAV audio stems only
+  - 2: keep MIDI stem files only
+  - 1,2: keep both WAV and MIDI stems
+- Kept stems are organized under the render stem folder as audio/ for WAV files and midi/ for MIDI files.
+- Parallel Stems is a global setting stored as lastRenderWorkerCount=0 for Auto (safe), or as the selected manual count.
+- Preview/temp renders still clean up their generated stems.
+
+Missing Media And Cleanup
+=========================
+The app should warn when AudioClip media is missing.
+
+Temp cleanup should cover:
+- failed imports/conversions
+- canceled recordings
+- discarded takes
+- redo-from-top recording takes
+- app-owned preview/render temp files
+
+Temp cleanup should not delete user-owned media outside the managed app/project temp areas.
+
+Window Headers And Icons
+========================
+Tool windows use a consistent light-gray custom header.
+
+The header shows:
+- the existing window icon artwork
+- the window title
+- blue - for minimize
+- green + for maximize/restore
+- red x for close
+
+The AudioClip Recorder uses a fixed dark microphone icon so it is visible in the title/header area.
+
+
+The Sequence Color window uses a color-wheel icon. Smaller confirmation and picker dialogs may continue using the default app icon.
+
+Helper Bubbles
+==============
+Helper bubbles are enabled by default and appear when hovering over controls for about 2 seconds. Use Help > Helper Bubbles to turn them on or off. The choice is saved as a user preference for the next launch.
+
+They are intended for:
+- buttons
+- dropdowns
+- input fields
+- settings labels
+- recorder controls
+
+They are not intended for:
+- console panes
+- status/timer readouts
+- large read-only info areas
+
+The recorder has helper bubbles for Record, Record With Delay, Pause, Stop, Save / Apply, Redo From Top, Discard Take, Close, Input dropdown, Refresh Devices, and delay controls.
+
+Saving Projects
+===============
+A .mwproj file stores project metadata. Audio files are stored beside the project in the project folder.
+
+To keep a project portable:
+- save it inside workspace\projects\Project Name
+- keep the input/audio folders with the .mwproj
+- move or share the whole Project Name folder
+
+If a project has unsaved changes, close prompts should protect the current work from accidental loss.
+
+Troubleshooting
+===============
+
+No sound from MIDI preview/render:
+- check the selected sound library
+- check FluidSynth or sfizz-render paths
+- check that SFZ pack files are present
+
+No sound from AudioClip preview:
+- confirm the AudioClip track was saved/applied
+- confirm the AudioClip media file exists in the project folder
+- confirm the track/sequence preview includes the AudioClip's sequence and timing
+
+Recorder sees no input device:
+- open the recorder
+- click Refresh Devices
+- check Windows input-device permissions/settings
+- choose a device from the Input dropdown
+
+MP3/FLAC/OGG import or export fails:
+- check workspace\ffmpeg\ffmpeg.exe
+- confirm enough free storage exists on the target drive
+
+Project moved but audio is missing:
+- move the whole project folder, not only the .mwproj file
+- relink or re-import missing media if needed
+
+Window headers
+- Main UI and major tool windows use a compact darker light-gray custom header.
+- Header controls use literal colored buttons: blue -, green +, and red x.
+- The custom header height is 32 px, slightly shorter than the previous custom header but still taller than a default/native title bar.
+- Edit Thoughts uses the note/pencil icon, Track Manager uses the track icon, AudioClip Recorder uses the microphone icon, and Sequence Color uses the color wheel icon.
+
+Window header behavior
+----------------------
+Main UI and primary tool windows use the compact darker light-gray custom header. About and the main UI Chg Seq picker use simple title-barless dialog styling; the Chg Seq picker content remains scrollable for longer sequence lists.

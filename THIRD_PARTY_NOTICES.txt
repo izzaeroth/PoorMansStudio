@@ -1,0 +1,133 @@
+THIRD_PARTY_NOTICES
+Poor Man's Studio
+
+This file lists third-party runtime tools that may be bundled with Poor Man's Studio.
+These tools are launched as separate executables from the workspace folders.
+
+This notice is provided for convenience and is not legal advice.
+
+
+1. FFmpeg
+
+Location in bundle:
+  workspace\ffmpeg\
+
+Typical files:
+  ffmpeg.exe
+  ffprobe.exe (optional)
+  FFmpeg DLL files from the same shared build
+  LICENSE.txt
+
+License:
+  LGPL, for the bundled LGPL shared build.
+
+Build requirement for this bundle:
+  The bundled FFmpeg build should be an LGPL shared build and should be verified with:
+
+    ffmpeg.exe -version
+
+  The configuration line should NOT contain:
+
+    --enable-gpl
+    --enable-nonfree
+
+  The build used for this bundle should keep ffmpeg.exe and all matching DLL files from
+  the same downloaded build together in workspace\ffmpeg\.
+
+Project/source:
+  https://ffmpeg.org/
+  https://github.com/BtbN/FFmpeg-Builds
+
+Notes:
+  Do not replace the LGPL shared FFmpeg files with a GPL or nonfree FFmpeg build unless
+  the package licensing is intentionally updated to match that build.
+
+
+2. FluidSynth
+
+Location in bundle:
+  workspace\fluidsynth\
+
+Typical files:
+  fluidsynth.exe
+  FluidSynth DLL files from the same build, if provided
+  LICENSE-FluidSynth-LGPL.txt
+  FluidSynth_Build_Info.txt
+
+License:
+  GNU Lesser General Public License.
+
+Project/source:
+  https://github.com/FluidSynth/fluidsynth
+  https://www.fluidsynth.org/
+
+Use in Poor Man's Studio:
+  FluidSynth is used as a standalone runtime tool for SF2/SF3 MIDI preview and rendering.
+
+Notes:
+  SoundFonts are separate files with their own licenses. Do not bundle SF2/SF3 files unless
+  their license allows redistribution.
+
+
+3. sfizz / sfizz-render
+
+Location in bundle:
+  workspace\sfizz\
+
+Typical files:
+  bin\Release\sfizz_render.exe
+  DLL files from the same build, if provided
+  LICENSE-sfizz-BSD-2-Clause.txt
+  sfizz_Build_Info.txt
+
+License:
+  BSD 2-Clause.
+
+Project/source:
+  https://github.com/sfztools/sfizz
+  https://github.com/sfztools/sfizz-render
+  https://sfz.tools/sfizz/
+
+Use in Poor Man's Studio:
+  sfizz-render is used as a standalone runtime tool for SFZ preview and rendering.
+
+Notes:
+  SFZ instruments and sample libraries are separate content with their own licenses. Do not
+  bundle SFZ libraries or samples unless their license allows redistribution.
+
+
+4. Instrument libraries and samples
+
+SoundFonts, SFZ libraries, and sample folders are not covered by the tool licenses above.
+Each instrument library must be checked separately before redistribution.
+
+Recommended rule:
+  If the instrument license does not clearly allow redistribution, do not include it in the
+  public Poor Man's Studio bundle.
+
+
+5. Where license files should live
+
+Recommended package layout:
+
+  PoorMansStudio\
+    THIRD_PARTY_NOTICES.txt
+    workspace\
+      ffmpeg\
+        ffmpeg.exe
+        FFmpeg DLLs
+        LICENSE.txt
+        FFmpeg_Build_Info.txt
+
+      fluidsynth\
+        fluidsynth.exe
+        FluidSynth DLLs
+        LICENSE-FluidSynth-LGPL.txt
+        FluidSynth_Build_Info.txt
+
+      sfizz\
+        bin\Release\
+          sfizz_render.exe
+          sfizz DLLs, if any
+        LICENSE-sfizz-BSD-2-Clause.txt
+        sfizz_Build_Info.txt

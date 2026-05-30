@@ -1,0 +1,361 @@
+Poor Man's Studio - SETUP AND BUILD GUIDE
+=========================================
+
+Version
+-------
+v0.56.0
+
+Purpose
+-------
+This guide explains how to set up, build, and run Poor Man's Studio on Windows.
+
+Poor Man's Studio expects a predictable workspace layout. Build tools compile the app. Runtime tools such as FluidSynth, FFmpeg, and sfizz-render are used for previewing, rendering, importing/converting audio, and final output.
+
+Recommended Development Root
+============================
+Recommended development root:
+
+C:\Dev\PoorMansStudio
+
+Expected source layout:
+
+PoorMansStudio\
+  CMakeLists.txt
+  external\
+    JUCE\
+  src\
+  docs\
+    SETUP_AND_BUILD_GUIDE.txt
+    USER_GUIDE.txt
+  resources\
+  workspace\
+
+Workspace Layout
+================
+Runtime workspace:
+
+workspace\
+  input\
+  exports\
+  projects\
+  soundfonts\
+  fluidsynth\
+  ffmpeg\
+  sfz\
+  sfizz\
+  settings\
+  temp\
+  themes\
+
+Project folder layout:
+
+workspace\
+  projects\
+    Project Name\
+      Project Name.mwproj
+      input\
+        midi\
+        mxl\
+        audio\
+          imported\
+          recorded\
+          temp\
+      output\
+      renders\
+
+Important:
+- .mwproj stores metadata only.
+- Imported/recorded audio files live in the project folder.
+- Move/share the whole project folder to keep AudioClips available.
+
+Required Build Tools
+====================
+
+Visual Studio Community
+-----------------------
+Use Visual Studio with the Desktop development with C++ workload.
+
+Recommended components:
+- MSVC C++ build tools
+- Windows 10/11 SDK
+- C++ CMake tools for Windows
+- MSBuild
+
+Recommended terminal:
+- x64 Native Tools Command Prompt for Visual Studio
+
+Verify:
+
+cl
+
+CMake
+-----
+CMake configures and builds the project.
+
+Verify:
+
+cmake --version
+
+JUCE
+----
+JUCE must be present in:
+
+external\JUCE
+
+Expected JUCE contents include:
+
+external\JUCE\CMakeLists.txt
+external\JUCE\modules\
+external\JUCE\extras\
+
+Common JUCE setup errors:
+- JuceHeader.h not found
+- JUCE modules not found
+- juceaide build problems
+
+If those occur, check the external\JUCE folder first.
+
+Required Runtime / Rendering Tools
+==================================
+
+FluidSynth
+----------
+FluidSynth renders MIDI through SF2/SF3 SoundFont libraries.
+
+Expected location:
+
+workspace\fluidsynth\fluidsynth.exe
+
+Used for:
+- SF2/SF3 track preview
+- SF2/SF3 track rendering
+- SoundFont-based stems
+- parallel independent stem renders when Render Settings > Parallel Stems is greater than 1 or Auto (safe) resolves above 1
+
+SF2/SF3 SoundFonts
+------------------
+Place .sf2 and .sf3 files here:
+
+workspace\soundfonts
+
+SoundFonts can be selected in Project Defaults or assigned to individual MIDI tracks with Change Library.
+
+FFmpeg
+------
+FFmpeg is used for audio conversion, encoding, and mixdown.
+
+Expected location:
+
+workspace\ffmpeg\ffmpeg.exe
+
+Used for:
+- WAV/MP3/FLAC/OGG AudioClip conversion/import paths
+- MP3 export
+- FLAC export
+- OGG export
+- mixed stem output
+- final audio encoding
+
+Final FFmpeg mix/encode remains serial even when independent stem rendering uses multiple parallel stem render jobs.
+
+Render Settings > Parallel Stems uses these Auto (safe) tiers before limiting by eligible stem count:
+- 2-3 CPU threads: 1 parallel stem render
+- 4-7 CPU threads: 2 parallel stem renders
+- 8-11 CPU threads: 4 parallel stem renders
+- 12-15 CPU threads: 6 parallel stem renders
+- 16+ CPU threads: 8 parallel stem renders
+
+Manual options are 1, 2, 4, 6, 8, 12, and 16. The 12 and 16 options are hardcore overrides for machines/projects that can handle heavier simultaneous SoundFont/SFZ rendering.
+
+Render Settings controls which successful user-render stem files are retained and how many parallel independent stem render jobs may run. The global settings file uses keepStemFiles=0, 1, 2, or 1,2: 0 keeps none, 1 keeps WAV stems, 2 keeps MIDI stems, and 1,2 keeps both. It uses lastRenderWorkerCount=0 for Auto (safe), or the selected manual Parallel Stems count. Kept files are organized under stems/audio and stems/midi. Preview/temp renders still clean up their stems.
+
+sfizz-render
+------------
+sfizz-render is used for SFZ rendering. SFZ stems can run in parallel when Render Settings > Parallel Stems is greater than 1 or Auto (safe) resolves above 1.
+
+Expected location:
+
+workspace\sfizz\bin\Release\sfizz_render.exe
+
+Depending on the sfizz build, the executable may also be named sfizz-render.exe. The app setup should point to the executable path used by this build.
+
+SFZ Libraries
+-------------
+Place full SFZ libraries here:
+
+workspace\sfz
+
+Two layouts are supported.
+
+Self-contained folder layout:
+
+workspace\sfz\MyInstrument\MyInstrument.sfz
+workspace\sfz\MyInstrument\<instrument or category folders>\
+
+Sidecar pack layout:
+
+workspace\sfz\MyInstrument.sfz
+workspace\sfz\MyInstrument\
+workspace\sfz\MyInstrument\Kicks\
+workspace\sfz\MyInstrument\Snares\
+workspace\sfz\MyInstrument\Cymbals\
+
+For the sidecar layout, the folder name must match the .sfz filename without the extension. The sidecar folder is the pack root; it does not need to contain a samples folder. Instrument or category folders may live directly inside it.
+
+If the same-name sidecar folder is missing, or referenced SFZ pack files are missing from it, SFZ preview/render may be silent or fail.
+
+Workspace Folders
+=================
+
+workspace\input
+---------------
+Suggested staging folder for source files:
+- .musicxml
+- .xml
+- .mxl
+- .mid
+- .midi
+- audio before import
+
+workspace\projects
+-------------------
+Primary folder for saved project folders.
+
+Each project should get a named folder under workspace\projects. The normal save layout is workspace\projects\Project Name\Project Name.mwproj, with that same folder holding the project's input, output, renders, and audio folders. Save/open keeps the folder name, .mwproj filename, project name, and base name in sync.
+
+workspace\exports
+------------------
+General export fallback. After a project is saved, default renders follow that project's renders folder unless the user intentionally selected another export folder and saved that preference.
+
+workspace\soundfonts
+--------------------
+Place .sf2 and .sf3 files here.
+
+workspace\sfz
+--------------
+Place full SFZ libraries here.
+
+workspace\ffmpeg
+----------------
+Place ffmpeg.exe here.
+
+workspace\fluidsynth
+--------------------
+Place fluidsynth.exe here.
+
+workspace\sfizz
+----------------
+Place sfizz-render or sfizz_render here.
+
+workspace\settings
+------------------
+App preferences/settings live here.
+
+workspace\temp
+---------------
+App-owned temporary preview/render files live here. The app should clean only its own temp files.
+
+Build Steps
+===========
+From the development root:
+
+cmake -S . -B builds
+cmake --build builds --config Release
+
+The exact Visual Studio generator can also be specified if needed:
+
+cmake -S . -B builds -G "Visual Studio 18 2026" -A x64
+cmake --build builds --config Release
+
+Runtime Setup Checklist
+=======================
+Before running a full preview/render workflow, confirm:
+
+- external\JUCE exists for building.
+- workspace\fluidsynth\fluidsynth.exe exists for SF2/SF3.
+- workspace\ffmpeg\ffmpeg.exe exists for MP3/FLAC/OGG and mixdown.
+- workspace\sfizz\bin\Release\sfizz_render.exe exists for SFZ.
+- workspace\soundfonts contains at least one useful SF2/SF3.
+- workspace\sfz contains full SFZ library folders if using SFZ.
+- workspace\projects exists for project folders.
+
+AudioClip Setup Notes
+=====================
+AudioClip support uses the workspace/project folder system.
+
+Imported audio:
+- Supported import formats: WAV, MP3, FLAC, OGG.
+- Imported media is copied/converted into the project folder.
+- The .mwproj stores project-relative paths.
+
+Recorded audio:
+- The recorder uses system input devices detected through JUCE/audio device support.
+- The Input dropdown in the recorder applies immediately.
+- Refresh Devices rescans inputs without resetting unrelated recorder state.
+- Recording writes temp take files first.
+- Save / Apply commits the take to the project and creates an AudioClip track.
+- Discard, Redo From Top, and canceled closes should remove temp take files.
+
+Storage:
+- The app should check free space before large import/conversion/recording operations.
+- WAV and FLAC are lossless but can be large.
+- MP3 and OGG are compressed and use high-quality defaults when selected.
+
+Building Without external\JUCE
+==============================
+The source bundle does not include JUCE.
+
+If external\JUCE is missing, CMake/build will fail. This is expected for source-only packages that rely on a separately installed JUCE checkout.
+
+Troubleshooting
+===============
+
+JUCE configure errors:
+- Check external\JUCE exists.
+- Check external\JUCE\modules exists.
+- Re-run CMake from a clean builds folder if the path changed.
+
+FluidSynth render is silent or fails:
+- Check workspace\fluidsynth\fluidsynth.exe.
+- Check the selected SF2/SF3 file.
+- Confirm MIDI track instrument assignment is not empty.
+
+SFZ render is silent or fails:
+- Check workspace\sfizz\bin\Release\sfizz_render.exe.
+- Check full SFZ folders and sample paths.
+
+MP3/FLAC/OGG import/export fails:
+- Check workspace\ffmpeg\ffmpeg.exe.
+- Check available storage space.
+- Check that the source file can be decoded by FFmpeg.
+
+Recorder does not see input devices:
+- Open the recorder.
+- Click Refresh Devices.
+- Confirm the device appears in Windows sound settings.
+- Confirm the app has microphone/input permission.
+
+AudioClip preview is silent but render has audio:
+- Confirm the AudioClip media path resolves inside the project folder.
+- Confirm the AudioClip track is assigned to the previewed sequence/time range.
+- Confirm the preview map/length includes the AudioClip duration.
+
+Project moved and AudioClips are missing:
+- Move the whole workspace\projects\Project Name folder, not only the .mwproj.
+
+
+Window header note
+------------------
+Tool windows use custom JUCE title/header drawing. They intentionally use a light-gray header with colored - / + / x controls and the current window icon. This is app UI code only and does not require extra external assets beyond the existing app resources.
+
+Window headers
+- Main UI and major tool windows use a compact darker light-gray custom header.
+- Header controls use literal colored buttons: blue -, green +, and red x.
+- The custom header height is 32 px, slightly shorter than the previous custom header but still taller than a default/native title bar.
+- Edit Thoughts uses the note/pencil icon, Track Manager uses the track icon, AudioClip Recorder uses the microphone icon, and Sequence Color uses the color wheel icon.
+
+
+
+Window header behavior
+----------------------
+Main UI and primary tool windows use the compact darker light-gray custom header. About and the main UI Chg Seq picker use simple title-barless dialog styling; the Chg Seq picker content remains scrollable for longer sequence lists.
