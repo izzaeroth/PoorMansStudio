@@ -476,7 +476,7 @@ namespace
             title.setJustificationType(juce::Justification::centredLeft);
             addAndMakeVisible(title);
 
-            preferredGpuLabel.setText("Preferred Plugin UI GPU:", juce::dontSendNotification);
+            preferredGpuLabel.setText("VST Plugin Graphics Adapter:", juce::dontSendNotification);
             preferredGpuLabel.setJustificationType(juce::Justification::centredLeft);
             addAndMakeVisible(preferredGpuLabel);
 
@@ -518,7 +518,7 @@ namespace
 
             safeModeToggle.setButtonText("Safe Plugin UI Mode");
             safeModeToggle.setToggleState(safeMode, juce::dontSendNotification);
-            safeModeToggle.setTooltip("Open VST plugin editors more conservatively. VST editors are edit/control surfaces; Piano Roll Preview renders note playback using the current plugin state.");
+            safeModeToggle.setTooltip("Safe Plugin UI Mode opens VST plugin editors in a more cautious way to reduce crashes or unstable behavior. Plugin windows may open a little slower or with reduced UI behavior. Recommended if a plugin editor is having display issues.");
             safeModeToggle.onClick = [this]
             {
                 safeMode = safeModeToggle.getToggleState();
@@ -528,7 +528,7 @@ namespace
             };
             addAndMakeVisible(safeModeToggle);
 
-            refreshButton.setButtonText("Refresh Graphics Detection");
+            refreshButton.setButtonText("Refresh Adapter List");
             refreshButton.onClick = [this]
             {
                 if (onRefreshRequested)
@@ -542,12 +542,22 @@ namespace
             details.setFont(juce::FontOptions(16.0f));
             addAndMakeVisible(details);
 
-            help.setText("GPU preference is a compatibility hint for warnings and host-created UI paths. Individual plugins may still choose their own graphics device internally.", juce::dontSendNotification);
+            help.setText("System Default / Auto lets Windows and the plugin decide. Adapter choices are a preference for VST plugin editor windows, not a guarantee.", juce::dontSendNotification);
             help.setJustificationType(juce::Justification::centredLeft);
             help.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
             addAndMakeVisible(help);
 
+            helperTooltipWindow = std::make_unique<mw::gui::FreshHoverTooltipWindow>(this, 2000);
+            helperTooltipWindow->setLookAndFeel(&helperTooltipLookAndFeel);
+
             setGraphicsProfile(profile);
+        }
+
+        ~VstSettingsContent() override
+        {
+            if (helperTooltipWindow != nullptr)
+                helperTooltipWindow->setLookAndFeel(nullptr);
+            helperTooltipWindow.reset();
         }
 
         void setGraphicsProfile(const mw::vst::GraphicsProfile& newProfile)
@@ -588,19 +598,31 @@ namespace
     private:
         juce::String adapterDisplayName(const mw::vst::GraphicsAdapterInfo& adapter) const
         {
-            juce::String text(adapter.name);
-            juce::StringArray tags;
-            if (!adapter.vendor.empty())
-                tags.add(adapter.vendor);
-            if (!adapter.type.empty())
-                tags.add(adapter.type);
-            if (adapter.dedicatedVideoMemoryMb > 0)
-                tags.add(juce::String(static_cast<long long>(adapter.dedicatedVideoMemoryMb)) + " MB VRAM");
+            juce::String prefix = "Hardware";
+            if (adapter.type == "Software")
+                prefix = "Software";
+            else if (adapter.type == "Hardware")
+                prefix = "Hardware";
+            else if (!adapter.type.empty())
+                prefix = adapter.type;
 
-            if (!tags.isEmpty())
-                text << " (" << tags.joinIntoString(", ") << ")";
-
+            juce::String text;
+            text << prefix << ": " << juce::String(adapter.name.empty() ? "Unknown graphics adapter" : adapter.name);
             return text;
+        }
+
+        juce::String selectedAdapterDisplayName() const
+        {
+            if (profile.preferredPluginGpuId.empty() || profile.preferredPluginGpuId == "auto")
+                return "System Default / Auto";
+
+            for (const auto& adapter : profile.adapters)
+            {
+                if (!adapter.id.empty() && adapter.id == profile.preferredPluginGpuId)
+                    return adapterDisplayName(adapter);
+            }
+
+            return juce::String(profile.preferredPluginGpuId);
         }
 
         void rebuildGpuCombo()
@@ -609,7 +631,7 @@ namespace
             gpuIds.clear();
 
             gpuIds.push_back("auto");
-            preferredGpuCombo.addItem("Auto / System Default", 1);
+            preferredGpuCombo.addItem("System Default / Auto", 1);
 
             int selectedId = 1;
             for (int i = 0; i < static_cast<int>(profile.adapters.size()); ++i)
@@ -638,29 +660,34 @@ namespace
             text << "Safe Plugin UI Mode: " << (safeMode ? "On" : "Off") << "\n";
             text << "Warning style: " << (warningStyle == 2 ? "Conservative" : (warningStyle == 3 ? "Minimal" : "Auto")) << "\n";
             text << "Maximum open VST plugin windows: " << maxOpenPluginWindows << " (hard cap " << kHardMaxOpenVstPluginWindows << ")\n\n";
-            text << "Graphics profile: " << (profile.detected ? "Detected" : "Not detected") << "\n";
+            text << "Graphics adapter list: " << (profile.detected ? "Detected" : "Not detected") << "\n";
             text << "Source: " << profile.source << "\n";
             text << "Last detected: " << profile.lastDetectedLocal << "\n";
-            text << "Preferred Plugin UI GPU: " << (profile.preferredPluginGpuId.empty() ? "auto" : profile.preferredPluginGpuId) << "\n";
+            text << "Selected VST plugin graphics adapter: " << selectedAdapterDisplayName() << "\n";
             text << "Summary: " << profile.summary() << "\n\n";
             text << "Detected adapters:\n";
 
             if (profile.adapters.empty())
             {
-                text << "  No GPU profile detected yet. Use Refresh Graphics Detection.\n";
+                text << "  No graphics adapter list detected yet. Use Refresh Adapter List.\n";
             }
             else
             {
                 for (const auto& adapter : profile.adapters)
                 {
                     text << "  - " << adapterDisplayName(adapter) << "\n";
+                    if (!adapter.id.empty() && !profile.preferredPluginGpuId.empty() && profile.preferredPluginGpuId != "auto" && adapter.id == profile.preferredPluginGpuId)
+                        text << "    Selected: yes\n";
+                    if (!adapter.vendor.empty())
+                        text << "    Vendor: " << juce::String(adapter.vendor) << "\n";
+                    text << "    DXGI video memory: " << juce::String(static_cast<long long>(adapter.videoMemoryMb)) << " MB\n";
                     if (!adapter.id.empty())
                         text << "    ID: " << adapter.id << "\n";
                 }
             }
 
             text << "\nUse Help > VST Plugin Compatibility Warnings to toggle warning popups.\n";
-            text << "Compatibility warnings are non-blocking.\n";
+            text << "Compatibility warnings are non-blocking. Adapter selection is a preference for VST plugin editor windows; some plugins, drivers, or Windows settings may still choose a different rendering path.\n";
             details.setText(text, juce::dontSendNotification);
         }
 
@@ -679,6 +706,8 @@ namespace
         juce::TextButton refreshButton;
         juce::Label help;
         juce::TextEditor details;
+        mw::gui::HelperTooltipLookAndFeel helperTooltipLookAndFeel;
+        std::unique_ptr<juce::TooltipWindow> helperTooltipWindow;
     };
 
     std::int64_t audioClipEndTickForTempo(const mw::core::AudioClip& clip, double tempoBpm)
@@ -5133,8 +5162,6 @@ namespace mw::gui
         void stripVstRuntimeState(mw::core::InstrumentAssignment& assignment)
         {
             assignment.vst3.stateBase64.clear();
-            assignment.vst3.stateHistoryBase64.clear();
-            assignment.vst3.stateRedoBase64.clear();
         }
 
         mw::core::InstrumentAssignment makeUndoSafeInstrumentAssignment(mw::core::InstrumentAssignment assignment)
@@ -6060,7 +6087,7 @@ namespace mw::gui
                 menu.addItem(menuVstScan, "Scan VST3 Plugins");
                 menu.addItem(menuVstPluginManager, "VST3 Plugin Manager...");
                 menu.addItem(menuVstSettings, "VST3 Settings...");
-                menu.addItem(menuVstRefreshGraphics, "Refresh Graphics Detection");
+                menu.addItem(menuVstRefreshGraphics, "Refresh Adapter List");
                 menu.addSeparator();
                 menu.addItem(menuVstOpenSelectedTrackUi, "Open Selected Track VST Plugin", selectedTrackHasAppliedVstPlugin());
                 menu.addItem(menuVstCloseAllWindows, "Close All VST Plugin Windows");
@@ -7251,7 +7278,7 @@ namespace mw::gui
         });
 
         if (!firstLaunchAutoDetect)
-            logMessage("VST graphics profile refreshed: " + juce::String(vstGraphicsProfile.summary()));
+            logMessage("VST graphics adapter list refreshed: " + juce::String(vstGraphicsProfile.summary()));
     }
 
     void MainComponent::scanVstPlugins(bool showSummary)
@@ -8246,9 +8273,9 @@ namespace mw::gui
                     { "vstGraphicsProfileLastDetected", vstGraphicsProfile.lastDetectedLocal },
                     { "vstGraphicsProfileSummary", vstGraphicsProfile.summary() }
                 }))
-                logMessage("ERROR: Failed to save preferred VST plugin GPU preference.");
+                logMessage("ERROR: Failed to save VST plugin graphics adapter preference.");
             else
-                logMessage("Preferred VST plugin UI GPU set to: " + juce::String(vstGraphicsProfile.preferredPluginGpuId));
+                logMessage("VST plugin graphics adapter set to: " + juce::String(vstGraphicsProfile.preferredPluginGpuId));
 
             if (content != nullptr)
                 content->setGraphicsProfile(vstGraphicsProfile);
@@ -9161,18 +9188,9 @@ namespace mw::gui
                 if (assignment.backendType != mw::core::SampleBackendType::VST3)
                     return false;
 
-                const auto newState = stateBase64.toStdString();
-                const auto previousState = assignment.vst3.stateBase64;
-                const bool stateChanged = previousState != newState;
-                const bool clearedLegacyHistory = !assignment.vst3.stateHistoryBase64.empty()
-                    || !assignment.vst3.stateRedoBase64.empty();
-
-                // Apply-and-go only. Do not keep a host-side plugin state undo/redo stack;
-                // restoring older native plugin blobs in-process can leave some plugins in
-                // a fragile or stale state before the next note preview/render.
-                assignment.vst3.stateBase64 = newState;
-                assignment.vst3.stateHistoryBase64.clear();
-                assignment.vst3.stateRedoBase64.clear();
+                // Apply-and-go only. Store the latest applied plugin state as the
+                // single source of truth for preview, render, and project save.
+                assignment.vst3.stateBase64 = stateBase64.toStdString();
 
                 editedTrack.setInstrumentAssignment(assignment);
 
@@ -9185,7 +9203,6 @@ namespace mw::gui
                 refreshTrackManagerText();
                 recordExternalTrackStateUpdate(index);
 
-                juce::ignoreUnused(stateChanged, clearedLegacyHistory);
                 setProjectDirty();
 
                 logMessage("Applied plugin UI changes for " + getTrackDisplayName(index) + ". Cleared old preview audio so the next preview/render rebuilds from the latest applied state.");

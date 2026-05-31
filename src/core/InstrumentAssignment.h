@@ -1,7 +1,6 @@
 #pragma once
 #include <filesystem>
 #include <string>
-#include <vector>
 
 namespace mw::core
 {
@@ -35,10 +34,6 @@ namespace mw::core
         std::string category;
         std::string uid;
         std::string stateBase64;
-        // Legacy state-history fields are kept for project-file compatibility only.
-        // The plugin editor now uses apply-and-go state capture and clears these values.
-        std::vector<std::string> stateHistoryBase64;
-        std::vector<std::string> stateRedoBase64;
         bool bypassed = false;
         bool compatibilityWarningSeen = false;
         std::string compatibilitySummary;

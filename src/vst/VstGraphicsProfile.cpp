@@ -65,15 +65,9 @@ namespace
         }
     }
 
-    std::string adapterTypeFromVendorAndMemory(const std::string& vendor, unsigned long long dedicatedMb)
+    std::string adapterTypeFromDxgiFlags(unsigned int flags)
     {
-        if (vendor == "Microsoft")
-            return "software/basic-renderer";
-        if (vendor == "Intel" && dedicatedMb < 512)
-            return "integrated";
-        if (dedicatedMb >= 1024)
-            return "dedicated";
-        return "unknown";
+        return (flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0 ? "Software" : "Hardware";
     }
 #endif
 }
@@ -104,20 +98,17 @@ namespace mw::vst
                 DXGI_ADAPTER_DESC1 desc{};
                 if (SUCCEEDED(adapter->GetDesc1(&desc)))
                 {
-                    if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0 || profile.adapters.empty())
-                    {
-                        GraphicsAdapterInfo info;
-                        info.name = wideToUtf8(desc.Description);
-                        info.vendor = vendorFromId(desc.VendorId);
-                        info.dedicatedVideoMemoryMb = static_cast<unsigned long long>(desc.DedicatedVideoMemory / (1024ull * 1024ull));
-                        info.type = adapterTypeFromVendorAndMemory(info.vendor, info.dedicatedVideoMemoryMb);
+                    GraphicsAdapterInfo info;
+                    info.name = wideToUtf8(desc.Description);
+                    info.vendor = vendorFromId(desc.VendorId);
+                    info.videoMemoryMb = static_cast<unsigned long long>(desc.DedicatedVideoMemory / (1024ull * 1024ull));
+                    info.type = adapterTypeFromDxgiFlags(desc.Flags);
 
-                        std::ostringstream id;
-                        id << info.vendor << "-" << std::hex << desc.DeviceId << "-" << desc.SubSysId << "-" << desc.Revision;
-                        info.id = id.str();
+                    std::ostringstream id;
+                    id << info.vendor << "-" << std::hex << desc.DeviceId << "-" << desc.SubSysId << "-" << desc.Revision;
+                    info.id = id.str();
 
-                        profile.adapters.push_back(std::move(info));
-                    }
+                    profile.adapters.push_back(std::move(info));
                 }
 
                 adapter->Release();
@@ -133,7 +124,7 @@ namespace mw::vst
         info.name = "Unknown graphics adapter";
         info.vendor = "Unknown";
         info.id = "unknown";
-        info.type = "unknown";
+        info.type = "Hardware";
         profile.adapters.push_back(std::move(info));
         profile.monitorCount = 1;
 #endif
@@ -144,7 +135,7 @@ namespace mw::vst
             info.name = "Unknown graphics adapter";
             info.vendor = "Unknown";
             info.id = "unknown";
-            info.type = "unknown";
+            info.type = "Hardware";
             profile.adapters.push_back(std::move(info));
         }
 

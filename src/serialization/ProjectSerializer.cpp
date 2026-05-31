@@ -526,9 +526,6 @@ namespace mw::serialization
             auto serializedVst3 = instrument.vst3;
             if (instrument.backendType != mw::core::SampleBackendType::VST3)
                 serializedVst3 = {};
-            serializedVst3.stateHistoryBase64.clear();
-            serializedVst3.stateRedoBase64.clear();
-
             file << "    {\n";
             file << "      \"name\": \"" << escapeJsonString(t.getName()) << "\",\n";
             file << "      \"trackType\": \"" << escapeJsonString(mw::core::trackTypeToString(t.getTrackType())) << "\",\n";
@@ -545,9 +542,7 @@ namespace mw::serialization
             file << "        \"originalImportedName\": \"" << escapeJsonString(instrument.originalImportedName) << "\",\n";
             file << "        \"normalizedName\": \"" << escapeJsonString(instrument.normalizedName) << "\",\n";
             file << "        \"backendType\": \"" << mw::core::sampleBackendTypeToString(instrument.backendType) << "\",\n";
-            file << "        \"soundLibraryType\": \"" << mw::core::sampleBackendTypeToString(instrument.backendType) << "\",\n";
             file << "        \"sampleLibraryPath\": \"" << escapeJsonString(instrument.sampleLibraryPath.string()) << "\",\n";
-            file << "        \"soundLibraryPath\": \"" << escapeJsonString(instrument.sampleLibraryPath.string()) << "\",\n";
             file << "        \"sampleLibraryDisplayName\": \"" << escapeJsonString(instrument.sampleLibraryDisplayName.empty() ? instrument.sampleLibraryPath.filename().string() : instrument.sampleLibraryDisplayName) << "\",\n";
             file << "        \"midiChannel\": " << instrument.midiChannel << ",\n";
             file << "        \"midiBank\": " << instrument.midiBank << ",\n";
@@ -564,22 +559,6 @@ namespace mw::serialization
             file << "          \"category\": \"" << escapeJsonString(serializedVst3.category) << "\",\n";
             file << "          \"uid\": \"" << escapeJsonString(serializedVst3.uid) << "\",\n";
             file << "          \"stateBase64\": \"" << escapeJsonString(serializedVst3.stateBase64) << "\",\n";
-            file << "          \"stateHistoryBase64\": [";
-            for (std::size_t h = 0; h < serializedVst3.stateHistoryBase64.size(); ++h)
-            {
-                if (h > 0)
-                    file << ", ";
-                file << "\"" << escapeJsonString(serializedVst3.stateHistoryBase64[h]) << "\"";
-            }
-            file << "],\n";
-            file << "          \"stateRedoBase64\": [";
-            for (std::size_t h = 0; h < serializedVst3.stateRedoBase64.size(); ++h)
-            {
-                if (h > 0)
-                    file << ", ";
-                file << "\"" << escapeJsonString(serializedVst3.stateRedoBase64[h]) << "\"";
-            }
-            file << "],\n";
             file << "          \"bypassed\": " << (serializedVst3.bypassed ? "true" : "false") << ",\n";
             file << "          \"compatibilityWarningSeen\": " << (serializedVst3.compatibilityWarningSeen ? "true" : "false") << ",\n";
             file << "          \"compatibilitySummary\": \"" << escapeJsonString(serializedVst3.compatibilitySummary) << "\"\n";
@@ -767,8 +746,8 @@ namespace mw::serialization
                 instrument.displayName = getString(instrumentObject, "displayName", track.getName());
                 instrument.originalImportedName = getString(instrumentObject, "originalImportedName", track.getName());
                 instrument.normalizedName = getString(instrumentObject, "normalizedName", instrument.displayName);
-                instrument.backendType = backendFromString(getString(instrumentObject, "backendType", getString(instrumentObject, "soundLibraryType", "None")));
-                instrument.sampleLibraryPath = getString(instrumentObject, "sampleLibraryPath", getString(instrumentObject, "soundLibraryPath"));
+                instrument.backendType = backendFromString(getString(instrumentObject, "backendType", "None"));
+                instrument.sampleLibraryPath = getString(instrumentObject, "sampleLibraryPath");
                 instrument.sampleLibraryDisplayName = getString(instrumentObject, "sampleLibraryDisplayName", instrument.sampleLibraryPath.filename().string());
                 instrument.midiChannel = getInt(instrumentObject, "midiChannel", 1);
                 instrument.midiBank = getInt(instrumentObject, "midiBank", 0);
@@ -788,10 +767,6 @@ namespace mw::serialization
                     instrument.vst3.category = getString(vstObject, "category");
                     instrument.vst3.uid = getString(vstObject, "uid");
                     instrument.vst3.stateBase64 = getString(vstObject, "stateBase64");
-                    // Older project files may contain editor Revert/Redo history. Ignore it
-                    // now so only the current applied VST state is restored.
-                    instrument.vst3.stateHistoryBase64.clear();
-                    instrument.vst3.stateRedoBase64.clear();
                     instrument.vst3.bypassed = getBool(vstObject, "bypassed", false);
                     instrument.vst3.compatibilityWarningSeen = getBool(vstObject, "compatibilityWarningSeen", false);
                     instrument.vst3.compatibilitySummary = getString(vstObject, "compatibilitySummary");

@@ -137,7 +137,7 @@ namespace mw::vst
         std::string vendor;
         std::string id;
         std::string type;
-        unsigned long long dedicatedVideoMemoryMb = 0;
+        unsigned long long videoMemoryMb = 0;
     };
 
     struct GraphicsProfile
@@ -151,10 +151,6 @@ namespace mw::vst
         std::string preferredPluginGpuId = "auto";
 
         bool hasMultipleGpus() const { return adapters.size() > 1; }
-        bool hasIntel() const;
-        bool hasNvidia() const;
-        bool hasAmd() const;
-        bool hasHybridGpu() const;
         std::string summary() const;
     };
 

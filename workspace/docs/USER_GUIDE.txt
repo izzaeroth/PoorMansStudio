@@ -145,7 +145,7 @@ Important VST3 rules:
 - Use Apply Track Settings to commit per-track VST3 plugin changes.
 - Use Open VST Plugin to open the selected track's applied VST3 editor.
 - One VST plugin editor window is allowed per track.
-- VST3 Settings controls Safe Plugin UI Mode, preferred plugin UI GPU, and maximum open plugin windows.
+- VST3 Settings controls Safe Plugin UI Mode, VST Plugin Graphics Adapter, and maximum open plugin windows.
 - Effects, MIDI tools, and unsupported plugins are not shown as track instruments unless manually enabled in Plugin Manager.
 - Unknown plugins are hidden by default. Enable them only when you know they accept MIDI notes and produce audio.
 
@@ -169,7 +169,7 @@ VST3 Settings And Plugin Windows
 VST3 Settings includes:
 
 - Safe Plugin UI Mode.
-- Preferred Plugin UI GPU. Saved GPU preferences are checked on startup/open so the selected adapter appears without requiring manual Refresh.
+- VST Plugin Graphics Adapter. System Default / Auto lets Windows and the plugin choose. Detected adapters are listed as Hardware or Software when Windows reports that information; Poor Man's Studio does not guess whether an adapter is integrated or dedicated. Use Refresh Adapter List when hardware, drivers, monitors, or external GPUs change.
 - Maximum open VST plugin windows, default 4, hard safety cap 12.
 - Compatibility warning controls.
 

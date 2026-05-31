@@ -507,6 +507,8 @@ The VST3 feature is experimental and hosted in-process. Save projects before tes
 
 Use the in-app Help menu to open the guides when running the app.
 
-### VST3 Graphics Preference Startup Check
+### VST Plugin Graphics Adapter
 
-The VST3 Settings window remembers the preferred plugin UI GPU in the user preferences file. If a specific GPU was saved, the app checks for that adapter on startup or before opening VST3 Settings so the dropdown is populated instead of falling back to a generic-only list. If the saved adapter is not present, the UI falls back to Auto / System Default. Use **Refresh Graphics Detection** when hardware, drivers, monitors, or external GPUs change and you want the full list rebuilt.
+Poor Man's Studio can list the graphics adapters reported by Windows for VST plugin editor windows. The default choice is **System Default / Auto**, which lets Windows and the plugin choose the rendering path.
+
+If multiple adapters are available, you may choose one manually. Adapters are labeled as **Hardware** or **Software** when that information is available. Poor Man's Studio does not classify adapters as integrated or dedicated, and it does not use video memory size to make that decision. Use **Refresh Adapter List** when hardware, drivers, monitors, or external GPUs change and you want the adapter list rebuilt.
