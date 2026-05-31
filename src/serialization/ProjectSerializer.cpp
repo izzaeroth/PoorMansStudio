@@ -310,6 +310,58 @@ namespace
         return values;
     }
 
+
+    std::vector<std::string> getStringArray(const std::string& text, const std::string& key)
+    {
+        std::vector<std::string> values;
+        const auto array = extractArray(text, key);
+
+        if (array.empty())
+            return values;
+
+        std::size_t pos = 0;
+        while ((pos = array.find('"', pos)) != std::string::npos)
+        {
+            std::string value;
+            bool escaping = false;
+            bool foundEnd = false;
+
+            for (std::size_t i = pos + 1; i < array.size(); ++i)
+            {
+                const char c = array[i];
+
+                if (escaping)
+                {
+                    value += '\\';
+                    value += c;
+                    escaping = false;
+                    continue;
+                }
+
+                if (c == '\\')
+                {
+                    escaping = true;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    values.push_back(unescapeJsonString(value));
+                    pos = i + 1;
+                    foundEnd = true;
+                    break;
+                }
+
+                value += c;
+            }
+
+            if (!foundEnd)
+                break;
+        }
+
+        return values;
+    }
+
     bool getBool(const std::string& text, const std::string& key, bool fallback = false)
     {
         const auto pattern = "\"" + key + "\":";
@@ -331,6 +383,7 @@ namespace
         if (value == "SF2") return mw::core::SampleBackendType::SF2;
         if (value == "SFZ") return mw::core::SampleBackendType::SFZ;
         if (value == "WAV") return mw::core::SampleBackendType::WAV;
+        if (value == "VST3") return mw::core::SampleBackendType::VST3;
         return mw::core::SampleBackendType::None;
     }
 
@@ -368,6 +421,13 @@ namespace mw::serialization
         writeStringField(file, "projectDefaultSFZPath", settings.sfzPath.string());
         writeStringField(file, "projectDefaultSFZName", settings.sfzPath.filename().string());
         writeStringField(file, "sfizzRenderPath", settings.sfizzRenderPath.string());
+        writeStringField(file, "projectDefaultVST3Path", settings.vst3PluginPath.string());
+        writeStringField(file, "projectDefaultVST3Name", settings.vst3PluginName);
+        writeStringField(file, "projectDefaultVST3Vendor", settings.vst3PluginVendor);
+        writeStringField(file, "projectDefaultVST3Version", settings.vst3PluginVersion);
+        writeStringField(file, "projectDefaultVST3Category", settings.vst3PluginCategory);
+        writeStringField(file, "projectDefaultVST3Uid", settings.vst3PluginUid);
+        writeStringField(file, "projectDefaultVST3Compatibility", settings.vst3PluginCompatibilitySummary);
         writeStringField(file, "baseFileName", settings.baseFileName);
         writeStringField(file, "metadataTitle", settings.metadataTitle);
         writeStringField(file, "metadataArtist", settings.metadataArtist);
@@ -463,6 +523,11 @@ namespace mw::serialization
             const auto& t = tracks[i];
             const auto& instrument = t.getInstrument();
             const auto& mixer = t.getMixerSettings();
+            auto serializedVst3 = instrument.vst3;
+            if (instrument.backendType != mw::core::SampleBackendType::VST3)
+                serializedVst3 = {};
+            serializedVst3.stateHistoryBase64.clear();
+            serializedVst3.stateRedoBase64.clear();
 
             file << "    {\n";
             file << "      \"name\": \"" << escapeJsonString(t.getName()) << "\",\n";
@@ -490,7 +555,35 @@ namespace mw::serialization
             file << "        \"presetName\": \"" << escapeJsonString(instrument.presetName) << "\",\n";
             file << "        \"articulationMap\": \"" << escapeJsonString(instrument.articulationMap) << "\",\n";
             file << "        \"wasAutoMatched\": " << (instrument.wasAutoMatched ? "true" : "false") << ",\n";
-            file << "        \"matchConfidence\": " << instrument.matchConfidence << "\n";
+            file << "        \"matchConfidence\": " << instrument.matchConfidence << ",\n";
+            file << "        \"vst3\": {\n";
+            file << "          \"bundlePath\": \"" << escapeJsonString(serializedVst3.bundlePath.string()) << "\",\n";
+            file << "          \"name\": \"" << escapeJsonString(serializedVst3.name) << "\",\n";
+            file << "          \"vendor\": \"" << escapeJsonString(serializedVst3.vendor) << "\",\n";
+            file << "          \"version\": \"" << escapeJsonString(serializedVst3.version) << "\",\n";
+            file << "          \"category\": \"" << escapeJsonString(serializedVst3.category) << "\",\n";
+            file << "          \"uid\": \"" << escapeJsonString(serializedVst3.uid) << "\",\n";
+            file << "          \"stateBase64\": \"" << escapeJsonString(serializedVst3.stateBase64) << "\",\n";
+            file << "          \"stateHistoryBase64\": [";
+            for (std::size_t h = 0; h < serializedVst3.stateHistoryBase64.size(); ++h)
+            {
+                if (h > 0)
+                    file << ", ";
+                file << "\"" << escapeJsonString(serializedVst3.stateHistoryBase64[h]) << "\"";
+            }
+            file << "],\n";
+            file << "          \"stateRedoBase64\": [";
+            for (std::size_t h = 0; h < serializedVst3.stateRedoBase64.size(); ++h)
+            {
+                if (h > 0)
+                    file << ", ";
+                file << "\"" << escapeJsonString(serializedVst3.stateRedoBase64[h]) << "\"";
+            }
+            file << "],\n";
+            file << "          \"bypassed\": " << (serializedVst3.bypassed ? "true" : "false") << ",\n";
+            file << "          \"compatibilityWarningSeen\": " << (serializedVst3.compatibilityWarningSeen ? "true" : "false") << ",\n";
+            file << "          \"compatibilitySummary\": \"" << escapeJsonString(serializedVst3.compatibilitySummary) << "\"\n";
+            file << "        }\n";
             file << "      },\n";
             file << "      \"notes\": [\n";
 
@@ -551,6 +644,13 @@ namespace mw::serialization
             settings.ffmpegPath = getString(settingsObject, "ffmpegPath");
             settings.sfzPath = getString(settingsObject, "sfzPath", getString(settingsObject, "projectDefaultSFZPath"));
             settings.sfizzRenderPath = getString(settingsObject, "sfizzRenderPath");
+            settings.vst3PluginPath = getString(settingsObject, "projectDefaultVST3Path");
+            settings.vst3PluginName = getString(settingsObject, "projectDefaultVST3Name");
+            settings.vst3PluginVendor = getString(settingsObject, "projectDefaultVST3Vendor");
+            settings.vst3PluginVersion = getString(settingsObject, "projectDefaultVST3Version");
+            settings.vst3PluginCategory = getString(settingsObject, "projectDefaultVST3Category");
+            settings.vst3PluginUid = getString(settingsObject, "projectDefaultVST3Uid");
+            settings.vst3PluginCompatibilitySummary = getString(settingsObject, "projectDefaultVST3Compatibility");
             settings.baseFileName = getString(settingsObject, "baseFileName", project.getName());
             settings.metadataTitle = getString(settingsObject, "metadataTitle");
             settings.metadataArtist = getString(settingsObject, "metadataArtist");
@@ -677,6 +777,28 @@ namespace mw::serialization
                 instrument.articulationMap = getString(instrumentObject, "articulationMap", "Default");
                 instrument.wasAutoMatched = getBool(instrumentObject, "wasAutoMatched", false);
                 instrument.matchConfidence = getFloat(instrumentObject, "matchConfidence", 0.0f);
+
+                const auto vstObject = extractObject(instrumentObject, "vst3");
+                if (!vstObject.empty())
+                {
+                    instrument.vst3.bundlePath = getString(vstObject, "bundlePath");
+                    instrument.vst3.name = getString(vstObject, "name");
+                    instrument.vst3.vendor = getString(vstObject, "vendor");
+                    instrument.vst3.version = getString(vstObject, "version");
+                    instrument.vst3.category = getString(vstObject, "category");
+                    instrument.vst3.uid = getString(vstObject, "uid");
+                    instrument.vst3.stateBase64 = getString(vstObject, "stateBase64");
+                    // Older project files may contain editor Revert/Redo history. Ignore it
+                    // now so only the current applied VST state is restored.
+                    instrument.vst3.stateHistoryBase64.clear();
+                    instrument.vst3.stateRedoBase64.clear();
+                    instrument.vst3.bypassed = getBool(vstObject, "bypassed", false);
+                    instrument.vst3.compatibilityWarningSeen = getBool(vstObject, "compatibilityWarningSeen", false);
+                    instrument.vst3.compatibilitySummary = getString(vstObject, "compatibilitySummary");
+                }
+
+                if (instrument.backendType != mw::core::SampleBackendType::VST3)
+                    instrument.vst3 = {};
 
                 track.setInstrumentAssignment(instrument);
             }

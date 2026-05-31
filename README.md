@@ -1,354 +1,512 @@
 # Poor Man's Studio
 
-## Version
+**Poor Man's Studio** is a lightweight local Windows music workstation for importing, arranging, editing, previewing, saving, and rendering music projects without needing a full commercial DAW.
 
-v0.56.0
+It is intentionally practical: bring in MIDI or score material, clean up tracks, organize sections, assign instruments, preview ideas quickly, and render usable audio or MIDI output from a self-contained workspace. It has just enough DAW energy to be useful, without trying to become a spaceship cockpit.
 
-## Purpose
+## Quick Feature Tour
 
-Poor Man's Studio is a local Windows desktop music workstation for practical score/MIDI import, track editing, sequence arranging, AudioClip recording/import, preview playback, and final rendering without requiring a full commercial DAW.
+### Import, Arrange, And Edit
 
-The app is built around a predictable workspace layout so projects, imported media, recordings, renders, settings, tools, SoundFonts, SFZ libraries, and temporary files stay organized.
+- Import MusicXML, compressed MXL, MIDI, Poor Man's Studio `.mwproj`, WAV, MP3, FLAC, and OGG files.
+- Create MIDI tracks from score/MIDI files.
+- Create AudioClip tracks from imported or recorded audio.
+- Edit notes in the main editor and in dedicated Piano Roll windows.
+- Keep one Piano Roll window per track so track edits stay understandable.
+- Organize track groups, song sections, sequence assignments, ordering, names, and track layout through the Track Manager.
+- Save projects as `.mwproj` files with project-relative media paths.
 
-## Quick Start For Users
+### Instruments And Sound Sources
 
-- Open the app and use **Start From File** to import MusicXML/MXL, MIDI, an existing `.mwproj`, or supported audio.
-- Use **Track Manager** for sequence/track organization, preview, and render actions.
-- Use **Record AudioClip** to record custom audio into the active sequence.
-- Use **Help > Open User Guide PDF** for the illustrated guide at `workspace/docs/PoorMansStudio_User_Guide.pdf`.
+- Use SF2/SF3 SoundFonts through FluidSynth.
+- Use SFZ instruments through sfizz-render.
+- Use experimental VST3 instrument plugins through JUCE VST3 hosting.
+- Set project defaults for future imported/new MIDI tracks.
+- Apply per-track settings intentionally so existing tracks are not overwritten accidentally.
+- Switch a track between SF2/SF3/SFZ/VST3 without deleting its MIDI notes.
+- Preserve notes when changing libraries; the instrument assignment changes, the music stays.
 
-## Repository And Build Notes
+### VST3 Plugin Support
 
-This repository is intended to hold the app source, resources, and current-use documentation. Local user workspace content, downloaded instrument packs, generated builds, and large media outputs should stay outside Git or remain ignored.
+VST3 support is experimental. Some plugins are perfectly calm. Some plugins are dragons wearing DLL costumes.
 
-A full local JUCE build requires `external/JUCE` to be present locally. That folder is intentionally treated as a local build dependency and is not part of the packaged source bundle.
+Current VST3 support includes:
 
+- VST3 scanning from `workspace/vst3` and standard Windows VST3 locations.
+- VST3 Plugin Manager with supported/unsupported panes, search, filtering, details, and horizontal scrolling for long plugin names.
+- Manual override for plugins that are safe instruments but detected as unknown/unsupported.
+- One VST plugin editor window per track.
+- Compact floating **Apply Changes** palette for plugin UI edits.
+- Applying track settings closes any open VST editor for that track so stale plugin UIs do not remain attached after a plugin/library change.
+- Apply-and-go VST state handling.
+- VST state excluded from normal host-side note/edit undo-redo history.
+- One-time experimental dragon warning before VST3 becomes active through defaults, track assignment, plugin UI, preview, or render.
 
+Until a future out-of-process helper host is added, VST3 instruments are hosted in-process. That means a plugin crash can still close the main app.
 
-## GitHub Repository Notes
+### Preview, Render, And Export
 
-For first-time GitHub setup, create an empty repository and leave GitHub's optional README, `.gitignore`, and license choices off. This bundle provides `README.md`, and the import helper script can create/update `.gitignore` without causing first-push merge conflicts. Add a `LICENSE` file later once you decide the correct license for the app and any redistributed tools.
+- Preview a selected track, selected sequence, Piano Roll area, or the full project.
+- Render the full project, selected track, selected sequence, or stems depending on render settings.
+- Export WAV, FLAC, MP3, and OGG audio.
+- Export MIDI for use in other tools.
+- Configure sample rate, bitrate, channels, output format, and render metadata.
+- Use FFmpeg for audio conversion/mixing/compressed output support.
+- Use project-relative output folders for safer project sharing.
 
-The ChatGPT continuation markdown is a separate helper file for future project context. It is not part of the main app bundle and is normally not committed to the public source repository.
+### Usability And Project Safety
 
-## Binary And Runtime Packaging
+- Helper bubbles for in-app guidance.
+- Plain key/value settings file that can be inspected by hand.
+- Settings save behavior separates explicit full settings saves from narrow one-key acknowledgements.
+- Dirty-state prompts so unapplied editor changes are not silently discarded.
+- Workspace cleanup for temporary files.
+- Theme preset support.
+- Included PDF and text guides under `workspace/docs`.
 
-The recommended source repository keeps local build outputs and runnable binary packages out of Git. Put local runnable files in a `program/` folder when needed, but publish the finished runnable ZIP through GitHub Releases rather than committing large binaries directly to the source history.
+## Normal User Workflow
 
-If you intentionally want a self-contained repository that tracks `program/`, use the import helper's `-IncludeProgramFolder` option and verify that each bundled dependency/tool can legally be redistributed.
+1. Choose a project backend in Project Defaults.
+2. Choose the matching library, preset, SFZ file, or VST3 plugin.
+3. Click **Apply Project Defaults** before importing or adding new MIDI tracks.
+4. Import MusicXML, MXL, MIDI, audio, or open an existing `.mwproj` project.
+5. Organize tracks and sequences.
+6. Edit notes in the main UI or Piano Roll.
+7. Apply per-track instrument changes where needed.
+8. Preview the track, sequence, Piano Roll, or full project.
+9. Save the `.mwproj` project.
+10. Render final audio or MIDI output.
 
-## Current Feature Set
+Project Defaults affect future imported or newly added MIDI tracks. Existing track assignments are changed only through per-track controls or Piano Roll track settings.
 
-- Import MusicXML, MXL, MIDI, `.mwproj`, WAV, MP3, FLAC, and OGG.
-- Edit MIDI notes with the Piano Roll.
-- Open multiple Piano Roll windows, limited to one window per track.
-- Use the Window menu to jump to open app/tool windows, with multiple open Piano Rolls grouped in a submenu.
-- Move tracks between sequences without closing open Piano Roll windows; unsaved Piano Roll note edits and pending track settings are preserved.
-- Keep Track Manager consoles and the Change Track Seq picker synchronized with current sequence membership, showing empty sequences explicitly.
-- Organize tracks and sequences with Track Manager.
-- Assign SF2/SF3/SFZ instruments to MIDI tracks from the main UI or Piano Roll windows.
-- Assign new blank MIDI tracks to the first available instrument in the project default library when possible.
-- Show each Piano Roll track's current or pending instrument in the Piano Roll header.
-- Split Piano Roll pitch labels into separate octave and note columns, with accidental icons on sharp/flat-style rows.
-- Scroll the Piano Roll pitch view smoothly with the mouse wheel or scrollbar while keeping note up/down controls step-based.
-- Import or record audio as AudioClip tracks.
-- Use Record Test for a temporary mic check: 3-second countdown, 5-second capture, automatic playback, then automatic cleanup.
-- Adjust AudioClip Recorder Mic Gain as software input recording gain from -24.0 dB to +24.0 dB.
-- Treat each imported or recorded audio file as one AudioClip and one AudioClip track.
-- Use Custom Audio as the built-in identity for AudioClip tracks.
-- Preview tracks, sequences, or the project, including AudioClip content.
-- Render final audio with FluidSynth, sfizz-render, and FFmpeg.
-- Choose Parallel Stem Renders as Auto (safe), 1, 2, 4, 6, 8, 12, or 16. This controls how many independent MIDI stem render jobs may run at the same time; it is not a literal CPU-core selector.
-- Export MIDI separately from audio rendering.
-- Save/load `.mwproj` project metadata.
-- Prompt to save, discard, or cancel before Start From File replaces a dirty project.
-- Store large AudioClip media files beside the project instead of inside `.mwproj`.
-- Use helper bubbles on controls after about 2 seconds of hover; they are enabled by default and can be toggled from Help > Helper Bubbles, and the choice is saved for the next launch.
+## Source Tree Layout
+
+Expected source layout:
+
+```text
+PoorMansStudio/
+  CMakeLists.txt
+  README.md
+  THIRD_PARTY_NOTICES.txt
+  resources/
+  src/
+  workspace/
+    docs/
+    exports/
+    ffmpeg/
+    fluidsynth/
+    input/
+    projects/
+    settings/
+    sfizz/
+    sfz/
+    soundfonts/
+    temp/
+    themes/
+    vst3/
+  external/
+    JUCE/
+```
+
+The `external/JUCE` folder is required for building from source. It is not bundled as a runtime dependency for end users.
 
 ## Workspace Layout
 
-Recommended runtime structure:
-
 ```text
 workspace/
-  input/
-  exports/
-  projects/
-  soundfonts/
-  fluidsynth/
-  ffmpeg/
-  sfz/
-  sfizz/
-  settings/
-  temp/
-  themes/
+  input/        import staging area
+  exports/      rendered audio and exported MIDI
+  projects/     .mwproj project folders
+  soundfonts/   user SF2/SF3 files
+  fluidsynth/   optional FluidSynth runtime/tool folder
+  ffmpeg/       optional FFmpeg runtime/tool folder
+  sfz/          user SFZ instruments and sample packs
+  vst3/         portable/test VST3 bundles
+  sfizz/        optional sfizz-render runtime/tool folder
+  settings/     user settings
+  temp/         temporary render/cache files
+  themes/       theme presets
+  docs/         PDF and text guides
 ```
 
-Recommended project structure:
+Projects should live under:
 
 ```text
-workspace/
-  projects/
-    Project Name/
-      Project Name.mwproj
-      input/
-        midi/
-        mxl/
-        audio/
-          imported/
-          recorded/
-          temp/
-      output/
-      renders/
+workspace/projects/<Project Name>/
 ```
 
-## Project File Model
+AudioClip media is stored beside the project and is not embedded into the `.mwproj` file. Move or share the whole project folder, not just the `.mwproj` file.
 
-`.mwproj` stores metadata, not bulk audio data.
+## Build Environment Overview
 
-Project identity is normalized on save/open so the project folder name, `.mwproj` filename, project name, and base name stay aligned. The default save path is `workspace/projects/<Project Name>/<Project Name>.mwproj`; if the user intentionally chooses or saves a different export folder, that choice is respected.
+Poor Man's Studio is currently a Windows/JUCE/C++ desktop app.
 
-Project metadata includes:
+Recommended build environment:
 
-- tracks
-- note events
-- sequences
-- sequence colors
-- sequence thoughts/notes
-- project defaults
-- per-track instrument assignments
-- render settings
-- AudioClip metadata
-- project-relative media paths
+- Windows 10 or Windows 11, 64-bit.
+- Visual Studio Community 2026 / Visual Studio 18.x or newer, or Visual Studio 2022 with equivalent C++ support.
+- **Desktop development with C++** workload installed in Visual Studio Installer.
+- MSVC C++ x64/x86 build tools.
+- Windows 10 or Windows 11 SDK.
+- MSBuild.
+- C++ CMake tools for Windows.
+- CMake 3.24 or newer.
+- Git for Windows, recommended for obtaining/updating JUCE.
+- JUCE source tree at `external/JUCE`.
+- C++20-capable compiler.
 
-AudioClip files live in the project folder under `input/audio`.
+The project CMake file currently requires:
 
-## Track Types
+```cmake
+cmake_minimum_required(VERSION 3.24)
+set(CMAKE_CXX_STANDARD 20)
+```
 
-### MIDI Track
+JUCE's own CMake support requires CMake 3.22 or newer, but this project requires 3.24 or newer.
 
-A MIDI track contains note events and uses an assigned instrument library.
+## Visual Studio Community Setup
 
-Supported MIDI track instrument sources:
+Install Visual Studio Community from Microsoft, then open **Visual Studio Installer** and modify the installation.
 
-- SF2
-- SF3
-- SFZ
-
-MIDI tracks are editable in the Piano Roll. Multiple Piano Roll windows can be open at once, but each track is limited to one Piano Roll window. Reopening a track that already has a Piano Roll open focuses that existing window instead of reloading the roll. Piano Roll windows also show the track sound library, including the active SF2/SFZ backend in the library text, allow Change Library for SF2/SF3/SFZ sources, and include an Instrument dropdown. Piano Roll library and instrument selections are staged until Apply Track Settings is clicked, so changing those controls does not reload the roll or discard unsaved note edits.
-
-### AudioClip Track
-
-An AudioClip track contains one imported or recorded audio file.
-
-Current rule:
+Required workload:
 
 ```text
-1 imported/recorded audio file = 1 AudioClip = 1 AudioClip track
+Desktop development with C++
 ```
 
-AudioClip tracks use the built-in `Custom Audio` identity. They are managed like normal tracks in Track Manager and are included in preview/render paths.
+Make sure these components are installed under the workload or Individual Components tab:
 
-## AudioClip Import
+```text
+MSVC C++ x64/x86 build tools
+Windows 10 SDK or Windows 11 SDK
+C++ CMake tools for Windows
+MSBuild
+C++ core desktop features
+Windows Universal CRT SDK
+```
 
-Import Audio supports:
+Recommended optional components:
 
-- WAV
-- MP3
-- FLAC
-- OGG
+```text
+Git for Windows
+C++ AddressSanitizer, useful for debugging memory issues
+C++ profiling tools, useful for performance testing
+```
 
-Imported audio is copied or converted into the current project folder and stored as an AudioClip track. The `.mwproj` stores metadata and relative paths only.
+Usually not required for this project:
 
-Saved AudioClip formats include:
+```text
+MFC
+ATL
+.NET desktop workload
+Unity workload
+Linux workload
+Clang/LLVM toolchain
+```
 
-- WAV
-- FLAC
-- MP3
-- OGG
+Those can be installed if your local environment needs them, but Poor Man's Studio does not intentionally depend on them.
 
-WAV/FLAC are lossless options. MP3/OGG use high-quality compressed defaults when selected.
+## Build-Time Dependencies
 
-## AudioClip Recorder
+These are needed to build the app from source:
 
-The recorder opens without auto-recording.
+| Tool / dependency | Purpose | Notes |
+| --- | --- | --- |
+| Windows 10/11 | Build OS | 64-bit Windows recommended. |
+| Visual Studio Community | IDE, compiler, debugger, MSBuild | Use Community 2026 / VS 18.x or newer if available; Visual Studio 2022 with the C++ workload should also work. |
+| Desktop development with C++ workload | Installs core C++ build support | Required because C++ tools are not installed by default. |
+| MSVC C++ build tools | C++ compiler/linker | Required for compiling the JUCE/C++ app. |
+| Windows SDK | Windows headers/libraries | Installed through the C++ workload/components. |
+| MSBuild | Visual Studio build engine | Used by Visual Studio CMake generators. |
+| CMake 3.24+ | Configures/generates builds | The project uses CMake directly. |
+| Git | Cloning/updating source and JUCE | Optional if JUCE is copied manually, recommended otherwise. |
+| JUCE source tree | C++ app framework | Must exist at `external/JUCE`. Build-time source dependency, not a separate runtime install. |
 
-Recorder behavior:
+## Runtime Dependencies And Resources
 
-- Input device dropdown applies immediately.
-- Refresh Devices rescans audio input devices.
-- Mic Gain applies software recording gain inside Poor Man's Studio before the WAV writer; use small boosts to avoid added noise or clipping.
-- Record Test runs a fixed 3-second countdown, records a 5-second temporary mic check, automatically plays it back once, and deletes the temporary audio.
-- Record Test does not create an AudioClip track and does not show Save/Keep/Delete controls.
-- Record starts after a 0.25 second safety delay.
-- Record With Delay supports 3, 5, 10, or custom delay up to 99 seconds.
-- Countdown overlay uses a semi-transparent black background and white text.
-- Countdown ends with `GO!` instead of `0`.
-- Pause fully pauses without writing a silent gap.
-- Record or Record With Delay resumes/appends to the same take after pause.
-- Stop ends capture and leaves the take available.
-- Save / Apply commits the take as an AudioClip track.
-- Redo From Top discards the current temp take and starts over from the same placement.
-- Discard Take cleans up temp audio.
-- Closing with a dirty take offers Save Take and Close, Discard and Close, or Cancel.
+These are used when running the built app or rendering projects:
 
-## Track Manager
+| Runtime item | Purpose | Bundled? |
+| --- | --- | --- |
+| FluidSynth | SF2/SF3 SoundFont rendering | May be placed/configured in workspace; not a JUCE dependency. |
+| FFmpeg | Audio conversion, mixing, compressed exports | May be placed/configured in workspace. |
+| sfizz-render | SFZ rendering | May be placed/configured in workspace. |
+| SoundFonts / SF3 files | User instrument libraries | User supplied. |
+| SFZ sample packs | User instrument libraries | User supplied. |
+| VST3 plugins | Experimental plugin instruments | User supplied or installed system-wide. |
+| Audio/MIDI drivers/devices | Playback, input, preview | Provided by the OS/audio interface. |
 
-Track Manager is the main control area for track and sequence organization. Main render actions live on the main UI.
+**JUCE is not a runtime dependency for users of the compiled app.** JUCE code is compiled into the application binary during the build.
 
-It handles:
+## Getting The Tools
 
-- selecting tracks
-- selecting sequences
-- adding/importing tracks into the currently selected sequence
-- start beat edits
-- sequence assignment changes
-- Duplicate Beat
-- Preview Track / Preview Seq / Preview Project
-- Edit Thoughts for sequences
-- map/view-bar display
-- AudioClip tracks as normal tracks
+### Visual Studio Community
 
-The map/view bar should account for full MIDI and AudioClip duration, repaint after selection/edit/undo changes, and recalculate after resize/maximize. The View bar should stay plain black until a sequence is focused; then it should show a single focused-sequence highlight whose position and length match that sequence within the full project.
+1. Download Visual Studio Community from Microsoft.
+2. Run the installer.
+3. Select **Desktop development with C++**.
+4. Confirm the MSVC build tools, Windows SDK, MSBuild, and C++ CMake tools are selected.
+5. Install or modify the installation.
+6. Open **Developer PowerShell for Visual Studio** or **x64 Native Tools Command Prompt** before building from the command line.
 
-## Sequence Thoughts
+### CMake
 
-Each sequence can store thoughts/notes.
+Visual Studio can install CMake tools through the C++ workload. Installing a current standalone CMake from Kitware is also acceptable and often easier to verify from the command line.
 
-- Main UI shows Thoughts read-only.
-- Track Manager Edit Thoughts opens the editable text popup.
-- Dirty-state prompts prevent accidental discard.
-- Thoughts save as sequence `notes` metadata in `.mwproj`.
+Check CMake with:
 
-## Active Sequence Picker
+```powershell
+cmake --version
+```
 
-The main UI Active Seq field is read-only with a Chg Seq button. When a track is selected, Chg Seq changes that selected track's sequence assignment and commits the membership immediately so changing away and back to the track retains the new sequence.
+### Git
 
-The picker uses a scrollable list so long sequence names are not hidden.
+Git is recommended for downloading JUCE and for source control.
 
-- OK applies the selected existing sequence to the selected track when a track is active.
-- Create Blank Seq creates an empty sequence in the picker only; it does not create a blank track.
-- Cancel closes without changes.
+Check Git with:
 
-## Preview And Render
+```powershell
+git --version
+```
 
-Preview and render paths support mixed MIDI and AudioClip projects. Sequence preview/render trims and rebases the selected sequence range into a short render snapshot so sequence previews do not render silent time from the larger project. Preview buttons are disabled while a render/preview is already running.
+### JUCE
 
-Console/log panes support Ctrl+C when focused and a right-click Copy Console Text menu.
+Place JUCE at:
 
-Rendering tools:
+```text
+PoorMansStudio/external/JUCE/
+```
 
-- FluidSynth for SF2/SF3 MIDI tracks
-- sfizz-render for SFZ MIDI tracks
-- FFmpeg for encoding, compressed output, and mixdown
-- project-local AudioClip media for imported/recorded audio tracks
+Example using Git from the project root:
 
-Parallel Stem Renders:
+```powershell
+mkdir external
+git clone https://github.com/juce-framework/JUCE.git external/JUCE
+```
 
-- This setting controls how many independent MIDI stem render jobs may run at the same time. It is not a literal CPU-core selector.
-- Auto (safe) chooses a conservative limit from the CPU hardware-thread count, then also limits by the number of eligible independent stems:
-  - 2-3 CPU threads: 1 parallel stem render
-  - 4-7 CPU threads: 2 parallel stem renders
-  - 8-11 CPU threads: 4 parallel stem renders
-  - 12-15 CPU threads: 6 parallel stem renders
-  - 16+ CPU threads: 8 parallel stem renders
-- Manual choices are 1, 2, 4, 6, 8, 12, and 16. Manual 12 or 16 is a hardcore override and should only be used when the computer can handle more simultaneous SoundFont/SFZ render jobs.
-- Parallelism is limited to independent stem rendering. Final FFmpeg mix/encode stays serial.
-- Cancel Render requests cancellation for all active parallel stem renders and terminates FluidSynth/sfizz-render child processes where supported.
+The important file must exist here:
 
-Render Settings:
+```text
+external/JUCE/CMakeLists.txt
+```
 
-- The Render Settings popout controls which stem files are kept after successful user renders.
-- Click Render Settings, choose WAV audio stems and/or MIDI stem files, then click OK. Cancel closes without changing the saved setting.
-- The global settings file stores this as keepStemFiles=0, 1, 2, or 1,2:
-  - 0: keep no stem files
-  - 1: keep WAV audio stems only
-  - 2: keep MIDI stem files only
-  - 1,2: keep both WAV and MIDI stems
-- Kept stems are organized under the render stem folder as audio/ for WAV files and midi/ for MIDI files.
-- Preview/temp renders still clean up their generated stems.
+If that file is missing, CMake will stop with a JUCE-not-found error.
 
-Supported output formats:
+## Configure And Build
 
-- WAV
-- FLAC
-- MP3
-- OGG
-- MIDI export
+Open **Developer PowerShell for Visual Studio** or **x64 Native Tools Command Prompt**, then `cd` to the `PoorMansStudio` source folder.
 
-## Window Headers And Icons
+### Recommended: build wrapper with summary
 
-Tool windows use a consistent light-gray custom header with the existing icon artwork, title text, blue `-` minimize, green `+` maximize/restore, and red `x` close controls.
+The easiest build path is the included PowerShell wrapper. It runs CMake configure/build, times the build, checks common inputs, and prints a clean summary at the end.
 
-The AudioClip Recorder uses a dark microphone icon so it is visible in the title/header area. The Sequence Color window uses a color-wheel icon. Smaller utility/confirmation dialogs can continue using the default app icon.
+```powershell
+.\Build-PoorMansStudio.ps1
+```
 
+Example summary:
 
-## Helper Bubbles
+```text
+Poor Man's Studio Build Summary
+--------------------------------
+Version:        0.57.11
+Configuration:  Release
+Generator:      Visual Studio 18 2026
+Platform:       x64
+Parallel Jobs:  8
+Started:        2026-05-30 14:08:12
+Finished:       2026-05-30 14:11:46
+Elapsed:        3 min 34 sec
+Result:         SUCCESS
+Output:         C:\Dev\PoorMansStudio\workspace\program\Poor Man's Studio.exe
+```
 
-Helper bubbles are enabled by default and appear after about 2 seconds of hover. Use Help > Helper Bubbles to turn them on or off. The choice is saved as a user preference for the next launch.
+Useful options:
 
-They are for real controls such as buttons, dropdowns, input fields, and labels.
+```powershell
+.\Build-PoorMansStudio.ps1 -Configuration Debug
+.\Build-PoorMansStudio.ps1 -Parallel 16
+.\Build-PoorMansStudio.ps1 -Generator "Visual Studio 17 2022" -Platform x64
+.\Build-PoorMansStudio.ps1 -SkipConfigure
+```
 
-They should not appear on console panes, status/timer displays, or large read-only info areas.
+From x64 Native Tools Command Prompt, launch the same script through Windows PowerShell:
 
-The AudioClip Recorder has helper bubbles for its controls, including device selection and delay options.
+```bat
+powershell -ExecutionPolicy Bypass -File .\Build-PoorMansStudio.ps1
+powershell -ExecutionPolicy Bypass -File .\Build-PoorMansStudio.ps1 -Parallel 16
+```
 
-## Temp And Storage Safety
+Manual CMake commands still work if you prefer them.
 
-The app should check free space before large import, conversion, and recording operations.
+### Option A: Let CMake choose the Visual Studio generator
 
-Temp cleanup should cover:
+```powershell
+cmake -S . -B builds -A x64
+cmake --build builds --config Release
+```
 
-- failed audio imports/conversions
-- canceled recordings
-- discarded takes
-- redo-from-top takes
-- app-owned preview/render files
+### Option B: Explicit Visual Studio 2022 generator
 
-Temp cleanup should avoid deleting user-owned media outside managed app/project temp folders.
+```powershell
+cmake -S . -B builds -G "Visual Studio 17 2022" -A x64
+cmake --build builds --config Release
+```
 
-## Build Dependencies
+### Option C: Visual Studio 2026 / VS 18.x generator
 
-Build dependencies:
+Run this first:
 
-- Visual Studio C++ build tools
-- CMake
-- JUCE in `external/JUCE`
+```powershell
+cmake --help
+```
 
-Runtime/rendering dependencies:
+Look under **Generators** for the exact Visual Studio generator name installed on your machine. If your CMake lists a Visual Studio 2026 / 18.x generator, use that exact spelling, for example:
 
-- FluidSynth in `workspace/fluidsynth`
-- FFmpeg in `workspace/ffmpeg`
-- sfizz-render in `workspace/sfizz`
-- SF2/SF3 libraries in `workspace/soundfonts`
-- SFZ libraries in `workspace/sfz`
+```powershell
+cmake -S . -B builds -G "Visual Studio 18 2026" -A x64
+cmake --build builds --config Release
+```
+
+If CMake does not list that generator, update CMake or use the generator CMake does list.
+
+### Debug Build
+
+```powershell
+cmake --build builds --config Debug
+```
+
+### Clean Reconfigure
+
+Use this when changing JUCE versions, CMake versions, or Visual Studio toolchains:
+
+```powershell
+rmdir /s /q builds
+cmake -S . -B builds -A x64
+cmake --build builds --config Release
+```
+
+The post-build step copies the built executable to:
+
+```text
+workspace/program/
+```
+
+## Running After Build
+
+Run the app from the built output or from:
+
+```text
+workspace/program/
+```
+
+Keep the `workspace` folder beside the source/app layout unless you intentionally configure paths elsewhere. The app expects the workspace folders for docs, settings, projects, tools, and libraries.
+
+## External Runtime Tool Setup
+
+### FluidSynth
+
+Used for SF2/SF3 rendering.
+
+Suggested setup:
+
+```text
+workspace/fluidsynth/
+```
+
+Place the FluidSynth executable/DLL files there, or install FluidSynth elsewhere and set the path in the app settings.
+
+### FFmpeg
+
+Used for conversion, compressed audio output, and some mixing/export operations.
+
+Suggested setup:
+
+```text
+workspace/ffmpeg/
+```
+
+Place `ffmpeg.exe` and related files there, or install FFmpeg elsewhere and configure the path in the app settings.
+
+### sfizz-render
+
+Used for SFZ rendering.
+
+Suggested setup:
+
+```text
+workspace/sfizz/
+```
+
+Place `sfizz_render.exe` / `sfizz-render.exe` and related files there, or configure the path in the app settings.
+
+### VST3 Plugins
+
+VST3 support is experimental.
+
+Scan locations include:
+
+```text
+workspace/vst3/
+C:\Program Files\Common Files\VST3
+```
+
+A VST3 plugin may be a `.vst3` bundle folder. Keep the bundle intact. Do not point the app at inner DLLs under `Contents\x86_64-win`.
+
+## Troubleshooting Build Problems
+
+### CMake says JUCE was not found
+
+Confirm this exists:
+
+```text
+external/JUCE/CMakeLists.txt
+```
+
+If not, clone or copy JUCE into `external/JUCE`.
+
+### CMake cannot find a compiler
+
+Use **Developer PowerShell for Visual Studio** or **x64 Native Tools Command Prompt**. Also confirm the Visual Studio **Desktop development with C++** workload is installed.
+
+### The Visual Studio generator is not available
+
+Run:
+
+```powershell
+cmake --help
+```
+
+Use a generator listed on your system, or update CMake so it knows about your installed Visual Studio version.
+
+### Windows SDK errors
+
+Open Visual Studio Installer, modify the installation, and install a Windows 10 or Windows 11 SDK under the C++ components.
+
+### `cl` is not recognized
+
+You are probably in a normal terminal instead of a Visual Studio developer terminal, or MSVC was not installed. Open a Visual Studio developer prompt and try:
+
+```powershell
+cl
+```
+
+### Build works but the app cannot render SF2/SF3/SFZ/MP3/OGG
+
+The app built correctly, but runtime tools are missing or not configured. Check FluidSynth, FFmpeg, and sfizz-render paths in the app settings.
+
+### VST3 plugin crashes the app
+
+The VST3 feature is experimental and hosted in-process. Save projects before testing unfamiliar plugins. Use **Apply Changes** after editing plugin UI state. If a plugin repeatedly crashes, remove it from the active assignment or mark it unavailable in the VST3 Plugin Manager.
 
 ## Documentation
 
-Detailed docs:
+- Illustrated guide: `workspace/docs/PoorMansStudio_User_Guide.pdf`
+- Plain-text user guide: `workspace/docs/USER_GUIDE.txt`
+- Detailed setup/build guide: `workspace/docs/SETUP_AND_BUILD_GUIDE.txt`
 
-```text
-workspace/docs/SETUP_AND_BUILD_GUIDE.txt
-workspace/docs/PoorMansStudio_User_Guide.pdf
-workspace/docs/USER_GUIDE.txt
-```
+Use the in-app Help menu to open the guides when running the app.
 
-Window headers
-- Main UI and major tool windows use a compact darker light-gray custom header.
-- Header controls use literal colored buttons: blue -, green +, and red x.
-- The custom header height is 32 px, slightly shorter than the previous custom header but still taller than a default/native title bar.
-- Edit Thoughts uses the note/pencil icon, Track Manager uses the track icon, AudioClip Recorder uses the microphone icon, and Sequence Color uses the color wheel icon.
-- About and the main UI Chg Seq picker use simple title-barless dialog styling; the Chg Seq picker content remains scrollable.
+### VST3 Graphics Preference Startup Check
 
-### SFZ sidecar pack layout
-
-Poor Man's Studio supports `workspace/sfz/Name.sfz` plus `workspace/sfz/Name/`. The `Name/` folder is the pack root and may contain instrument/category folders directly; a `samples/` subfolder is not required. The SFZ option list should present the pair as one public pack option, and SFZ preflight/render should resolve relative `sample=` and `#include` paths against the pack root when the paths are not found beside the `.sfz` file.
-
-
-AudioClip Recorder updates in v0.56.0:
-- Record Test: 3 second countdown, 5 second temporary capture, automatic playback, automatic cleanup.
-- Mic Gain: software input gain with - / + controls and a 0 dB reset.
-
-## License
-
-No project license file has been selected yet. Choose and add a `LICENSE` file before inviting outside contributors or publishing this as an open-source project.
+The VST3 Settings window remembers the preferred plugin UI GPU in the user preferences file. If a specific GPU was saved, the app checks for that adapter on startup or before opening VST3 Settings so the dropdown is populated instead of falling back to a generic-only list. If the saved adapter is not present, the UI falls back to Auto / System Default. Use **Refresh Graphics Detection** when hardware, drivers, monitors, or external GPUs change and you want the full list rebuilt.

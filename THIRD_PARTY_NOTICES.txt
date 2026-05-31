@@ -131,3 +131,9 @@ Recommended package layout:
           sfizz DLLs, if any
         LICENSE-sfizz-BSD-2-Clause.txt
         sfizz_Build_Info.txt
+
+VST3 hosting support
+--------------------
+Poor Man's Studio can scan and host user-installed VST3 plugins. No VST3 plugins are bundled with the source package or default runtime release package.
+
+If JUCE's VST3 hosting support is enabled, the build may use VST3 SDK interfaces supplied through JUCE and/or a local VST3 SDK installation. Keep the applicable Steinberg VST3 SDK license notice with any distributed binary that includes VST3 SDK code. The project should not redistribute third-party VST3 plugins unless their licenses explicitly allow redistribution.

@@ -132,6 +132,16 @@ namespace mw::app
         return workspaceFolder() / "sfizz";
     }
 
+    std::filesystem::path AppPaths::vst3Folder()
+    {
+        return workspaceFolder() / "vst3";
+    }
+
+    std::filesystem::path AppPaths::vstHostFolder()
+    {
+        return workspaceFolder() / "vst_host";
+    }
+
     std::filesystem::path AppPaths::projectsFolder()
     {
         return workspaceFolder() / "projects";

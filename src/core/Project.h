@@ -20,7 +20,7 @@ namespace mw::core
     {
         std::string projectFileExtension = ".mwproj";
         std::string projectFormatName = "MusicWorkstationProject";
-        int projectFormatVersion = 5;
+        int projectFormatVersion = 6;
     };
 
     struct ProjectSequenceMetadata
@@ -49,6 +49,17 @@ namespace mw::core
         std::filesystem::path sfzPath;
         std::filesystem::path sfizzRenderPath;
 
+        // Project-level VST3 default. This is the source used when the project
+        // backend is set to VST3 before importing/adding tracks. Each track still
+        // receives its own independent plugin assignment and state after seeding.
+        std::filesystem::path vst3PluginPath;
+        std::string vst3PluginName;
+        std::string vst3PluginVendor;
+        std::string vst3PluginVersion;
+        std::string vst3PluginCategory;
+        std::string vst3PluginUid;
+        std::string vst3PluginCompatibilitySummary;
+
         std::string baseFileName = "rendered_score";
 
         std::string metadataTitle;
@@ -57,7 +68,7 @@ namespace mw::core
         std::string metadataTrackNumber;
         std::string metadataYear;
 
-        int backendId = 1;      // 1 = SF2/FluidSynth, 2 = SFZ/sfizz-render
+        int backendId = 1;      // 1 = SF2/FluidSynth, 2 = SFZ/sfizz-render, 3 = VST3 Plugin
         int outputFormatId = 1; // 1 = WAV, 2 = FLAC, 3 = MP3, 4 = OGG
         int audioClipFormatId = 1; // 1 = WAV, 2 = FLAC, 3 = MP3, 4 = OGG
         int audioClipQualityKbps = 320;

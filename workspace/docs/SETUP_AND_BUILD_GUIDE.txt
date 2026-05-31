@@ -1,361 +1,580 @@
-Poor Man's Studio - SETUP AND BUILD GUIDE
-=========================================
+Poor Man's Studio - Detailed Setup and Build Guide
+==================================================
 
-Version
--------
-v0.56.0
+This guide explains how to set up a Windows build environment for Poor Man's Studio, build the app from source, and configure the external runtime tools used for rendering and instrument support.
 
-Purpose
--------
-This guide explains how to set up, build, and run Poor Man's Studio on Windows.
+Poor Man's Studio is a Windows/JUCE/C++ desktop app. JUCE is required to build the app from source, but JUCE is not something end users install separately to run the compiled app.
 
-Poor Man's Studio expects a predictable workspace layout. Build tools compile the app. Runtime tools such as FluidSynth, FFmpeg, and sfizz-render are used for previewing, rendering, importing/converting audio, and final output.
 
-Recommended Development Root
-============================
-Recommended development root:
+1. Recommended Build Environment
+================================
 
-C:\Dev\PoorMansStudio
+Recommended operating system:
 
-Expected source layout:
+- Windows 10 or Windows 11, 64-bit.
+
+Recommended compiler/IDE environment:
+
+- Visual Studio Community 2026 / Visual Studio 18.x or newer, or Visual Studio 2022 with equivalent C++ support.
+- Desktop development with C++ workload.
+- MSVC C++ x64/x86 build tools.
+- Windows 10 SDK or Windows 11 SDK.
+- MSBuild.
+- C++ CMake tools for Windows.
+- CMake 3.24 or newer.
+- Git for Windows, recommended.
+- JUCE source tree at external\JUCE.
+- C++20-capable compiler.
+
+The project CMake file currently requires:
+
+  cmake_minimum_required(VERSION 3.24)
+  set(CMAKE_CXX_STANDARD 20)
+
+JUCE's CMake support requires CMake 3.22 or newer, but this project requires 3.24 or newer.
+
+
+2. Expected Source Layout
+=========================
 
 PoorMansStudio\
   CMakeLists.txt
+  README.md
+  THIRD_PARTY_NOTICES.txt
+  resources\
+  src\
+  workspace\
+    docs\
+    exports\
+    ffmpeg\
+    fluidsynth\
+    input\
+    projects\
+    settings\
+    sfizz\
+    sfz\
+    soundfonts\
+    temp\
+    themes\
+    vst3\
   external\
     JUCE\
-  src\
-  docs\
-    SETUP_AND_BUILD_GUIDE.txt
-    USER_GUIDE.txt
-  resources\
-  workspace\
 
-Workspace Layout
-================
-Runtime workspace:
+The external\JUCE folder is required for building. It should contain JUCE's top-level CMakeLists.txt file:
 
-workspace\
-  input\
-  exports\
-  projects\
-  soundfonts\
-  fluidsynth\
-  ffmpeg\
-  sfz\
-  sfizz\
-  settings\
-  temp\
-  themes\
+  external\JUCE\CMakeLists.txt
 
-Project folder layout:
+If that file is missing, CMake will stop with a JUCE-not-found error.
 
-workspace\
-  projects\
-    Project Name\
-      Project Name.mwproj
-      input\
-        midi\
-        mxl\
-        audio\
-          imported\
-          recorded\
-          temp\
-      output\
-      renders\
 
-Important:
-- .mwproj stores metadata only.
-- Imported/recorded audio files live in the project folder.
-- Move/share the whole project folder to keep AudioClips available.
+3. Build-Time Tools And Dependencies
+====================================
 
-Required Build Tools
-====================
+These are needed to compile Poor Man's Studio from source.
+
+Windows 10/11
+-------------
+
+Use a 64-bit Windows install. Windows 11 is recommended for current Visual Studio environments, but Windows 10 can work if the matching SDK/toolchain is installed.
 
 Visual Studio Community
 -----------------------
-Use Visual Studio with the Desktop development with C++ workload.
 
-Recommended components:
-- MSVC C++ build tools
-- Windows 10/11 SDK
-- C++ CMake tools for Windows
-- MSBuild
+Visual Studio provides the compiler, linker, MSBuild, debugger, Windows SDK integration, and optional CMake integration.
 
-Recommended terminal:
-- x64 Native Tools Command Prompt for Visual Studio
+Recommended editions:
 
-Verify:
+- Visual Studio Community 2026 / Visual Studio 18.x or newer, if available in your environment.
+- Visual Studio 2022 Community or newer with the same C++ components.
 
-cl
+Required workload:
+
+- Desktop development with C++.
+
+Required individual components:
+
+- MSVC C++ x64/x86 build tools.
+- Windows 10 SDK or Windows 11 SDK.
+- C++ CMake tools for Windows.
+- MSBuild.
+- C++ core desktop features.
+- Windows Universal CRT SDK.
+
+Recommended optional components:
+
+- Git for Windows.
+- C++ AddressSanitizer, useful for debugging memory issues.
+- C++ profiling tools, useful for performance testing.
+
+Usually not required for this project:
+
+- MFC.
+- ATL.
+- .NET desktop workload.
+- Unity workload.
+- Linux workload.
+- Clang/LLVM toolchain.
+
+Those optional tools are fine to install, but the app is not intentionally built around them.
 
 CMake
 -----
-CMake configures and builds the project.
 
-Verify:
+CMake configures the project and generates the Visual Studio/MSBuild build files.
 
-cmake --version
+Required by this project:
+
+- CMake 3.24 or newer.
+
+Check it from a terminal:
+
+  cmake --version
+
+Visual Studio can install CMake tools through the C++ workload. A standalone Kitware CMake install is also fine and often easier to verify from the command line.
+
+Git
+---
+
+Git is recommended for downloading JUCE and managing the source tree.
+
+Check it from a terminal:
+
+  git --version
+
+Git is optional if JUCE and the app source are copied manually, but using Git makes setup and updates easier.
 
 JUCE
 ----
-JUCE must be present in:
 
-external\JUCE
+JUCE is the C++ application framework used for the app, GUI, audio/MIDI support, and VST3 hosting support.
 
-Expected JUCE contents include:
+Important distinction:
 
-external\JUCE\CMakeLists.txt
-external\JUCE\modules\
-external\JUCE\extras\
+- JUCE is a build-time source dependency.
+- JUCE is not a runtime dependency that end users install separately.
+- JUCE code is compiled into the Poor Man's Studio executable.
 
-Common JUCE setup errors:
-- JuceHeader.h not found
-- JUCE modules not found
-- juceaide build problems
+Poor Man's Studio expects JUCE here:
 
-If those occur, check the external\JUCE folder first.
+  external\JUCE
 
-Required Runtime / Rendering Tools
-==================================
+Example from the PoorMansStudio source root:
+
+  mkdir external
+  git clone https://github.com/juce-framework/JUCE.git external/JUCE
+
+After that, confirm this file exists:
+
+  external\JUCE\CMakeLists.txt
+
+
+4. Installing Visual Studio Community
+=====================================
+
+1. Download Visual Studio Community from Microsoft.
+2. Run the installer.
+3. Choose the Desktop development with C++ workload.
+4. Open the workload details / Individual Components list.
+5. Confirm these are selected:
+
+   - MSVC C++ x64/x86 build tools.
+   - Windows 10 SDK or Windows 11 SDK.
+   - C++ CMake tools for Windows.
+   - MSBuild.
+   - C++ core desktop features.
+   - Windows Universal CRT SDK.
+
+6. Install or modify the installation.
+7. Restart terminals after installation.
+8. Build from Developer PowerShell for Visual Studio or x64 Native Tools Command Prompt.
+
+To confirm the compiler is visible, open a Visual Studio developer terminal and run:
+
+  cl
+
+It should print Microsoft C/C++ compiler information. If the command is not found, the terminal is not using the Visual Studio build environment or the C++ workload is missing.
+
+
+5. Installing CMake
+===================
+
+Option A: Use Visual Studio's bundled CMake tools.
+
+- Install C++ CMake tools for Windows through Visual Studio Installer.
+- Open Developer PowerShell for Visual Studio.
+- Run cmake --version.
+
+Option B: Install standalone CMake from Kitware.
+
+- Download the Windows x64 installer from cmake.org.
+- During installation, allow CMake to be added to PATH if desired.
+- Open a new terminal and run cmake --version.
+
+If CMake cannot find Visual Studio 2026 / VS 18.x generators, update CMake to a newer version or use the Visual Studio generator that appears in cmake --help.
+
+
+6. Installing Git
+=================
+
+Git is recommended but not strictly required.
+
+Recommended setup:
+
+- Install Git for Windows from git-scm.com.
+- Default installer options are usually fine.
+- Open a new terminal and run:
+
+  git --version
+
+Git can then be used to obtain JUCE:
+
+  mkdir external
+  git clone https://github.com/juce-framework/JUCE.git external/JUCE
+
+
+7. Setting Up JUCE
+==================
+
+Poor Man's Studio expects JUCE at:
+
+  PoorMansStudio\external\JUCE\
+
+The required top-level file is:
+
+  PoorMansStudio\external\JUCE\CMakeLists.txt
+
+Common setup mistakes:
+
+Wrong:
+
+  PoorMansStudio\external\JUCE\JUCE\CMakeLists.txt
+
+Wrong:
+
+  PoorMansStudio\external\juce-framework-JUCE-xxxx\CMakeLists.txt
+
+Right:
+
+  PoorMansStudio\external\JUCE\CMakeLists.txt
+
+If you download JUCE as a ZIP, rename/move the extracted folder so the path matches external\JUCE.
+
+
+8. Configure And Build
+======================
+
+Open Developer PowerShell for Visual Studio or x64 Native Tools Command Prompt.
+
+Change into the PoorMansStudio source folder:
+
+  cd C:\Dev\PoorMansStudio
+
+Use whatever path matches your local checkout.
+
+Recommended option: build wrapper with summary
+----------------------------------------------
+
+The source bundle includes this helper script at the repository root:
+
+  Build-PoorMansStudio.ps1
+
+Run it from Developer PowerShell for Visual Studio:
+
+  .\Build-PoorMansStudio.ps1
+
+The script performs the normal CMake configure/build flow, times the build, checks for common setup problems such as a missing external\JUCE folder, and prints a final summary:
+
+  Poor Man's Studio Build Summary
+  --------------------------------
+  Version:        0.57.11
+  Configuration:  Release
+  Generator:      Visual Studio 18 2026
+  Platform:       x64
+  Parallel Jobs:  8
+  Started:        2026-05-30 14:08:12
+  Finished:       2026-05-30 14:11:46
+  Elapsed:        3 min 34 sec
+  Result:         SUCCESS
+  Output:         C:\Dev\PoorMansStudio\workspace\program\Poor Man's Studio.exe
+
+Useful script options:
+
+  .\Build-PoorMansStudio.ps1 -Configuration Debug
+  .\Build-PoorMansStudio.ps1 -Parallel 16
+  .\Build-PoorMansStudio.ps1 -Generator "Visual Studio 17 2022" -Platform x64
+  .\Build-PoorMansStudio.ps1 -SkipConfigure
+
+From x64 Native Tools Command Prompt, launch the script through Windows PowerShell:
+
+  powershell -ExecutionPolicy Bypass -File .\Build-PoorMansStudio.ps1
+  powershell -ExecutionPolicy Bypass -File .\Build-PoorMansStudio.ps1 -Parallel 16
+
+Manual CMake commands are still supported.
+
+Option A: Let CMake choose the installed Visual Studio generator
+---------------------------------------------------------------
+
+  cmake -S . -B builds -A x64
+  cmake --build builds --config Release
+
+Option B: Explicit Visual Studio 2022 generator
+-----------------------------------------------
+
+  cmake -S . -B builds -G "Visual Studio 17 2022" -A x64
+  cmake --build builds --config Release
+
+Option C: Visual Studio 2026 / VS 18.x generator
+------------------------------------------------
+
+First list available generators:
+
+  cmake --help
+
+Look under the Generators section. Use the exact Visual Studio generator name shown on your machine. If your CMake lists a Visual Studio 2026 / VS 18.x generator, the command may look like this:
+
+  cmake -S . -B builds -G "Visual Studio 18 2026" -A x64
+  cmake --build builds --config Release
+
+If CMake does not list that generator, update CMake or use the Visual Studio generator it does list.
+
+Debug build
+-----------
+
+  cmake --build builds --config Debug
+
+Clean reconfigure
+-----------------
+
+Use this after changing JUCE, CMake, Visual Studio versions, or generator settings:
+
+  rmdir /s /q builds
+  cmake -S . -B builds -A x64
+  cmake --build builds --config Release
+
+Build output
+------------
+
+The normal CMake/Visual Studio output remains under the builds folder.
+
+A post-build copy also places the app under:
+
+  workspace\program\
+
+
+9. Running The App After Build
+==============================
+
+Run the built executable from the CMake output folder or from:
+
+  workspace\program\
+
+Keep the workspace folder available. The app uses workspace paths for docs, settings, projects, exports, runtime tools, sound libraries, temporary files, and VST3 test plugins.
+
+
+10. Runtime Tools And Resources
+===============================
+
+These are not required to compile the app, but are used while running it.
 
 FluidSynth
 ----------
-FluidSynth renders MIDI through SF2/SF3 SoundFont libraries.
 
-Expected location:
+Purpose:
 
-workspace\fluidsynth\fluidsynth.exe
+- SF2/SF3 SoundFont rendering.
 
-Used for:
-- SF2/SF3 track preview
-- SF2/SF3 track rendering
-- SoundFont-based stems
-- parallel independent stem renders when Render Settings > Parallel Stems is greater than 1 or Auto (safe) resolves above 1
+Suggested local folder:
 
-SF2/SF3 SoundFonts
-------------------
-Place .sf2 and .sf3 files here:
+  workspace\fluidsynth\
 
-workspace\soundfonts
-
-SoundFonts can be selected in Project Defaults or assigned to individual MIDI tracks with Change Library.
+Place the FluidSynth executable/DLL files there, or install FluidSynth elsewhere and configure the path in the app settings.
 
 FFmpeg
 ------
-FFmpeg is used for audio conversion, encoding, and mixdown.
 
-Expected location:
+Purpose:
 
-workspace\ffmpeg\ffmpeg.exe
+- Audio conversion.
+- Compressed audio output.
+- Mixing/export helper operations.
 
-Used for:
-- WAV/MP3/FLAC/OGG AudioClip conversion/import paths
-- MP3 export
-- FLAC export
-- OGG export
-- mixed stem output
-- final audio encoding
+Suggested local folder:
 
-Final FFmpeg mix/encode remains serial even when independent stem rendering uses multiple parallel stem render jobs.
+  workspace\ffmpeg\
 
-Render Settings > Parallel Stems uses these Auto (safe) tiers before limiting by eligible stem count:
-- 2-3 CPU threads: 1 parallel stem render
-- 4-7 CPU threads: 2 parallel stem renders
-- 8-11 CPU threads: 4 parallel stem renders
-- 12-15 CPU threads: 6 parallel stem renders
-- 16+ CPU threads: 8 parallel stem renders
-
-Manual options are 1, 2, 4, 6, 8, 12, and 16. The 12 and 16 options are hardcore overrides for machines/projects that can handle heavier simultaneous SoundFont/SFZ rendering.
-
-Render Settings controls which successful user-render stem files are retained and how many parallel independent stem render jobs may run. The global settings file uses keepStemFiles=0, 1, 2, or 1,2: 0 keeps none, 1 keeps WAV stems, 2 keeps MIDI stems, and 1,2 keeps both. It uses lastRenderWorkerCount=0 for Auto (safe), or the selected manual Parallel Stems count. Kept files are organized under stems/audio and stems/midi. Preview/temp renders still clean up their stems.
+Place ffmpeg.exe and related files there, or install FFmpeg elsewhere and configure the path in the app settings.
 
 sfizz-render
 ------------
-sfizz-render is used for SFZ rendering. SFZ stems can run in parallel when Render Settings > Parallel Stems is greater than 1 or Auto (safe) resolves above 1.
 
-Expected location:
+Purpose:
 
-workspace\sfizz\bin\Release\sfizz_render.exe
+- SFZ rendering.
 
-Depending on the sfizz build, the executable may also be named sfizz-render.exe. The app setup should point to the executable path used by this build.
+Suggested local folder:
 
-SFZ Libraries
--------------
-Place full SFZ libraries here:
+  workspace\sfizz\
 
-workspace\sfz
+Place sfizz_render.exe / sfizz-render.exe and related files there, or install it elsewhere and configure the path in the app settings.
 
-Two layouts are supported.
+SoundFonts / SF3 files
+----------------------
 
-Self-contained folder layout:
+Suggested local folder:
 
-workspace\sfz\MyInstrument\MyInstrument.sfz
-workspace\sfz\MyInstrument\<instrument or category folders>\
+  workspace\soundfonts\
 
-Sidecar pack layout:
+Users provide their own SoundFonts and are responsible for licensing/redistribution rights.
 
-workspace\sfz\MyInstrument.sfz
-workspace\sfz\MyInstrument\
-workspace\sfz\MyInstrument\Kicks\
-workspace\sfz\MyInstrument\Snares\
-workspace\sfz\MyInstrument\Cymbals\
+SFZ instruments and sample packs
+--------------------------------
 
-For the sidecar layout, the folder name must match the .sfz filename without the extension. The sidecar folder is the pack root; it does not need to contain a samples folder. Instrument or category folders may live directly inside it.
+Suggested local folder:
 
-If the same-name sidecar folder is missing, or referenced SFZ pack files are missing from it, SFZ preview/render may be silent or fail.
+  workspace\sfz\
 
-Workspace Folders
+Keep SFZ files and their sample folders together. SFZ files usually reference samples with relative paths.
+
+VST3 plugins
+------------
+
+VST3 support is experimental. A plugin can crash inside its own native code. Until a future helper host is active, VST3 instruments are hosted in-process, so a plugin crash can also close the main app.
+
+Scan locations include:
+
+  workspace\vst3
+  C:\Program Files\Common Files\VST3
+
+A VST3 plugin can be a bundle folder ending in .vst3. Keep the bundle intact. Do not point the app at inner DLLs under Contents\x86_64-win.
+
+Use VST Plugins > Scan VST3 Plugins after adding or installing plugins. Use the VST3 Plugin Manager to classify unknown plugins, review failed plugins, and control which plugins appear in the Instrument dropdown.
+
+Before VST3 becomes active through project defaults, track assignment, plugin editor opening, preview, or render, the app shows a one-time dragon warning. Acknowledgement is saved in the user settings file as:
+
+  vstExperimentalWarningAcknowledged=1
+
+
+11. User Settings
 =================
 
-workspace\input
----------------
-Suggested staging folder for source files:
-- .musicxml
-- .xml
-- .mxl
-- .mid
-- .midi
-- audio before import
+Settings are stored as key/value text in the workspace settings folder.
 
-workspace\projects
--------------------
-Primary folder for saved project folders.
+Important VST-related settings include:
 
-Each project should get a named folder under workspace\projects. The normal save layout is workspace\projects\Project Name\Project Name.mwproj, with that same folder holding the project's input, output, renders, and audio folders. Save/open keeps the folder name, .mwproj filename, project name, and base name in sync.
+- vstCompatibilityWarningsEnabled
+- vstSafePluginUiMode
+- vstWarningStyleId
+- vstPreferredPluginGpuId
+- vstMaxOpenPluginWindows
+- vstExperimentalWarningAcknowledged
 
-workspace\exports
+Some settings are saved only through the main Save Settings button. Narrow one-time acknowledgements, such as the VST experimental warning, save only their own key so they do not accidentally commit unrelated unsaved path or preference changes.
+
+Deleting or editing the settings file resets preferences. Be careful when editing paths by hand.
+
+
+12. Troubleshooting
+===================
+
+CMake says JUCE was not found
+-----------------------------
+
+Confirm this file exists:
+
+  external\JUCE\CMakeLists.txt
+
+If not, clone/copy JUCE into external\JUCE.
+
+CMake cannot find a compiler
+----------------------------
+
+Use Developer PowerShell for Visual Studio or x64 Native Tools Command Prompt. Also confirm the Desktop development with C++ workload is installed.
+
+The Visual Studio generator is not available
+--------------------------------------------
+
+Run:
+
+  cmake --help
+
+Use a generator listed on your system, or update CMake so it knows about your installed Visual Studio version.
+
+Windows SDK errors
 ------------------
-General export fallback. After a project is saved, default renders follow that project's renders folder unless the user intentionally selected another export folder and saved that preference.
 
-workspace\soundfonts
+Open Visual Studio Installer, modify the installation, and install a Windows 10 or Windows 11 SDK under the C++ components.
+
+cl is not recognized
 --------------------
-Place .sf2 and .sf3 files here.
 
-workspace\sfz
---------------
-Place full SFZ libraries here.
+You are probably in a normal terminal instead of a Visual Studio developer terminal, or MSVC was not installed. Open a Visual Studio developer prompt and run:
 
-workspace\ffmpeg
-----------------
-Place ffmpeg.exe here.
+  cl
 
-workspace\fluidsynth
---------------------
-Place fluidsynth.exe here.
+If that still fails, modify Visual Studio and install the C++ workload/components.
 
-workspace\sfizz
-----------------
-Place sfizz-render or sfizz_render here.
+Build succeeds but render tools fail
+------------------------------------
 
-workspace\settings
-------------------
-App preferences/settings live here.
+The app built correctly, but runtime tools are missing or not configured. Check FluidSynth, FFmpeg, and sfizz-render paths in the app settings.
 
-workspace\temp
----------------
-App-owned temporary preview/render files live here. The app should clean only its own temp files.
+VST3 plugin crashes the app
+---------------------------
 
-Build Steps
-===========
-From the development root:
+The VST3 feature is experimental and currently hosted in-process. Save projects before testing unfamiliar plugins. Use Apply Changes after editing plugin UI state. If a plugin repeatedly crashes, remove it from the active assignment or mark it unavailable in the VST3 Plugin Manager.
 
-cmake -S . -B builds
-cmake --build builds --config Release
+A VST3 plugin does not appear
+-----------------------------
 
-The exact Visual Studio generator can also be specified if needed:
+Try these checks:
 
-cmake -S . -B builds -G "Visual Studio 18 2026" -A x64
-cmake --build builds --config Release
-
-Runtime Setup Checklist
-=======================
-Before running a full preview/render workflow, confirm:
-
-- external\JUCE exists for building.
-- workspace\fluidsynth\fluidsynth.exe exists for SF2/SF3.
-- workspace\ffmpeg\ffmpeg.exe exists for MP3/FLAC/OGG and mixdown.
-- workspace\sfizz\bin\Release\sfizz_render.exe exists for SFZ.
-- workspace\soundfonts contains at least one useful SF2/SF3.
-- workspace\sfz contains full SFZ library folders if using SFZ.
-- workspace\projects exists for project folders.
-
-AudioClip Setup Notes
-=====================
-AudioClip support uses the workspace/project folder system.
-
-Imported audio:
-- Supported import formats: WAV, MP3, FLAC, OGG.
-- Imported media is copied/converted into the project folder.
-- The .mwproj stores project-relative paths.
-
-Recorded audio:
-- The recorder uses system input devices detected through JUCE/audio device support.
-- The Input dropdown in the recorder applies immediately.
-- Refresh Devices rescans inputs without resetting unrelated recorder state.
-- Recording writes temp take files first.
-- Save / Apply commits the take to the project and creates an AudioClip track.
-- Discard, Redo From Top, and canceled closes should remove temp take files.
-
-Storage:
-- The app should check free space before large import/conversion/recording operations.
-- WAV and FLAC are lossless but can be large.
-- MP3 and OGG are compressed and use high-quality defaults when selected.
-
-Building Without external\JUCE
-==============================
-The source bundle does not include JUCE.
-
-If external\JUCE is missing, CMake/build will fail. This is expected for source-only packages that rely on a separately installed JUCE checkout.
-
-Troubleshooting
-===============
-
-JUCE configure errors:
-- Check external\JUCE exists.
-- Check external\JUCE\modules exists.
-- Re-run CMake from a clean builds folder if the path changed.
-
-FluidSynth render is silent or fails:
-- Check workspace\fluidsynth\fluidsynth.exe.
-- Check the selected SF2/SF3 file.
-- Confirm MIDI track instrument assignment is not empty.
-
-SFZ render is silent or fails:
-- Check workspace\sfizz\bin\Release\sfizz_render.exe.
-- Check full SFZ folders and sample paths.
-
-MP3/FLAC/OGG import/export fails:
-- Check workspace\ffmpeg\ffmpeg.exe.
-- Check available storage space.
-- Check that the source file can be decoded by FFmpeg.
-
-Recorder does not see input devices:
-- Open the recorder.
-- Click Refresh Devices.
-- Confirm the device appears in Windows sound settings.
-- Confirm the app has microphone/input permission.
-
-AudioClip preview is silent but render has audio:
-- Confirm the AudioClip media path resolves inside the project folder.
-- Confirm the AudioClip track is assigned to the previewed sequence/time range.
-- Confirm the preview map/length includes the AudioClip duration.
-
-Project moved and AudioClips are missing:
-- Move the whole workspace\projects\Project Name folder, not only the .mwproj.
+- Confirm the plugin is a VST3 instrument, not only an audio effect.
+- Run VST Plugins > Scan VST3 Plugins.
+- Check the VST3 Plugin Manager unsupported/unknown pane.
+- Keep .vst3 bundles intact.
+- Use workspace\vst3 or C:\Program Files\Common Files\VST3.
 
 
-Window header note
-------------------
-Tool windows use custom JUCE title/header drawing. They intentionally use a light-gray header with colored - / + / x controls and the current window icon. This is app UI code only and does not require extra external assets beyond the existing app resources.
+13. Packaging Notes
+===================
 
-Window headers
-- Main UI and major tool windows use a compact darker light-gray custom header.
-- Header controls use literal colored buttons: blue -, green +, and red x.
-- The custom header height is 32 px, slightly shorter than the previous custom header but still taller than a default/native title bar.
-- Edit Thoughts uses the note/pencil icon, Track Manager uses the track icon, AudioClip Recorder uses the microphone icon, and Sequence Color uses the color wheel icon.
+Release/source bundles should include:
+
+- Source files.
+- App resources.
+- Workspace README placeholders.
+- User guide PDF.
+- Plain-text user and setup guides.
+- Third-party notices.
+
+Release/source bundles should not include:
+
+- Third-party VST3 plugins unless redistribution is explicitly permitted.
+- Large user projects.
+- Rendered output folders.
+- Temporary audio.
+- Raw guide screenshot working files.
+- Local compiler/toolchain installs.
+- User-owned SoundFonts/SFZ sample packs unless licensing allows redistribution.
 
 
+14. Documentation
+=================
 
-Window header behavior
-----------------------
-Main UI and primary tool windows use the compact darker light-gray custom header. About and the main UI Chg Seq picker use simple title-barless dialog styling; the Chg Seq picker content remains scrollable for longer sequence lists.
+Illustrated guide:
+
+  workspace\docs\PoorMansStudio_User_Guide.pdf
+
+Plain-text user guide:
+
+  workspace\docs\USER_GUIDE.txt
+
+Setup/build guide:
+
+  workspace\docs\SETUP_AND_BUILD_GUIDE.txt
+
+
+VST3 graphics preference startup check
+======================================
+
+The VST3 Settings window remembers the preferred plugin UI GPU in the user preferences file. If a specific GPU was saved, the app checks for that adapter on startup or before opening VST3 Settings so the dropdown is populated instead of showing only Auto / System Default. If the saved adapter is not present, the UI falls back to Auto / System Default. Use Refresh Graphics Detection when hardware, drivers, monitors, or external GPUs change and you want the full adapter list rebuilt.

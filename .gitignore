@@ -1,12 +1,18 @@
-
 # Poor Man's Studio bundle/import helper files
 PoorMansStudio_Complete_Bundle*.zip
 *.tmp.zip
-Apply-PoorMansStudioBundle.ps1
-Apply-PoorMansStudioBundle*.ps1
 PoorMansStudio_Project_Continuation*.md
+.bundle_import_tmp/
+
+# Local helper scripts / one-off repo scripts
+# Keep Build-PoorMansStudio.ps1 tracked; it is the reusable build-summary helper.
+Apply-PoorMansStudioBundle.ps1
+Git Commit and Push.cmd
+
 # Local build dependencies and generated build outputs
+external/JUCE/
 Builds/
+builds/
 build/
 out/
 cmake-build-*/
@@ -18,67 +24,44 @@ cmake-build-*/
 *.pdb
 *.obj
 *.ilk
-# Keep layout folders visible, but ignore their contents
-!builds/
-builds/**
-!builds/README.md
-!external/
-external/**
-!external/README.md
-!workspace/program/
-workspace/program/**
-!workspace/program/README.md
-!workspace/ffmpeg/
-workspace/ffmpeg/**
-!workspace/ffmpeg/README.md
-!workspace/fluidsynth/
-workspace/fluidsynth/**
-!workspace/fluidsynth/README.md
-!workspace/sfizz/
-workspace/sfizz/**
-!workspace/sfizz/README.md
-!workspace/sfz/
-workspace/sfz/**
-!workspace/sfz/README.md
-!workspace/soundfonts/
-workspace/soundfonts/**
-!workspace/soundfonts/README.md
-!workspace/input/
-workspace/input/**
-!workspace/input/README.md
-!workspace/exports/
-workspace/exports/**
-!workspace/exports/README.md
-!workspace/projects/
-workspace/projects/**
-!workspace/projects/README.md
-!workspace/settings/
-workspace/settings/**
-!workspace/settings/README.md
-!workspace/temp/
-workspace/temp/**
-!workspace/temp/README.md
-!workspace/tmp/
-workspace/tmp/**
-!workspace/tmp/README.md
-!workspace/recordings/
-workspace/recordings/**
-!workspace/recordings/README.md
-!workspace/renders/
-workspace/renders/**
-!workspace/renders/README.md
-!workspace/songs/
-workspace/songs/**
-!workspace/songs/README.md
-!workspace/samples/
-workspace/samples/**
-!workspace/samples/README.md
-# Local release/package folders
+
+# Local workspace/user content
+workspace/settings/
+workspace/sfz/
+workspace/sfizz/
+workspace/soundfonts/
+workspace/samples/
+workspace/recordings/
+workspace/renders/
+workspace/exports/
+workspace/songs/
+workspace/projects/
+workspace/input/
+workspace/temp/
+workspace/tmp/
+workspace/cache/
+workspace/logs/
+
+# Local bundled/runtime tool folders
+# Keep source/docs in Git. Publish runnable/runtime packages through GitHub Releases
+# or provide separate setup instructions instead of tracking large binaries in Git.
+workspace/program/
+workspace/ffmpeg/
+workspace/fluidsynth/
+
+# Runnable binary/package folders outside workspace
+# If you intentionally want program/ tracked, remove this line.
 program/
 release/
 releases/
 dist/
-portable/
+
+# Local/user VST3 plugins and future external host binaries
+workspace/vst3/*
+!workspace/vst3/README.md
+workspace/vst_host/*
+!workspace/vst_host/README.md
+
 # OS/editor noise
 .DS_Store
 Thumbs.db

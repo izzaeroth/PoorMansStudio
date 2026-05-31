@@ -19,6 +19,7 @@
 #include "audio/SoundFontPresetReader.h"
 #include "audio/RenderJob.h"
 #include "audio/AudioClipRecorder.h"
+#include "vst/VstPluginTypes.h"
 #include "gui/PianoRollComponent.h"
 
 namespace mw::gui
@@ -623,12 +624,24 @@ namespace mw::gui
         std::filesystem::path getSelectedSoundFontPath() const;
         mw::core::SampleBackendType getProjectDefaultBackendType() const;
         std::filesystem::path getProjectDefaultLibraryPath(mw::core::SampleBackendType backendType) const;
+        std::optional<mw::vst::VstPluginDescriptor> getProjectDefaultVstPluginDescriptor();
+        void applyVstPluginDescriptorToAssignment(mw::core::InstrumentAssignment& assignment, const mw::vst::VstPluginDescriptor& descriptor) const;
+        void captureProjectDefaultVstPluginSelection();
         void seedTrackSoundLibraryFromProjectDefaults(mw::core::Track& track);
         void seedMissingTrackSoundLibrariesFromProjectDefaults(mw::core::Project& project);
         void refreshTrackSoundLibraryDisplay();
         void applyProjectBackendSelection();
         void chooseTrackSoundLibrary();
         void assignSelectedTrackSoundLibrary(const std::filesystem::path& libraryPath, mw::core::SampleBackendType backendType);
+        void scanVstPlugins(bool showSummary);
+        void openVstPluginManagerWindow();
+        void openVstSettingsWindow();
+        void refreshVstGraphicsProfile(bool firstLaunchAutoDetect);
+        void assignSelectedTrackVstPlugin(const mw::vst::VstPluginDescriptor& descriptor);
+        void openSelectedTrackVstPluginUi();
+        juce::String captureOpenVstPluginStateForTrack(int trackIndex, bool updateTrackAssignment, bool logCapture);
+        bool closeVstPluginWindowForTrack(int trackIndex, const juce::String& reason = {});
+        void closeAllVstPluginWindows();
 
         void populateInstrumentCombo();
         void refreshPresetListFromSelectedSoundFont();
@@ -748,6 +761,10 @@ namespace mw::gui
         void saveUserSettingsNow();
         void configureHelperBubbles();
         void setHelperBubblesEnabled(bool enabled);
+        void setVstCompatibilityWarningsEnabled(bool enabled);
+        void showVstExperimentalWarningIfNeeded();
+        bool selectedTrackHasAppliedVstPlugin() const;
+        void updateOpenVstPluginButtonState();
         bool areHelperBubblesEnabled() const { return helperBubblesEnabled; }
         bool ensureSelectedTrackHasSequenceForPianoRoll();
 
@@ -825,6 +842,7 @@ namespace mw::gui
         juce::TextButton applyBackendButton {"Apply Project Defaults"};
         juce::TextButton applyTrackButton {"Apply Track Settings"};
         juce::TextButton changeTrackLibraryButton {"Change Library"};
+        juce::TextButton openVstPluginButton {"Open VST Plugin"};
         juce::TextButton trackSfzButton {"Track SFZ"};
         juce::TextButton addTrackButton {"Add Blank"};
         juce::TextButton duplicateTrackButton {"Duplicate"};
@@ -1046,6 +1064,9 @@ namespace mw::gui
         std::unique_ptr<juce::DocumentWindow> sequenceThoughtsWindow;
         std::unique_ptr<juce::DocumentWindow> renderSettingsWindow;
         std::unique_ptr<juce::DocumentWindow> audioRecorderWindow;
+        std::unique_ptr<juce::DocumentWindow> vstPluginManagerWindow;
+        std::unique_ptr<juce::DocumentWindow> vstSettingsWindow;
+        std::map<int, std::unique_ptr<juce::DocumentWindow>> vstPluginEditorWindows;
         std::unique_ptr<juce::DocumentWindow> projectInfoWindow;
         std::unique_ptr<juce::Component> rawNotesContent;
         std::unique_ptr<juce::Component> trackManagerContent;
@@ -1144,11 +1165,18 @@ namespace mw::gui
         std::unique_ptr<juce::DocumentWindow> sequenceColorWindow;
         std::unique_ptr<juce::Component> sequenceColorContent;
         bool helperBubblesEnabled = true;
+        bool vstCompatibilityWarningsEnabled = true;
+        bool vstSafePluginUiMode = false;
+        int vstWarningStyleId = 1;
+        int vstMaxOpenPluginWindows = 4;
+        bool vstExperimentalWarningAcknowledged = false;
+        mw::vst::GraphicsProfile vstGraphicsProfile;
         HelperTooltipLookAndFeel helperTooltipLookAndFeel;
         std::unique_ptr<juce::TooltipWindow> helperTooltipWindow;
 
         std::vector<std::filesystem::path> detectedSoundFonts;
         std::vector<std::filesystem::path> detectedSfzFiles;
+        std::vector<mw::vst::VstPluginDescriptor> detectedVstPlugins;
         std::vector<mw::audio::SoundFontPreset> detectedPresets;
         std::optional<mw::core::Project> currentProject;
         std::optional<std::filesystem::path> currentProjectFilePath;

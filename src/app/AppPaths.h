@@ -17,6 +17,8 @@ namespace mw::app
         static std::filesystem::path fluidSynthFolder();
         static std::filesystem::path ffmpegFolder();
         static std::filesystem::path sfzFolder();
+        static std::filesystem::path vst3Folder();
+        static std::filesystem::path vstHostFolder();
         static std::filesystem::path sfizzFolder();
         static std::filesystem::path projectsFolder();
         static std::filesystem::path projectFolderForName(const std::string& projectName);

@@ -2,6 +2,8 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
+#include <utility>
 
 namespace mw::app
 {
@@ -11,8 +13,8 @@ namespace mw::app
         std::filesystem::path lastExportFolder;
         std::filesystem::path lastSoundFontPath;
         std::filesystem::path lastSfzPath;
+        std::filesystem::path lastVst3Folder;
 
-        std::string lastBaseFileName = "rendered_score";
         int lastOutputFormatId = 1;
         int lastAudioClipFormatId = 1;
         int lastAudioClipQualityKbps = 320;
@@ -25,6 +27,17 @@ namespace mw::app
         bool suppressSfzRenderWarning = false;
         int themePresetId = 1;
         bool helperBubblesEnabled = true;
+
+        bool vstCompatibilityWarningsEnabled = true;
+        bool vstSafePluginUiMode = false;
+        int vstWarningStyleId = 1; // 1 = Auto, 2 = Conservative, 3 = Minimal
+        bool vstGraphicsProfileDetected = false;
+        std::string vstGraphicsProfileSource;
+        std::string vstGraphicsProfileLastDetected;
+        std::string vstPreferredPluginGpuId = "auto";
+        int vstMaxOpenPluginWindows = 4;
+        std::string vstGraphicsProfileSummary;
+        bool vstExperimentalWarningAcknowledged = false;
     };
 
     class UserPreferencesStore
@@ -32,5 +45,9 @@ namespace mw::app
     public:
         static UserPreferences load();
         static bool save(const UserPreferences& preferences);
+        static bool saveValue(const std::string& key, const std::string& value);
+        static bool saveValues(const std::vector<std::pair<std::string, std::string>>& values);
+        static bool saveBoolValue(const std::string& key, bool value);
+        static bool saveIntValue(const std::string& key, int value);
     };
 }

@@ -1,4 +1,6 @@
 #include <juce_gui_extra/juce_gui_extra.h>
+
+#include "app/AppVersion.h"
 #include <functional>
 #include "BinaryData.h"
 
@@ -316,7 +318,7 @@ public:
 
     const juce::String getApplicationVersion() override
     {
-        return "0.56.0";
+        return mw::app::appVersion;
     }
 
     bool moreThanOneInstanceAllowed() override

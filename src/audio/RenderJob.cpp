@@ -5,6 +5,7 @@
 #include "audio/ExternalFluidSynthRenderer.h"
 #include "audio/ExternalSfizzRenderer.h"
 #include "audio/SfzValidator.h"
+#include "vst/VstInstrumentHost.h"
 #include "exporting/ExportSettings.h"
 #include "midi/MidiExporter.h"
 #include "serialization/ProjectSerializer.h"
@@ -247,7 +248,9 @@ namespace
     {
         const auto backend = track.getInstrument().backendType;
 
-        if (backend == mw::core::SampleBackendType::SF2 || backend == mw::core::SampleBackendType::SFZ)
+        if (backend == mw::core::SampleBackendType::SF2
+            || backend == mw::core::SampleBackendType::SFZ
+            || backend == mw::core::SampleBackendType::VST3)
             return backend;
 
         return fallbackBackendForJob(job);
@@ -290,7 +293,9 @@ namespace
                 continue;
 
             const auto backend = resolveTrackRenderBackend(job, track);
-            if (backend == mw::core::SampleBackendType::SF2 || backend == mw::core::SampleBackendType::SFZ)
+            if (backend == mw::core::SampleBackendType::SF2
+                || backend == mw::core::SampleBackendType::SFZ
+                || backend == mw::core::SampleBackendType::VST3)
                 ++count;
         }
 
@@ -440,7 +445,9 @@ namespace
                 continue;
 
             const auto trackBackend = resolveTrackRenderBackend(job, track);
-            if (trackBackend != mw::core::SampleBackendType::SF2 && trackBackend != mw::core::SampleBackendType::SFZ)
+            if (trackBackend != mw::core::SampleBackendType::SF2
+                && trackBackend != mw::core::SampleBackendType::SFZ
+                && trackBackend != mw::core::SampleBackendType::VST3)
                 continue;
 
             auto stemProject = makeSingleTrackProject(job.project, track);
@@ -516,7 +523,29 @@ namespace
 
         bool stemRendered = false;
 
-        if (task.backend == mw::core::SampleBackendType::SFZ)
+        if (task.backend == mw::core::SampleBackendType::VST3)
+        {
+            status(callbacks, "Rendering VST3 stem: " + task.trackName);
+
+            mw::vst::VstRenderRequest request;
+            request.track = task.stemProject.getTracks().front();
+            request.tempoBpm = task.stemProject.getTempoBpm();
+            request.sampleRate = job.sampleRate;
+            request.channelCount = job.channelCount;
+            request.blockSize = 512;
+            request.wavOutputPath = task.stemWav;
+            request.cancelRequested = &cancelRequested;
+
+            const auto vstResult = mw::vst::VstInstrumentHost::renderTrackToWav(request);
+            log(callbacks, vstResult.message);
+            if (vstResult.cancelled)
+            {
+                result.cancelled = true;
+                return result;
+            }
+            stemRendered = vstResult.success;
+        }
+        else if (task.backend == mw::core::SampleBackendType::SFZ)
         {
             const auto validation = mw::audio::SfzValidator::validateSampleReferences(task.libraryPath);
             log(callbacks, validation.message);
