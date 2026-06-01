@@ -532,6 +532,26 @@ namespace mw::gui
         juce::Colour textColour { juce::Colours::white };
         juce::Colour outlineColour { juce::Colours::grey };
     };
+    struct VstHostHelperStatusSnapshot
+    {
+        bool checked = false;
+        bool executableFound = false;
+        bool versionOk = false;
+        bool pingOk = false;
+        bool scanCommandsOk = false;
+        juce::String executablePath;
+        juce::String versionOutput;
+        juce::String pingOutput;
+        juce::String helpOutput;
+        juce::String errorText;
+        juce::String checkedAtLocal;
+
+        bool allOk() const noexcept
+        {
+            return checked && executableFound && versionOk && pingOk && scanCommandsOk;
+        }
+    };
+
     class MainComponent final : public juce::Component,
                                 public juce::MenuBarModel
     {
@@ -580,6 +600,10 @@ namespace mw::gui
         void stopAudioRecorderTestPlaybackAndCleanup(const std::filesystem::path& testPath = {});
         void cancelAudioRecorderTestAndCleanup();
         void setAudioRecorderMicGainDb(double gainDb);
+        void setAudioRecorderTrackLiveEffectEnabled(bool enabled);
+        mw::audio::AudioClipRecorderLiveEffectOptions buildAudioRecorderLiveEffectOptions(int targetTrackIndex, int sourceTrackIndex) const;
+        int getAudioRecorderTargetTrackIndex() const;
+        bool trackHasUsableLiveEffectForAudioRecorder(int trackIndex) const;
         void pauseOrResumeAudioRecordingTake();
         void stopAudioRecordingTake();
         void keepAudioRecordingTake();
@@ -590,7 +614,11 @@ namespace mw::gui
         void revealCurrentProjectFolder();
         bool ensureProjectFolderReadyForAudio();
         std::filesystem::path getCurrentProjectFolder() const;
-        bool exportFolderShouldFollowProjectFolder(const std::filesystem::path& nextProjectFolder) const;
+        std::filesystem::path getAudioRecordingSessionFolder();
+        void clearAudioRecordingSessionStaging(bool removeFiles);
+        void discardCurrentAudioClipStagingSession(const juce::String& reason);
+        bool commitAppliedStagedAudioClipsToProjectFolder(const std::filesystem::path& projectFolder);
+        bool exportFolderShouldResetToWorkspaceExports(const std::filesystem::path& nextProjectFolder) const;
         void syncProjectIdentityToFile(const juce::File& file);
         mw::core::AudioClipSavedFormat getSelectedAudioClipFormat() const;
         int getSelectedAudioClipQualityKbps() const;
@@ -633,13 +661,32 @@ namespace mw::gui
         void applyProjectBackendSelection();
         void chooseTrackSoundLibrary();
         void assignSelectedTrackSoundLibrary(const std::filesystem::path& libraryPath, mw::core::SampleBackendType backendType);
+        void showScannedVstInstrumentChooserDialog(const juce::String& title,
+                                                  const juce::String& message,
+                                                  std::function<void(const mw::vst::VstPluginDescriptor&)> onChoose);
         void scanVstPlugins(bool showSummary);
         void openVstPluginManagerWindow();
         void openVstSettingsWindow();
         void refreshVstGraphicsProfile(bool firstLaunchAutoDetect);
+        juce::String runVstHostHelperCommandForStatus(const juce::File& helperFile, const juce::String& argument, int timeoutMs, int& exitCode);
+        void refreshVstHostHelperStatusCache();
+        void showVstHostHelperStatusWindow();
         void assignSelectedTrackVstPlugin(const mw::vst::VstPluginDescriptor& descriptor);
+        void applyVstPluginDescriptorToEffectSlot(mw::core::VstPluginAssignment& slot, const mw::vst::VstPluginDescriptor& descriptor) const;
+        void populateVstEffectCombo();
+        void syncVstEffectControlsFromSelection();
+        void applySelectedTrackVstEffectSlots();
+        void applySelectedTrackVstEffectSlot() { applySelectedTrackVstEffectSlots(); }
+        void setVstEffectStatusText(int trackIndex, const juce::String& baseStatus);
+        void recordVstEffectRenderStatusForTrack(int trackIndex, const juce::String& statusText);
         void openSelectedTrackVstPluginUi();
+        void openSelectedTrackVstEffectUi(int effectSlotIndex = 0);
+        void renderSelectedTrackVstEffectTestSample(int effectSlotIndex = 0);
+        void renderVstEffectTestSampleForTrack(int trackIndex, int effectSlotIndex);
         juce::String captureOpenVstPluginStateForTrack(int trackIndex, bool updateTrackAssignment, bool logCapture);
+        juce::String captureOpenVstEffectStateForTrack(int trackIndex, int effectSlotIndex, bool updateTrackAssignment, bool logCapture);
+        int captureOpenVstPluginStatesForPreview(const juce::String& contextLabel);
+        int captureOpenVstPluginStatesForProjectSave();
         bool closeVstPluginWindowForTrack(int trackIndex, const juce::String& reason = {});
         void closeAllVstPluginWindows();
 
@@ -764,6 +811,7 @@ namespace mw::gui
         void setVstCompatibilityWarningsEnabled(bool enabled);
         void showVstExperimentalWarningIfNeeded();
         bool selectedTrackHasAppliedVstPlugin() const;
+        bool selectedTrackHasOpenableVstEffect(int effectSlotIndex) const;
         void updateOpenVstPluginButtonState();
         bool areHelperBubblesEnabled() const { return helperBubblesEnabled; }
         bool ensureSelectedTrackHasSequenceForPianoRoll();
@@ -842,7 +890,9 @@ namespace mw::gui
         juce::TextButton applyBackendButton {"Apply Project Defaults"};
         juce::TextButton applyTrackButton {"Apply Track Settings"};
         juce::TextButton changeTrackLibraryButton {"Change Library"};
-        juce::TextButton openVstPluginButton {"Open VST Plugin"};
+        juce::TextButton openVstPluginButton {"Open VST Instrument"};
+        juce::TextButton openVstEffectButton {"Open Slot 1"};
+        juce::TextButton openVstEffect2Button {"Open Slot 2"};
         juce::TextButton trackSfzButton {"Track SFZ"};
         juce::TextButton addTrackButton {"Add Blank"};
         juce::TextButton duplicateTrackButton {"Duplicate"};
@@ -919,6 +969,9 @@ namespace mw::gui
         juce::Label trackLabel;
         juce::Label trackSoundLibraryLabel;
         juce::Label instrumentLabel;
+        juce::Label vstEffectLabel;
+        juce::Label vstEffect2Label;
+        juce::Label vstEffectStatusLabel;
         juce::Label trackVolumeLabel;
         juce::Label masterVolumeLabel;
         juce::Label tempoLabel;
@@ -980,12 +1033,18 @@ namespace mw::gui
         juce::ComboBox themeCombo;
         juce::ComboBox trackCombo;
         juce::ComboBox instrumentCombo;
+        juce::ComboBox vstEffectCombo;
+        juce::ComboBox vstEffect2Combo;
         juce::ComboBox trackBackendCombo;
         juce::TextEditor pianoRollSnapBox;
         juce::ComboBox pianoRollBeatWindowCombo;
 
         juce::ToggleButton muteToggle {"Mute"};
         juce::ToggleButton soloToggle {"Solo"};
+        juce::ToggleButton enableVstEffectsToggle {"Enable"};
+        juce::ToggleButton bypassVstEffectToggle {"Bypass"};
+        juce::ToggleButton enableVstEffect2Toggle {"Enable"};
+        juce::ToggleButton bypassVstEffect2Toggle {"Bypass"};
 
         juce::Slider trackVolumeSlider;
         juce::Slider masterVolumeSlider;
@@ -1000,6 +1059,8 @@ namespace mw::gui
         juce::TextEditor trackManagerMapBeatWindowBox;
         SequenceConsoleComponent logBox;
         juce::TextEditor noteEditorBox;
+
+        std::map<int, juce::String> lastVstEffectRenderStatusByTrack;
 
         struct PianoRollEditorWindowState
         {
@@ -1066,7 +1127,9 @@ namespace mw::gui
         std::unique_ptr<juce::DocumentWindow> audioRecorderWindow;
         std::unique_ptr<juce::DocumentWindow> vstPluginManagerWindow;
         std::unique_ptr<juce::DocumentWindow> vstSettingsWindow;
+        std::unique_ptr<juce::DocumentWindow> vstHostHelperStatusWindow;
         std::map<int, std::unique_ptr<juce::DocumentWindow>> vstPluginEditorWindows;
+        std::map<int, std::unique_ptr<juce::DocumentWindow>> vstEffectEditorWindows;
         std::unique_ptr<juce::DocumentWindow> projectInfoWindow;
         std::unique_ptr<juce::Component> rawNotesContent;
         std::unique_ptr<juce::Component> trackManagerContent;
@@ -1092,8 +1155,11 @@ namespace mw::gui
         bool audioRecorderTestActive = false;
         bool audioRecorderTestPlaybackActive = false;
         double audioRecorderMicGainDb = 0.0;
+        bool audioRecorderTrackLiveEffectEnabled = false;
+        std::optional<std::filesystem::path> audioRecordingSessionFolderPath;
         std::filesystem::path activeRecordingTempWavPath;
         std::filesystem::path activeRecordingSourceWavPath;
+        std::optional<std::filesystem::path> activeRecordingProjectFolder;
         bool audioRecordingTakeStopped = false;
         bool audioRecordingTakeDirty = false;
         double activeRecordingSampleRate = 48000.0;
@@ -1171,6 +1237,7 @@ namespace mw::gui
         int vstMaxOpenPluginWindows = 4;
         bool vstExperimentalWarningAcknowledged = false;
         mw::vst::GraphicsProfile vstGraphicsProfile;
+        VstHostHelperStatusSnapshot vstHostHelperStatus;
         HelperTooltipLookAndFeel helperTooltipLookAndFeel;
         std::unique_ptr<juce::TooltipWindow> helperTooltipWindow;
 

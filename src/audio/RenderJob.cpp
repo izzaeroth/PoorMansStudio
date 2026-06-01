@@ -11,6 +11,7 @@
 #include "serialization/ProjectSerializer.h"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <mutex>
 #include <optional>
@@ -91,25 +92,155 @@ namespace
         return clip.projectRelativePath;
     }
 
-    std::vector<std::filesystem::path> collectAudioClipInputs(
+    std::filesystem::path audioClipEffectTempFolderFor(const mw::audio::RenderJob& job)
+    {
+        return job.exportFolder / (job.baseFileName + "_audioclip_effects");
+    }
+
+    void cleanupAudioClipEffectTempFolderAfterSuccessfulRender(
         const mw::audio::RenderJob& job,
         const mw::audio::RenderJobCallbacks& callbacks)
     {
+        const auto folder = audioClipEffectTempFolderFor(job);
+        if (folder.empty())
+            return;
+
+        std::error_code ignored;
+        if (std::filesystem::exists(folder, ignored))
+        {
+            std::filesystem::remove_all(folder, ignored);
+            log(callbacks, "AudioClip VST3 effect cleanup: removed temporary processed clip files.");
+        }
+    }
+
+    std::vector<std::filesystem::path> collectAudioClipInputs(
+        const mw::audio::RenderJob& job,
+        std::atomic<bool>& cancelRequested,
+        const mw::audio::RenderJobCallbacks& callbacks,
+        std::string& errorMessage)
+    {
         std::vector<std::filesystem::path> inputs;
 
+        auto cleanName = [](std::string value)
+        {
+            std::string cleaned;
+            for (char c : value)
+            {
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_')
+                    cleaned.push_back(c);
+                else
+                    cleaned.push_back('_');
+            }
+            return cleaned.empty() ? std::string("clip") : cleaned;
+        };
+
+        auto lowerExtension = [](std::filesystem::path path)
+        {
+            auto ext = path.extension().string();
+            for (auto& c : ext)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return ext;
+        };
+
+        int clipIndex = 0;
         for (const auto& clip : job.project.getAudioClips())
         {
+            if (cancelRequested)
+            {
+                errorMessage = "Render cancelled while preparing AudioClip media.";
+                return {};
+            }
+
             const auto path = resolveAudioClipPath(job, clip);
             if (path.empty())
+            {
+                ++clipIndex;
                 continue;
+            }
 
             if (!std::filesystem::exists(path))
             {
                 log(callbacks, "WARNING: AudioClip media not found for render/preview: " + path.string());
+                ++clipIndex;
                 continue;
             }
 
-            inputs.push_back(path);
+            const auto& tracks = job.project.getTracks();
+            const bool hasEffectTrack = clip.trackIndex >= 0 && clip.trackIndex < static_cast<int>(tracks.size());
+            const auto* track = hasEffectTrack ? &tracks[static_cast<std::size_t>(clip.trackIndex)] : nullptr;
+            const auto sourceKind = mw::core::audioClipSourceTypeToString(clip.sourceType);
+            const auto sourceKindTitle = sourceKind.empty()
+                ? std::string("AudioClip")
+                : std::string(1, static_cast<char>(std::toupper(static_cast<unsigned char>(sourceKind.front())))) + sourceKind.substr(1);
+
+            if (track == nullptr || !mw::vst::VstInstrumentHost::trackHasEnabledVstEffect(*track))
+            {
+                inputs.push_back(path);
+                ++clipIndex;
+                continue;
+            }
+
+            status(callbacks, "Processing " + sourceKind + " AudioClip track VST3 effect: " + track->getName());
+            log(callbacks, sourceKindTitle + " AudioClip VST3 effect source stays dry/unchanged: " + path.string());
+
+            const auto clipStem = cleanName(!clip.name.empty() ? clip.name : path.stem().string());
+            const auto effectFolder = audioClipEffectTempFolderFor(job);
+            std::error_code ec;
+            std::filesystem::create_directories(effectFolder, ec);
+            if (ec)
+            {
+                errorMessage = "Failed to create AudioClip effect temp folder: " + ec.message();
+                return {};
+            }
+
+            std::filesystem::path sourceWav = path;
+            std::filesystem::path convertedWav = effectFolder / ("clip_" + std::to_string(clipIndex + 1) + "_" + clipStem + "_source.wav");
+            const auto ext = lowerExtension(path);
+            if (ext != ".wav")
+            {
+                mw::audio::FfmpegEncodeRequest convertRequest;
+                convertRequest.ffmpegExePath = job.ffmpegPath;
+                convertRequest.inputWavPath = path;
+                convertRequest.outputPath = convertedWav;
+                convertRequest.format = mw::audio::EncodedAudioFormat::Wav;
+                convertRequest.outputChannels = job.channelCount;
+
+                const auto convertResult = mw::audio::ExternalFfmpegEncoder::encodeFromWav(convertRequest);
+                log(callbacks, "FFmpeg " + sourceKind + " AudioClip effect source command: " + convertResult.commandLine);
+                log(callbacks, convertResult.message);
+                if (!convertResult.success || !std::filesystem::exists(convertedWav))
+                {
+                    errorMessage = "Failed to prepare " + sourceKind + " AudioClip media for VST3 effect processing.";
+                    return {};
+                }
+                sourceWav = convertedWav;
+            }
+
+            auto processedWav = effectFolder / ("clip_" + std::to_string(clipIndex + 1) + "_" + clipStem + "_vstfx.wav");
+            mw::vst::VstEffectProcessRequest effectRequest;
+            effectRequest.track = *track;
+            effectRequest.inputWavPath = sourceWav;
+            effectRequest.outputWavPath = processedWav;
+            effectRequest.blockSize = 512;
+            effectRequest.tailSeconds = 2.0;
+            effectRequest.cancelRequested = &cancelRequested;
+
+            const auto effectResult = mw::vst::VstInstrumentHost::processWavWithTrackEffectChain(effectRequest);
+            log(callbacks, effectResult.message);
+            if (effectResult.cancelled)
+            {
+                errorMessage = sourceKindTitle + " AudioClip VST3 effect processing was cancelled.";
+                return {};
+            }
+            if (!effectResult.success || !std::filesystem::exists(processedWav))
+            {
+                errorMessage = "Failed to process " + sourceKind + " AudioClip through VST3 effect chain for track: " + track->getName();
+                return {};
+            }
+
+            inputs.push_back(processedWav);
+            log(callbacks, sourceKindTitle + " AudioClip VST3 effect processed for track: " + track->getName() + " -> " + processedWav.string());
+            ++clipIndex;
         }
 
         return inputs;
@@ -271,6 +402,21 @@ namespace
         return assigned.size() > 1;
     }
 
+    bool projectHasEnabledVstEffectChains(const mw::audio::RenderJob& job)
+    {
+        return std::any_of(
+            job.project.getTracks().begin(),
+            job.project.getTracks().end(),
+            [](const auto& track)
+            {
+                return !track.isAudioClipTrack()
+                    && !track.getMuted()
+                    && !track.getNotes().empty()
+                    && mw::vst::VstInstrumentHost::trackHasEnabledVstEffect(track);
+            }
+        );
+    }
+
     int countEligibleStemTracks(const mw::audio::RenderJob& job)
     {
         const bool anySolo =
@@ -388,6 +534,52 @@ namespace
 
         if (!std::filesystem::exists(audioFolder, ignored) && !std::filesystem::exists(midiFolder, ignored))
             std::filesystem::remove_all(stemFolder, ignored);
+    }
+
+    bool shouldKeepWavSidecar(const mw::audio::RenderJob& job)
+    {
+        return (std::clamp(job.keepStemFilesMask, 0, 3) & 1) != 0;
+    }
+
+    bool shouldKeepMidiSidecar(const mw::audio::RenderJob& job)
+    {
+        return (std::clamp(job.keepStemFilesMask, 0, 3) & 2) != 0;
+    }
+
+    void cleanupEncodedSourceWavAfterSuccessfulRender(
+        const mw::audio::RenderJob& job,
+        const std::filesystem::path& wavPath,
+        const mw::audio::RenderJobCallbacks& callbacks)
+    {
+        if (wavPath.empty())
+            return;
+
+        std::error_code ignored;
+        if (shouldKeepWavSidecar(job))
+            log(callbacks, "Render cleanup: kept WAV sidecar/source file: " + wavPath.string());
+        else
+        {
+            std::filesystem::remove(wavPath, ignored);
+            log(callbacks, "Render cleanup: removed WAV sidecar/source file.");
+        }
+    }
+
+    void cleanupMidiSidecarAfterSuccessfulRender(
+        const mw::audio::RenderJob& job,
+        const std::filesystem::path& midiPath,
+        const mw::audio::RenderJobCallbacks& callbacks)
+    {
+        if (midiPath.empty())
+            return;
+
+        std::error_code ignored;
+        if (shouldKeepMidiSidecar(job))
+            log(callbacks, "Render cleanup: kept MIDI sidecar file: " + midiPath.string());
+        else
+        {
+            std::filesystem::remove(midiPath, ignored);
+            log(callbacks, "Render cleanup: removed MIDI sidecar file.");
+        }
     }
 
     mw::core::Project makeSingleTrackProject(const mw::core::Project& source, const mw::core::Track& track)
@@ -601,6 +793,33 @@ namespace
             return result;
         }
 
+        const auto& renderedTrack = task.stemProject.getTracks().front();
+        if (mw::vst::VstInstrumentHost::trackHasEnabledVstEffect(renderedTrack))
+        {
+            status(callbacks, "Processing VST3 effect chain: " + task.trackName);
+
+            mw::vst::VstEffectProcessRequest effectRequest;
+            effectRequest.track = renderedTrack;
+            effectRequest.inputWavPath = task.stemWav;
+            effectRequest.outputWavPath = task.stemWav;
+            effectRequest.blockSize = 512;
+            effectRequest.tailSeconds = 2.0;
+            effectRequest.cancelRequested = &cancelRequested;
+
+            const auto effectResult = mw::vst::VstInstrumentHost::processWavWithTrackEffectChain(effectRequest);
+            log(callbacks, effectResult.message);
+            if (effectResult.cancelled)
+            {
+                result.cancelled = true;
+                return result;
+            }
+            if (!effectResult.success)
+            {
+                result.errorMessage = "Failed to process VST3 effect chain for track: " + task.trackName;
+                return result;
+            }
+        }
+
         result.success = true;
         log(callbacks, "Rendered stem: " + task.stemWav.string());
         return result;
@@ -651,14 +870,17 @@ namespace mw::audio
 
         const int eligibleStemCount = countEligibleStemTracks(job);
         const int prospectiveWorkerCount = resolveRenderWorkerCount(job, eligibleStemCount);
-        const bool useStemRendering = projectHasPerTrackBackends(job) || (prospectiveWorkerCount > 1 && eligibleStemCount > 1);
+        const bool hasTrackVstEffectChains = projectHasEnabledVstEffectChains(job);
+        const bool useStemRendering = hasTrackVstEffectChains || projectHasPerTrackBackends(job) || (prospectiveWorkerCount > 1 && eligibleStemCount > 1);
 
         if (useStemRendering)
         {
             status(callbacks, "Preparing mixed stem render...");
-            log(callbacks, projectHasPerTrackBackends(job)
-                ? "Per-track backend assignments detected. Rendering stems."
-                : "Multiple renderable tracks detected. Rendering independent stems with the Parallel Stem Renders setting.");
+            log(callbacks, hasTrackVstEffectChains
+                ? "Enabled VST3 effect chains detected. Rendering stems so effects remain track-owned."
+                : (projectHasPerTrackBackends(job)
+                    ? "Per-track backend assignments detected. Rendering stems."
+                    : "Multiple renderable tracks detected. Rendering independent stems with the Parallel Stem Renders setting."));
 
             const auto stemFolder = job.exportFolder / (job.baseFileName + "_stems");
             std::error_code ignored;
@@ -767,7 +989,14 @@ namespace mw::audio
                 }
             }
 
-            const auto stemAudioClipInputs = collectAudioClipInputs(job, callbacks);
+            std::string stemAudioClipError;
+            const auto stemAudioClipInputs = collectAudioClipInputs(job, cancelRequested, callbacks, stemAudioClipError);
+            if (!stemAudioClipError.empty())
+            {
+                result.message = stemAudioClipError;
+                log(callbacks, "ERROR: " + result.message);
+                return result;
+            }
             for (const auto& audioClipInput : stemAudioClipInputs)
             {
                 stemWavs.push_back(audioClipInput);
@@ -831,6 +1060,7 @@ namespace mw::audio
                 result.finalAudioPath = result.wavPath;
                 result.success = true;
                 result.message = "Mixed stem render completed successfully.";
+                cleanupAudioClipEffectTempFolderAfterSuccessfulRender(job, callbacks);
                 cleanupStemFilesAfterSuccessfulRender(job, stemFolder, callbacks);
                 status(callbacks, "Render complete.");
                 return result;
@@ -880,7 +1110,7 @@ namespace mw::audio
             }
 
             if (requestedEncodedFormat != mw::audio::EncodedAudioFormat::Wav)
-                std::filesystem::remove(result.wavPath, ignored);
+                cleanupEncodedSourceWavAfterSuccessfulRender(job, result.wavPath, callbacks);
             if (encodeInputPath != result.wavPath)
                 std::filesystem::remove(encodeInputPath, ignored);
 
@@ -888,6 +1118,7 @@ namespace mw::audio
             result.success = true;
             result.message = "Mixed stem render completed successfully.";
             log(callbacks, "Encoded output: " + encodedPath.string());
+            cleanupAudioClipEffectTempFolderAfterSuccessfulRender(job, callbacks);
             cleanupStemFilesAfterSuccessfulRender(job, stemFolder, callbacks);
             status(callbacks, "Render complete.");
             return result;
@@ -933,7 +1164,14 @@ namespace mw::audio
             return result;
         }
 
-        const auto audioClipInputs = collectAudioClipInputs(job, callbacks);
+        std::string audioClipErrorMessage;
+        const auto audioClipInputs = collectAudioClipInputs(job, cancelRequested, callbacks, audioClipErrorMessage);
+        if (!audioClipErrorMessage.empty())
+        {
+            result.message = audioClipErrorMessage;
+            log(callbacks, "ERROR: " + result.message);
+            return result;
+        }
         const bool hasMidiContent = hasRenderableMidi(renderProject);
 
         if (!hasMidiContent && !audioClipInputs.empty())
@@ -962,6 +1200,7 @@ namespace mw::audio
                 result.finalAudioPath = result.wavPath;
                 result.success = true;
                 result.message = "AudioClip render completed successfully.";
+                cleanupAudioClipEffectTempFolderAfterSuccessfulRender(job, callbacks);
                 status(callbacks, "Render complete.");
                 return result;
             }
@@ -995,14 +1234,14 @@ namespace mw::audio
                 return result;
             }
 
-            std::error_code ignored;
             if (requestedEncodedFormat != mw::audio::EncodedAudioFormat::Wav)
-                std::filesystem::remove(result.wavPath, ignored);
+                cleanupEncodedSourceWavAfterSuccessfulRender(job, result.wavPath, callbacks);
 
             result.finalAudioPath = encodedPath;
             result.success = true;
             result.message = "AudioClip render completed successfully.";
             log(callbacks, "Encoded output: " + encodedPath.string());
+            cleanupAudioClipEffectTempFolderAfterSuccessfulRender(job, callbacks);
             status(callbacks, "Render complete.");
             return result;
         }
@@ -1090,6 +1329,8 @@ namespace mw::audio
             result.finalAudioPath = result.wavPath;
             result.success = true;
             result.message = "Render completed successfully.";
+            cleanupAudioClipEffectTempFolderAfterSuccessfulRender(job, callbacks);
+            cleanupMidiSidecarAfterSuccessfulRender(job, result.midiPath, callbacks);
             status(callbacks, "Render complete.");
             return result;
         }
@@ -1141,15 +1382,17 @@ namespace mw::audio
 
         std::error_code ignored;
         if (requestedEncodedFormat != mw::audio::EncodedAudioFormat::Wav)
-            std::filesystem::remove(result.wavPath, ignored);
+            cleanupEncodedSourceWavAfterSuccessfulRender(job, result.wavPath, callbacks);
         if (encodeInputPath != result.wavPath)
             std::filesystem::remove(encodeInputPath, ignored);
+        cleanupMidiSidecarAfterSuccessfulRender(job, result.midiPath, callbacks);
 
         result.finalAudioPath = encodedPath;
         result.success = true;
         result.message = "Render completed successfully.";
         log(callbacks, "Encoded output: " + encodedPath.string());
-        log(callbacks, "Temporary WAV removed after encoding.");
+        cleanupAudioClipEffectTempFolderAfterSuccessfulRender(job, callbacks);
+        log(callbacks, "Render cleanup completed after encoding.");
         status(callbacks, "Render complete.");
 
         return result;

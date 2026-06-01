@@ -39,6 +39,7 @@ namespace mw::vst
     {
         None,
         TreatAsInstrument,
+        TreatAsEffect,
         TreatAsUnsupported
     };
 
@@ -47,6 +48,7 @@ namespace mw::vst
         switch (overrideValue)
         {
             case VstPluginUserOverride::TreatAsInstrument: return "Treat as Instrument";
+            case VstPluginUserOverride::TreatAsEffect: return "Treat as Effect";
             case VstPluginUserOverride::TreatAsUnsupported: return "Treat as Unsupported";
             default: return "None";
         }

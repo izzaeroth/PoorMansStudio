@@ -20,7 +20,7 @@ namespace mw::core
     {
         std::string projectFileExtension = ".mwproj";
         std::string projectFormatName = "MusicWorkstationProject";
-        int projectFormatVersion = 6;
+        int projectFormatVersion = 7;
     };
 
     struct ProjectSequenceMetadata

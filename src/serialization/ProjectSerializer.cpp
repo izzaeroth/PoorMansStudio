@@ -6,6 +6,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
@@ -378,6 +379,38 @@ namespace
         return fallback;
     }
 
+    mw::core::VstPluginAssignment parseVstPluginAssignmentObject(const std::string& objectText)
+    {
+        mw::core::VstPluginAssignment plugin;
+        plugin.bundlePath = getString(objectText, "bundlePath");
+        plugin.name = getString(objectText, "name");
+        plugin.vendor = getString(objectText, "vendor");
+        plugin.version = getString(objectText, "version");
+        plugin.category = getString(objectText, "category");
+        plugin.uid = getString(objectText, "uid");
+        plugin.stateBase64 = getString(objectText, "stateBase64");
+        plugin.bypassed = getBool(objectText, "bypassed", false);
+        plugin.compatibilityWarningSeen = getBool(objectText, "compatibilityWarningSeen", false);
+        plugin.compatibilitySummary = getString(objectText, "compatibilitySummary");
+        return plugin;
+    }
+
+    void writeVstPluginAssignmentObject(std::ofstream& file, const mw::core::VstPluginAssignment& plugin, const std::string& indent)
+    {
+        file << indent << "{\n";
+        file << indent << "  \"bundlePath\": \"" << escapeJsonString(plugin.bundlePath.string()) << "\",\n";
+        file << indent << "  \"name\": \"" << escapeJsonString(plugin.name) << "\",\n";
+        file << indent << "  \"vendor\": \"" << escapeJsonString(plugin.vendor) << "\",\n";
+        file << indent << "  \"version\": \"" << escapeJsonString(plugin.version) << "\",\n";
+        file << indent << "  \"category\": \"" << escapeJsonString(plugin.category) << "\",\n";
+        file << indent << "  \"uid\": \"" << escapeJsonString(plugin.uid) << "\",\n";
+        file << indent << "  \"stateBase64\": \"" << escapeJsonString(plugin.stateBase64) << "\",\n";
+        file << indent << "  \"bypassed\": " << (plugin.bypassed ? "true" : "false") << ",\n";
+        file << indent << "  \"compatibilityWarningSeen\": " << (plugin.compatibilityWarningSeen ? "true" : "false") << ",\n";
+        file << indent << "  \"compatibilitySummary\": \"" << escapeJsonString(plugin.compatibilitySummary) << "\"\n";
+        file << indent << "}";
+    }
+
     mw::core::SampleBackendType backendFromString(const std::string& value)
     {
         if (value == "SF2") return mw::core::SampleBackendType::SF2;
@@ -564,6 +597,33 @@ namespace mw::serialization
             file << "          \"compatibilitySummary\": \"" << escapeJsonString(serializedVst3.compatibilitySummary) << "\"\n";
             file << "        }\n";
             file << "      },\n";
+
+            const auto& vstEffects = t.getVstEffects();
+            bool anyVstEffectSlotEnabled = false;
+            for (const auto& effectSlot : vstEffects.slots)
+            {
+                if (effectSlot.enabled && effectSlot.plugin.hasPluginIdentity())
+                {
+                    anyVstEffectSlotEnabled = true;
+                    break;
+                }
+            }
+            file << "      \"vstEffects\": {\n";
+            file << "        \"enabled\": " << (anyVstEffectSlotEnabled ? "true" : "false") << ",\n";
+            file << "        \"slots\": [\n";
+            for (std::size_t effectSlotIndex = 0; effectSlotIndex < vstEffects.slots.size(); ++effectSlotIndex)
+            {
+                const auto& effectSlot = vstEffects.slots[effectSlotIndex];
+                file << "          {\n";
+                file << "            \"enabled\": " << (effectSlot.enabled ? "true" : "false") << ",\n";
+                file << "            \"plugin\": ";
+                writeVstPluginAssignmentObject(file, effectSlot.plugin, "            ");
+                file << "\n";
+                file << "          }" << (effectSlotIndex + 1 < vstEffects.slots.size() ? "," : "") << "\n";
+            }
+            file << "        ]\n";
+            file << "      },\n";
+
             file << "      \"notes\": [\n";
 
             const auto& ns = t.getNotes();
@@ -759,23 +819,41 @@ namespace mw::serialization
 
                 const auto vstObject = extractObject(instrumentObject, "vst3");
                 if (!vstObject.empty())
-                {
-                    instrument.vst3.bundlePath = getString(vstObject, "bundlePath");
-                    instrument.vst3.name = getString(vstObject, "name");
-                    instrument.vst3.vendor = getString(vstObject, "vendor");
-                    instrument.vst3.version = getString(vstObject, "version");
-                    instrument.vst3.category = getString(vstObject, "category");
-                    instrument.vst3.uid = getString(vstObject, "uid");
-                    instrument.vst3.stateBase64 = getString(vstObject, "stateBase64");
-                    instrument.vst3.bypassed = getBool(vstObject, "bypassed", false);
-                    instrument.vst3.compatibilityWarningSeen = getBool(vstObject, "compatibilityWarningSeen", false);
-                    instrument.vst3.compatibilitySummary = getString(vstObject, "compatibilitySummary");
-                }
+                    instrument.vst3 = parseVstPluginAssignmentObject(vstObject);
 
                 if (instrument.backendType != mw::core::SampleBackendType::VST3)
                     instrument.vst3 = {};
 
                 track.setInstrumentAssignment(instrument);
+            }
+
+            const auto vstEffectsObject = extractObject(trackObject, "vstEffects");
+            if (!vstEffectsObject.empty())
+            {
+                mw::core::VstEffectsAssignment vstEffects;
+                vstEffects.enabled = getBool(vstEffectsObject, "enabled", false);
+
+                const auto effectSlotsArray = extractArray(vstEffectsObject, "slots");
+                const auto effectSlotObjects = splitTopLevelObjects(effectSlotsArray);
+                for (const auto& effectSlotObject : effectSlotObjects)
+                {
+                    if (vstEffects.slots.size() >= mw::core::maxVstEffectSlots)
+                        break;
+
+                    mw::core::VstEffectSlotAssignment slot;
+                    const bool legacyEnabled = vstEffects.enabled && vstEffects.slots.empty();
+                    slot.enabled = getBool(effectSlotObject, "enabled", legacyEnabled);
+                    const auto effectPluginObject = extractObject(effectSlotObject, "plugin");
+                    if (!effectPluginObject.empty())
+                        slot.plugin = parseVstPluginAssignmentObject(effectPluginObject);
+                    vstEffects.slots.push_back(std::move(slot));
+                }
+
+                if (vstEffects.enabled && vstEffects.slots.empty())
+                    vstEffects.ensureFirstSlot().enabled = true;
+
+                vstEffects.updateLegacyEnabledMirror();
+                track.setVstEffects(std::move(vstEffects));
             }
 
             const auto notesArray = extractArray(trackObject, "notes");

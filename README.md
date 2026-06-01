@@ -33,16 +33,19 @@ VST3 support is experimental. Some plugins are perfectly calm. Some plugins are 
 Current VST3 support includes:
 
 - VST3 scanning from `workspace/vst3` and standard Windows VST3 locations.
-- VST3 Plugin Manager with supported/unsupported panes, search, filtering, details, and horizontal scrolling for long plugin names.
-- Manual override for plugins that are safe instruments but detected as unknown/unsupported.
-- One VST plugin editor window per track.
-- Compact floating **Apply Changes** palette for plugin UI edits.
-- Applying track settings closes any open VST editor for that track so stale plugin UIs do not remain attached after a plugin/library change.
-- Apply-and-go VST state handling.
+- VST3 Plugin Manager with **All Plugins**, **Supported Instruments**, **Supported Effects**, and **Unsupported** filters.
+- Two-slot VST Effect chain controls in the main track inspector: choose Supported Effects for slot 1 and slot 2, enable/disable or bypass each slot, save the assignments in `.mwproj` files, and process the chain during offline preview/render paths for MIDI and AudioClip tracks.
+- Fixed effect-chain order: source track -> VST Effect 1 -> VST Effect 2 -> preview/export output. Unassigned, disabled, or bypassed slots are skipped.
+- VST editor host windows use a small toolbar under the title bar for **Apply Changes**; tiny plugin UIs get a wider minimum host size while remaining resizable.
+- Manual override for plugins that are safe instruments or effect candidates but detected as unknown/unsupported.
+- One VST plugin editor window per track instrument assignment and one VST effect editor window per track/effect slot.
+- Track-owned VST editor toolbar with **Apply Changes**, a compact target label such as `Track #1 - S1 - Reverb`, and **Test Effect** for effect editors.
+- Per-track VST state save/restore so two tracks using the same plugin can keep different sounds.
 - VST state excluded from normal host-side note/edit undo-redo history.
+- VST Host Helper Status from the VST Plugins menu, backed by the helper executable.
 - One-time experimental dragon warning before VST3 becomes active through defaults, track assignment, plugin UI, preview, or render.
 
-Until a future out-of-process helper host is added, VST3 instruments are hosted in-process. That means a plugin crash can still close the main app.
+Normal VST3 instrument hosting is still mostly in-process, so a plugin crash can still close the main app. The helper executable provides isolated checks and groundwork for future risky plugin work.
 
 ### Preview, Render, And Export
 
@@ -52,7 +55,14 @@ Until a future out-of-process helper host is added, VST3 instruments are hosted 
 - Export MIDI for use in other tools.
 - Configure sample rate, bitrate, channels, output format, and render metadata.
 - Use FFmpeg for audio conversion/mixing/compressed output support.
-- Use project-relative output folders for safer project sharing.
+- Use `workspace/exports` as the default user-facing render/export destination.
+
+
+### Export Folder Behavior
+
+Poor Man's Studio keeps user-facing renders in `workspace/exports` by default instead of auto-switching exports into each project folder. Saving or opening a `.mwproj` no longer retargets the export box to `workspace/projects/<project>/renders`; older project-local `renders`/`output` paths are reset back to the workspace export folder unless you manually choose another custom export folder.
+
+Render Settings retention applies consistently to non-WAV exports too. When **Keep WAV audio stems** is enabled, the source WAV sidecar used for MP3/FLAC/OGG encoding is kept next to the final export; when **Keep MIDI stem files** is enabled, generated MIDI sidecars/stems are kept. Preview/temp renders still clean themselves under `workspace/temp`.
 
 ### Usability And Project Safety
 
@@ -115,7 +125,7 @@ The `external/JUCE` folder is required for building from source. It is not bundl
 ```text
 workspace/
   input/        import staging area
-  exports/      rendered audio and exported MIDI
+  exports/      default render/export destination for audio, MIDI, and kept WAV sidecars/stems
   projects/     .mwproj project folders
   soundfonts/   user SF2/SF3 files
   fluidsynth/   optional FluidSynth runtime/tool folder
@@ -135,7 +145,7 @@ Projects should live under:
 workspace/projects/<Project Name>/
 ```
 
-AudioClip media is stored beside the project and is not embedded into the `.mwproj` file. Move or share the whole project folder, not just the `.mwproj` file.
+AudioClip media is not embedded into the `.mwproj` file. Newly imported files and Save / Apply recorded takes stage first under the active `workspace/temp/recordings/rec_...` session. **Save Project** is the commit point that moves attached staged media into the saved project folder under `input/audio/imported` or `input/audio/recorded`. Import Audio should not create a new folder under `workspace/projects` until the project is actually saved, and it should not leave unreferenced media inside an already saved project folder if the user later discards changes. Choosing **Discard** from New/Open/Start From File/Exit unsaved-change prompts removes the active staged AudioClip session so abandoned imports and takes do not carry into the next project. Move or share the whole saved project folder, not just the `.mwproj` file.
 
 ## Build Environment Overview
 
@@ -309,7 +319,7 @@ Example summary:
 ```text
 Poor Man's Studio Build Summary
 --------------------------------
-Version:        0.57.11
+Version:        0.60.6
 Configuration:  Release
 Generator:      Visual Studio 18 2026
 Platform:       x64
@@ -499,16 +509,74 @@ The app built correctly, but runtime tools are missing or not configured. Check 
 
 The VST3 feature is experimental and hosted in-process. Save projects before testing unfamiliar plugins. Use **Apply Changes** after editing plugin UI state. If a plugin repeatedly crashes, remove it from the active assignment or mark it unavailable in the VST3 Plugin Manager.
 
+### VST Host Helper Foundation
+
+The source tree includes a small out-of-process helper target named `PoorMansStudioVstHost`. A local build copies it to:
+
+```text
+workspace/vst_host/PoorMansStudioVstHost.exe
+```
+
+The helper currently provides conservative command-line groundwork for isolated VST3 inspection/scanning:
+
+```powershell
+.\workspace\vst_host\PoorMansStudioVstHost.exe --help
+.\workspace\vst_host\PoorMansStudioVstHost.exe --ping
+.\workspace\vst_host\PoorMansStudioVstHost.exe --scan "C:\Path\To\Plugin.vst3"
+.\workspace\vst_host\PoorMansStudioVstHost.exe --scan-json "C:\Path\To\Plugin.vst3"
+```
+
+Normal VST3 instrument hosting and the Track Live Effect recorder monitor path remain in-process. The helper is groundwork for risky scanning, plugin editor isolation, state capture, offline helper rendering, and later shared-memory live processing. The app checks the helper once at startup and exposes the cached result through **VST Plugins > VST Host Helper Status...**.
+
 ## Documentation
 
-- Illustrated guide: `workspace/docs/PoorMansStudio_User_Guide.pdf`
+- Comprehensive PDF user guide: `workspace/docs/PoorMansStudio_User_Guide.pdf`
 - Plain-text user guide: `workspace/docs/USER_GUIDE.txt`
 - Detailed setup/build guide: `workspace/docs/SETUP_AND_BUILD_GUIDE.txt`
 
 Use the in-app Help menu to open the guides when running the app.
 
+### VST3 Plugin Manager Categories
+
+The Plugin Manager separates detected plugins into **Supported Instruments**, **Supported Effects**, and **Unsupported**. Supported Instruments feed the current instrument workflow and appear in track instrument dropdowns. Supported Effects feed both track-owned VST Effect dropdowns in the main track inspector. Unsupported plugins remain inactive until moved to a supported category and applied. The move controls use visible text labels (**Add >** and **< Remove**) for reliable display on Windows font/rendering combinations.
+
+The Piano Roll Preview Player **Preview** button always re-renders fresh preview audio before playback and captures open VST editor state first, so adjusted instrument/effect settings are picked up without closing the player.
+
+### Two-slot VST Effect Chain
+
+The main track inspector provides two effect rows:
+
+```text
+VST Effect 1: [dropdown] [Enable] [Bypass] [Open Slot 1]
+VST Effect 2: [dropdown] [Enable] [Bypass] [Open Slot 2]
+```
+
+The dropdowns stay on the left so the selected effects line up with the rest of the track controls. Choose a Supported Effect for each slot, then use **Enable** to include that slot in offline preview/export processing and to make that slot's editor openable. **Bypass** temporarily skips that slot without clearing the selected plugin or saved state. Detailed ready/bypass/missing status is written to the log/output area instead of taking up main-window track-control space.
+
+Processing order is always:
+
+```text
+source track -> VST Effect 1 -> VST Effect 2 -> preview/export
+```
+
+Unassigned, disabled, or bypassed slots are skipped. Open Slot 1/2 is unavailable unless that slot has an assigned plugin and its Enable checkbox is checked. If both slots are enabled and assigned, slot 2 receives the output from slot 1. The old single-effect project format is read as slot 1 for compatibility.
+
+Use **Apply Track Settings** as the clear commit point for track-level effect choices: slot assignments, Enable, Bypass, mute/solo, volume, and other track controls. Use **Apply Changes** inside a VST editor only after changing plugin parameters; that editor button saves the plugin state for the owning track and slot.
+
+Imported and recorded AudioClip source media stays dry. During offline preview/export, enabled non-bypassed slots are applied to temporary processed WAV files and those temporary files are mixed into the render. Imported and recorded AudioClip tracks use the same workflow. New AudioClip media stages in the active `workspace/temp/recordings/rec_...` session; **Save Project** moves only applied/attached staged clips into the saved project folder, while **Discard** removes the current staging session instead of leaving its imported/recorded media for a later project.
+
+### AudioClip Recorder Track Live Effect
+
+The AudioClip Recorder includes a **Track Live Effect** checkbox. When enabled, the recorder tries to monitor the live input through the selected target track's first active VST effect slot while the recorded WAV remains dry. This is monitor-only and is not the final effect-render path. Offline preview/export remains the commit path for applying the track's VST Effect chain. Recording targets the selected existing track instead of auto-creating a new track. Create/select the track first, assign its effects, then use Track Live Effect to monitor while the saved clip remains dry.
+
+### VST Editor Host Windows
+
+Track-owned VST Instrument and VST Effect editor windows enforce a minimum host-window size while remaining resizable from the window corner. Very small plugin editors may leave extra empty host-window space, but the editor toolbar under the title bar keeps **Apply Changes** usable instead of crowding it into the title bar. VST effect toolbars use compact target wording such as `Track #1 - S1 - Reverb`; VST instrument custom title bars include the owning track, for example `Track: #1 - Lead Piano | Instrument | Plugin: Dexed`. Status feedback stays in tooltips/logs instead of a trailing status text label. The **Window** menu also includes side submenus for **VST Instrument** and **VST Effect** whenever those editor windows are open, so you can bring a specific track/slot editor to the front like the Piano Roll window list. When changing a MIDI track to a scanned VST3 instrument, **Choose scanned VST3 plugin** now opens a clear chooser dialog instead of a tiny follow-up popup.
+
+The editor toolbar also includes **Snapshot** slots. Each VST instrument and VST effect editor has five host-side snapshot slots with **Load**, **Save**, **Clear Current**, and **Clear All** buttons. Clear actions ask for confirmation before deleting snapshot files. Snapshots save the plugin state blob for the exact plugin identity and editor role outside the project under `workspace/vst3/snapshots`, so a favorite instrument or effect setting can be reused on another track or project using the same plugin. Snapshot loading is blocked when the saved snapshot does not match the current plugin/role.
+
 ### VST Plugin Graphics Adapter
 
 Poor Man's Studio can list the graphics adapters reported by Windows for VST plugin editor windows. The default choice is **System Default / Auto**, which lets Windows and the plugin choose the rendering path.
 
-If multiple adapters are available, you may choose one manually. Adapters are labeled as **Hardware** or **Software** when that information is available. Poor Man's Studio does not classify adapters as integrated or dedicated, and it does not use video memory size to make that decision. Use **Refresh Adapter List** when hardware, drivers, monitors, or external GPUs change and you want the adapter list rebuilt.
+If multiple adapters are available, you may choose one manually. The selected adapter is a preferred graphics adapter for VST plugin editor windows, not a guarantee; some plugins, drivers, or Windows graphics settings may still choose a different rendering path. This setting does not affect audio render quality. Adapters are labeled as **Hardware** or **Software** when that information is available. Poor Man's Studio does not classify adapters as integrated or dedicated, and it does not use video memory size to make that decision. The adapter list is cached from the last manual refresh and reused on future launches; it is only replaced when you use **Refresh Adapter List** again. The cached adapter rows are stored separately in `workspace/settings/vst_graphics_adapters.txt`; the normal user preferences file keeps only the compact numeric preferred adapter option.

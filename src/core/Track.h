@@ -64,6 +64,10 @@ namespace mw::core
         const InstrumentAssignment& getInstrument() const { return instrument; }
         InstrumentAssignment& getInstrument() { return instrument; }
 
+        const VstEffectsAssignment& getVstEffects() const { return vstEffects; }
+        VstEffectsAssignment& getVstEffects() { return vstEffects; }
+        void setVstEffects(VstEffectsAssignment effects) { vstEffects = std::move(effects); }
+
         const std::string& getInstrumentName() const { return instrument.displayName; }
         void setInstrumentName(std::string n) { instrument.displayName = std::move(n); }
         void setInstrumentAssignment(InstrumentAssignment a)
@@ -96,5 +100,6 @@ namespace mw::core
         TrackType trackType = TrackType::Midi;
         std::vector<NoteEvent> notes;
         MixerSettings mixer;
+        VstEffectsAssignment vstEffects;
     };
 }

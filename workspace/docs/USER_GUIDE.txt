@@ -1,312 +1,774 @@
-Poor Man's Studio - User Guide
-==============================
+Poor Man's Studio - Comprehensive User Guide
+Current app version: 0.60.6
+This document explains current behavior. It is current-behavior documentation only.
 
-Poor Man's Studio is a local Windows desktop music workstation for importing, editing, previewing, recording, saving, and rendering music without needing a full commercial DAW.
+Contents
+========
+1. Quick Start
+2. Core Concepts
+3. Main Window Reference
+4. Project Defaults And Track Settings
+5. Project And Workspace File Layout
+6. Starting Projects From Files
+7. Track Manager And Arrangement Workflows
+8. Piano Roll Editing
+9. AudioClip Import Workflow
+10. AudioClip Recorder Workflow
+11. Two-slot VST Effect Chain
+12. VST3 Plugin Manager And Instrument Hosting
+13. SoundFont, SF3, And SFZ Workflows
+14. Preview, Render, Export, And Stems
+15. Clean Temp And Media Safety
+16. Settings, Themes, And Helper Bubbles
+17. Example Workflows
+18. Troubleshooting
+19. Button And Menu Index
+20. Dialog And Window Reference
+21. Workflow Checklists
+22. Detailed Setting Reference
+23. Final Documentation Production Notes
+24. Glossary
 
-The app is built around projects, tracks, sequences, and a workspace folder. MIDI and MusicXML material becomes MIDI tracks. Imported or recorded audio becomes AudioClip tracks. MIDI tracks can use SF2/SF3, SFZ, or scanned VST3 plugin instruments.
+1. Quick Start
+==============
+Poor Man's Studio is a local Windows desktop music workstation for building and rendering small to medium music projects without requiring a full commercial DAW. It focuses on practical import, edit, preview, record, and render workflows using local tools such as FluidSynth, sfizz, FFmpeg, and optional VST3 plugins.
+NOTE: The most important workflow rule is simple: Project Defaults affect new/imported MIDI tracks; Apply Track Settings commits changes to the selected track; Save Project commits project metadata and attached staged AudioClip media.
 
-Open the illustrated PDF guide from Help > Open User Guide PDF. This text guide is the plain-text companion.
+Fastest path from import to rendered audio
+------------------------------------------
+Step | Action | Why it matters
+--- | --- | ---
+1 | Choose project defaults: backend, library, instrument, base name, output format, sample rate, and channels. | These defaults are copied into future imported or newly added MIDI tracks.
+2 | Click Apply Project Defaults. | This is the commit point for project-level default choices.
+3 | Start from MusicXML, MXL, MIDI, audio, or an existing .mwproj project. | Poor Man's Studio creates tracks and sequences from the chosen source.
+4 | Choose a track and adjust instrument, VST Effect slots, mute/solo, and volume. | These are selected-track settings, not project defaults.
+5 | Click Apply Track Settings. | This commits the selected track controls, including VST Effect dropdowns, Enable, and Bypass.
+6 | Preview the track, sequence, region, or full project. | Preview renders temporary files so you can hear the result before final export.
+7 | Save Project. | This writes .mwproj metadata and moves attached staged AudioClip media into the saved project folder.
+8 | Render/export final audio or MIDI. | The render path uses saved track assignments and enabled effect chains.
 
-Quick Start
-===========
+Commit points at a glance
+-------------------------
+Change type | Commit button | Common mistake to avoid
+--- | --- | ---
+Project default backend or instrument | Apply Project Defaults | Expecting project defaults to retroactively change existing tracks.
+Selected-track instrument, volume, mute, solo, or VST Effect slot controls | Apply Track Settings | Changing a dropdown or checkbox and then rendering without applying track settings.
+Open VST editor parameter changes | Apply Changes inside the VST editor | Closing the editor before capturing parameter changes.
+Imported or recorded AudioClip media staged in temp | Save Project | Expecting Import Audio or Save / Apply recording to create a project folder before the project is saved.
+Unwanted temporary previews or abandoned staging sessions | Clean Temp | Deleting workspace files manually while a project is open.
 
-1. Choose a project backend in Project Defaults.
-2. Choose the matching instrument or library.
-3. Click Apply Project Defaults before importing or adding new MIDI tracks.
-4. Start from MusicXML, MXL, MIDI, audio, or an existing .mwproj project.
-5. Edit track layout, sequences, notes, and per-track instruments.
-6. Preview the track, sequence, or full project.
-7. Save the project as .mwproj.
-8. Render final audio or MIDI output.
+2. Core Concepts
+================
 
-Project Defaults affect future imported or newly added MIDI tracks. Existing tracks are not overwritten by Apply Project Defaults; change existing tracks with per-track controls or inside a Piano Roll window.
+Project
+-------
+A project is the full song/session state: tracks, sequences, note data, AudioClip references, instrument assignments, VST effect-slot assignments, render settings, and user-visible metadata. Saved projects use a .mwproj file plus media folders beside it.
 
-Main Window Areas
-=================
+Track
+-----
+A track is one musical or audio lane. MIDI-style tracks contain notes and instrument assignments. AudioClip tracks reference imported or recorded audio media. Both MIDI tracks and AudioClip tracks can use the two-slot VST Effect chain during offline preview/export.
 
-Project Controls
+Sequence
+--------
+A sequence is an arrangement view or working region for a project. Sequence controls allow switching, creating blank sequences, and storing sequence thoughts/notes. Track and note edits can be scoped by the active sequence.
+
+Staged media
+------------
+Staged media is audio that belongs to the current unsaved session but has not yet been committed to a saved project folder. Imported audio and applied recording takes can both stage under workspace\temp\recordings\rec_... until Save Project commits them.
+
+Dry source audio
 ----------------
+Imported and recorded AudioClip files remain dry. VST effects are applied to temporary WAV files during preview/export. The original imported/recorded source media is not overwritten by effect rendering.
 
-Use Start From File to import MusicXML, MXL, MIDI, audio, or .mwproj files. Use Open .mwproj to reopen saved projects. Save Project writes the current project metadata to the project folder.
-
-Project Defaults
-----------------
-
-The Project Defaults area chooses the backend that new/imported MIDI tracks should use:
-
-- SoundFont/SF3: choose a SoundFont file and preset.
-- SFZ: choose an SFZ instrument.
-- VST3 Plugin: scan plugins, choose a plugin instrument, and apply the project default.
-
-Use Apply Project Defaults after choosing the backend and instrument. Existing track assignments stay as they are.
-
-Track Controls
---------------
-
-Use Apply Track Settings to commit per-track instrument changes. Use Change Library to choose a library for the selected MIDI track. Use Open VST Plugin when the selected track is assigned to a usable VST3 plugin instrument.
-
-Console And Status
+Offline processing
 ------------------
+Preview, Test Effect, selected-track render, selected-sequence render, and final export use offline render paths. Live effect monitoring is separate and optional, and recorded clips remain dry even when monitor-only live effects are used.
 
-The console reports scans, imports, render status, warnings, and errors. Helper bubbles are enabled by default and appear after hovering on controls for about two seconds. Toggle them from Help > Helper Bubbles.
+3. Main Window Reference
+========================
+The main window is organized into project controls, project defaults, selected-track controls, preview/render controls, utility buttons, the track summary, and the log. The detailed button reference below is intentionally table-based so it remains useful even before final screenshots are captured.
 
-Workspace And Project Folders
-=============================
+Project and file controls
+-------------------------
+Control | Purpose | Best practice
+--- | --- | ---
+Start From File | Create a project from MusicXML, MXL, MIDI, audio, or an existing .mwproj file. | Save or intentionally discard the current project before replacing it.
+Open .mwproj | Open an existing saved Poor Man's Studio project. | Open the .mwproj from inside the saved project folder so relative media paths resolve.
+Save Project | Save metadata and commit attached staged AudioClip media. | Use this after importing/recording audio if you want to keep the media with the project.
+Base Name | Sets the base filename for rendered output. | Use a clean song or cue name; avoid characters that are awkward in file paths.
+Output Format | Chooses WAV, FLAC, MP3, OGG, or another available format. | Use WAV for high-quality intermediates and MP3/OGG for smaller sharing copies.
+Export Folder | Chooses where final renders are written. | Defaulting to workspace\exports keeps rendered files away from project source media.
 
-Recommended workspace structure:
+Project Defaults controls
+-------------------------
+Control | Purpose | Notes
+--- | --- | ---
+Backend | Choose the default engine for future MIDI tracks: SF2/SF3, SFZ, or VST3 Plugin. | Existing tracks do not change until their own track settings are changed.
+SoundFont | Choose a SoundFont or SF3 file/preset list. | Use Refresh/scan workflows when the preset list is stale.
+SFZ | Choose an SFZ file or SFZ pack. | Keep samples and includes beside the SFZ file.
+VST3 Plugin | Choose a scanned VST3 instrument as the default instrument backend. | Scan plugins before choosing; unsupported effects do not appear as instruments.
+Apply Project Defaults | Commits project-level defaults for future imports/new tracks. | This is not the same as Apply Track Settings.
 
+Selected-track controls
+-----------------------
+Control | Purpose | Commit behavior
+--- | --- | ---
+Track | Select the track currently being edited. | Changing the selection refreshes the track controls.
+Change Library | Choose a sample/instrument library for the selected MIDI track. | Use Apply Track Settings after choosing. When you choose scanned VST3 plugin, a full chooser dialog opens instead of a tiny follow-up popup.
+Instrument | Choose the selected track's instrument/preset/plugin. | Use Apply Track Settings to commit.
+Open VST Instrument | Open the selected track's VST3 instrument editor. | Use Apply Changes in the editor after changing plugin parameters. The custom title bar shows track number, track name, Instrument, and plugin name.
+VST Effect 1 dropdown | Assign slot 1 of the selected track's VST Effect chain. | Use Apply Track Settings after selecting.
+VST Effect 1 Enable | Turn slot 1 processing on/off for preview/export. | Use Apply Track Settings as the explicit track-level commit point.
+VST Effect 1 Bypass | Temporarily skip slot 1 while keeping assignment/state. | Use Apply Track Settings after changing.
+Open Slot 1 | Open the editor for VST Effect Slot 1. | Available only after slot 1 has an assigned plugin and Enable is checked; the editor toolbar uses compact wording such as Track #1 - S1 - Reverb.
+VST Effect 2 dropdown | Assign slot 2 of the selected track's VST Effect chain. | Slot 2 processes after slot 1.
+VST Effect 2 Enable | Turn slot 2 processing on/off for preview/export. | Slot 2 can be used by itself or after slot 1.
+VST Effect 2 Bypass | Temporarily skip slot 2 while keeping assignment/state. | Bypass is different from disabling because the slot remains configured.
+Open Slot 2 | Open the editor for VST Effect Slot 2. | Available only after slot 2 has an assigned plugin and Enable is checked; the custom title bar uses fuller wording such as Track: #1 - Lead Vocal | S2 | Plugin: Compressor.
+Track Volume | Adjust selected-track volume. | Use Apply Track Settings.
+Master Volume | Adjust overall project output volume. | Preview/render uses the saved value.
+Mute / Solo | Control selected-track participation in preview/render. | Use Apply Track Settings.
+
+Preview and render controls
+---------------------------
+Control | What it does | Useful example
+--- | --- | ---
+Preview Project | Renders and plays a temporary full-project preview. | Check overall balance before export.
+Render | Exports the full project using the chosen render settings. | Create a final WAV or compressed file.
+Render Selected Track | Render only the selected track. | Check a vocal AudioClip effect chain by itself.
+Render Selected Sequence | Render only the active selected sequence. | Export an alternate arrangement or section.
+Export MIDI | Write MIDI data for external use. | Move note data into another sequencer.
+Cancel Render | Request cancellation of a running render. | Stop a long render after noticing a wrong setting.
+Preview Latest | Play the most recent rendered WAV where available. | Quickly audition the latest export.
+Render Settings | Open options for stem retention and output cleanup. | Keep stems for mixing or delete temporary stem files automatically.
+
+Status, track summary, and log
+------------------------------
+The log is the authoritative place for detailed status: plugin scan results, unsupported plugin reasons, import results, staging paths, preview paths, render commands, VST effect-chain messages, warnings, and errors. The main window intentionally avoids large VST status text so the two effect-slot rows have room. The Window menu also acts as a window switcher: open VST instrument editors appear under VST Instrument, and open VST effect editors appear under VST Effect. VST instrument editor title bars use wording such as Track: #1 - Lead Piano | Instrument | Plugin: Dexed so the owning track is visible while editing.
+
+4. Project Defaults And Track Settings
+======================================
+
+Project defaults
+----------------
+Project defaults are templates for future MIDI tracks. They decide what newly imported or newly created MIDI tracks should use by default. They do not automatically rewrite existing track assignments because that could destroy careful per-track choices.
+Default area setting | Affects | Does not affect
+--- | --- | ---
+Backend | Future imported/new MIDI tracks | Existing tracks until changed directly
+SoundFont/SF3 preset | Future tracks using the SF2 backend | AudioClip tracks
+SFZ file | Future tracks using the SFZ backend | VST3 instrument/effect settings
+VST3 instrument | Future tracks using VST3 Plugin backend | VST Effect chain slots
+Render base name/format | Future render/export output | Track note data
+
+Track settings
+--------------
+Track settings belong to the currently selected track. They include instrument assignment, track volume, mute/solo, AudioClip behavior where applicable, and both VST Effect slots. Apply Track Settings is the clear commit point for these controls.
+WARNING: Do not rely on an open VST editor window to save track-level changes. The editor Apply Changes captures plugin parameters. Apply Track Settings captures dropdown, Enable, Bypass, and track controls.
+
+Why there are separate Apply buttons
+------------------------------------
+Button | Scope | Why it exists
+--- | --- | ---
+Apply Project Defaults | Project template for future tracks | Prevents accidental changes to existing tracks.
+Apply Track Settings | Selected track controls | Makes the selected track's assignment/effect/mixer state explicit.
+VST editor Apply Changes | Plugin parameter state | Captures native plugin UI state into the track or slot.
+Save Project | Project file and attached media | Commits metadata and staged AudioClip media to a saved folder.
+
+5. Project And Workspace File Layout
+====================================
+
+Recommended workspace
+---------------------
 workspace\
   input\
-  exports\
+  exports\        default render/export destination
   projects\
   soundfonts\
   fluidsynth\
   ffmpeg\
   sfz\
   vst3\
-  sfizz\
+  vst_host\
   settings\
   temp\
   themes\
 
-Recommended project structure:
+Recommended saved project folder
+--------------------------------
+workspace\projects\Project Name\
+  Project Name.mwproj
+  input\
+    midi\
+    mxl\
+    audio\
+      imported\
+      recorded\
+  output\
+  renders\
 
-workspace\
-  projects\
-    Project Name\
-      Project Name.mwproj
-      input\
-        midi\
-        mxl\
-        audio\
-          imported\
-          recorded\
-          temp\
-      output\
-      renders\
+Media storage rules
+-------------------
+Media type | Unsaved project location | Saved project location | When moved
+--- | --- | --- | ---
+Imported AudioClip | workspace\temp\recordings\rec_...\input\audio\imported | input\audio\imported | Save Project
+Applied recording take | workspace\temp\recordings\rec_... | input\audio\recorded | Save Project
+Preview files | workspace\temp or render temp folders | Not committed | Clean Temp or automatic cleanup
+VST test-effect WAV output | temporary effect/test location | Not committed | Automatic or Clean Temp cleanup
+Final exports | Chosen export folder | Usually workspace\exports | Render/export
+NOTE: Import Audio should not create a project folder under workspace\projects until the user chooses Save Project. Discarding unsaved changes removes the active staged AudioClip session.
 
-Important rules:
+6. Starting Projects From Files
+===============================
 
-- The .mwproj file stores metadata and project-relative paths.
-- Large imported or recorded audio files are not embedded in .mwproj.
-- AudioClip media lives in the project folder under input\audio.
-- Move or share the whole project folder, not only the .mwproj file.
-- Save/open keeps the project folder name, .mwproj filename, project name, and base name aligned when using the default project layout.
+Supported start points
+----------------------
+Source | Result | Typical next step
+--- | --- | ---
+MusicXML or MXL | Creates MIDI-style tracks and sequences from notation data. | Review instruments and use Apply Track Settings.
+MIDI | Creates MIDI-style tracks from the file's note/channel data. | Choose a backend and match presets.
+Audio file | Creates an AudioClip track pointing to staged or committed audio media. | Preview, add effect slots, and Save Project.
+.mwproj | Reopens a saved Poor Man's Studio project. | Verify media paths and continue editing.
 
-Instrument Sources
-==================
+Unsaved-change prompts
+----------------------
+When starting a new project, opening another project, importing a file that replaces the current project, or exiting with unsaved changes, the app prompts you to save, discard, or cancel. Discard means the active unsaved project state and active staged AudioClip session are intentionally removed.
+Choice | Meaning | Staged media behavior
+--- | --- | ---
+Save | Save the current project before continuing. | Attached staged AudioClip media is committed to the saved project.
+Discard | Throw away current unsaved changes and continue. | Active staged AudioClip session is removed so it cannot attach to the wrong project.
+Cancel | Do not continue the requested action. | Current project and staged session remain active.
+
+7. Track Manager And Arrangement Workflows
+==========================================
+Track Manager is the organizational center for track names, sections, sequence relationships, and notes/thoughts. It complements the main-window selected-track controls and Piano Roll note editor.
+
+Common track management tasks
+-----------------------------
+Task | Where to do it | Recommended workflow
+--- | --- | ---
+Rename tracks | Track Manager | Use descriptive names before opening VST editors so title bars show clear track context. Instrument editors and effect editors both include track context.
+Create or change sequences | Sequence controls / Track Manager | Use Chg Seq to switch or create a blank sequence.
+Document arrangement ideas | Sequence Thoughts | Keep notes in the project instead of relying on external scratch files.
+Review track summaries | Main-window track summary | Check backend, library, VST instrument, effect slots, mute/solo, and volume.
+Render a single track | Main render controls | Select the track, apply settings, then use Render Selected Track.
+
+Naming advice
+-------------
+- Use musical names like Lead Vocal, Rhythm Guitar, Bass DI, Piano, or Strings Long instead of Track 1/2/3.
+- Add role details when useful: Lead Vocal Comp, Drum Loop Imported, Room Verb Return, or Sketch Piano VST.
+- Clear names are especially helpful because VST effect editor windows show the track number, slot, and plugin in the toolbar/title context.
+
+8. Piano Roll Editing
+=====================
+The Piano Roll is the note editor for MIDI-style tracks. It is used for pitch, timing, velocity, note length, snap-grid, and beat-window work. AudioClip waveform editing is intentionally separate from MIDI note editing.
+
+Piano Roll controls
+-------------------
+Control | Purpose | Example
+--- | --- | ---
+Open Piano Roll | Edit notes on the selected MIDI-style track. | Fix a bass note that starts late.
+Beat Window | Choose how much time the Piano Roll shows at once. | Zoom to a four-beat phrase or broader section.
+Page / window jump | Jump to a specific Piano Roll window number. | Move to bar/phrase areas without scrolling endlessly.
+Key jump | Center a specific pitch name. | Jump to C4 or A5 while editing melody.
+Snap grid | Constrain editing to a musical grid. | Edit sixteenth notes cleanly.
+Preview region | Render the current region temporarily. | Audition a short phrase without exporting the whole project.
+
+Recommended edit loop
+---------------------
+Select a track, open Piano Roll, make note edits, preview a small region, adjust track instrument/effects if needed, apply track settings, and then preview the full sequence or project. This keeps local note edits separate from track-level sound changes.
+
+9. AudioClip Import Workflow
+============================
+AudioClip import lets you bring external audio into a project as a track. Imported audio can be used dry, processed through the two-slot VST Effect chain during preview/export, or mixed with MIDI-rendered tracks.
+
+Import behavior by project state
+--------------------------------
+Project state | Import destination | Project folder behavior
+--- | --- | ---
+Unsaved project | Current active staging session under workspace\temp\recordings\rec_...\input\audio\imported | No new workspace\projects folder should be created until Save Project.
+Saved project | Project-relative input\audio\imported folder | Media belongs to the saved project folder.
+Project discarded | Active staging session is removed | Imported media from that discarded unsaved project is intentionally deleted.
+
+AudioClip import steps
+----------------------
+Step | Action | Result
+--- | --- | ---
+1 | Start or open a project. | The active project/session is known.
+2 | Use Start From File or Import Audio to choose WAV, MP3, FLAC, or OGG. | The app creates or attaches an AudioClip track.
+3 | For unsaved projects, verify the log reports staging under workspace\temp\recordings\rec_.... | This confirms the import is tied to the current session, not a random project folder.
+4 | Optional: choose VST Effect 1 and/or 2, check Enable, adjust Bypass, and click Apply Track Settings. | The imported track's offline effect chain is committed.
+5 | Preview or render. | Temporary processed WAVs are created if effects are active; the source stays dry.
+6 | Save Project when you want to keep the imported clip. | Attached staged import moves to input\audio\imported.
+WARNING: If you discard an unsaved project after importing audio, the staged imported audio is removed. This is the intended safety behavior so abandoned clips do not become orphans and do not attach to the wrong project later.
+
+10. AudioClip Recorder Workflow
+===============================
+The AudioClip Recorder records dry audio into a project-session staging area, then lets you apply, redo, or discard the take. Save / Apply attaches a stopped take to the current project in memory; Save Project commits attached takes into the saved project folder.
+
+Recorder buttons and settings
+-----------------------------
+Control | Purpose | Notes
+--- | --- | ---
+Record | Start a take into the active session staging folder. | Do not close the app mid-take if you need the file.
+Stop | Stop the active take. | After stopping, choose Save / Apply, Redo, or Discard.
+Save / Apply | Attach the stopped take to the current project in memory. | Does not force Save Project; the take remains staged until the project is saved.
+Redo From Top | Abandon the stopped take and start over. | Keeps unwanted takes out of the project.
+Discard Take | Delete or abandon the current stopped take. | Use when you know the take is not needed.
+Format | Choose WAV/FLAC/MP3/OGG media format. | WAV/FLAC are lossless; MP3/OGG use the quality setting.
+Quality | Choose bitrate for compressed formats. | Ignored for lossless formats.
+Mic Gain | Adjust input gain before recording. | Avoid clipping before recording.
+Track Live Effect | Optional monitor-only effect path. | Recorded source stays dry; offline render still uses the track effect chain.
+Record Test | Record a short temporary test and play it back. | The test file is deleted automatically.
+
+Recording commit model
+----------------------
+Moment | File location | Project state
+--- | --- | ---
+During recording | workspace\temp\recordings\rec_... | Not yet attached as a project clip.
+After Stop | Still in staging | User chooses Save / Apply, Redo, or Discard.
+After Save / Apply | Still in staging | Attached to the current project in memory.
+After Save Project | input\audio\recorded | Committed to the saved project folder.
+After Discard project | Staging session removed | Applied staged takes from that unsaved project are removed.
+
+11. Two-slot VST Effect Chain
+=============================
+The Two-slot VST Effect chain gives each track two ordered insert slots. It works for MIDI/instrument tracks and for imported or recorded AudioClip tracks. The main-window layout stays consistent: each slot row begins with the assignment dropdown, followed by Enable, Bypass, and Open.
+VST Effect 1: [dropdown] [Enable] [Bypass] [Open Slot 1]
+VST Effect 2: [dropdown] [Enable] [Bypass] [Open Slot 2]
+
+Processing order
+----------------
+source track
+  -> VST Effect 1, when assigned + enabled + not bypassed
+  -> VST Effect 2, when assigned + enabled + not bypassed
+  -> preview/export output
+
+Slot rules
+----------
+Rule | Behavior | Reason
+--- | --- | ---
+Dropdown assignment | Chooses the Supported Effect for that slot. | Assignment must be independent from processing on/off.
+Enable | Allows the slot to process during preview/export and allows its editor to open. | A slot can be assigned while disabled, but Open Slot stays unavailable until Enable is checked.
+Bypass | Skips processing but preserves assignment and plugin state. | Useful for A/B testing.
+Open Slot | Opens the editor for that track and slot. | Only enabled when the slot has an assigned plugin and its Enable checkbox is checked; the toolbar/title context identifies track number, slot shorthand, and plugin.
+Apply Track Settings | Commits dropdown, Enable, and Bypass. | Track-level state is explicit and saved.
+Apply Changes | Captures plugin parameter state from the open editor. | Plugin UI state is separate from track-level enable/assignment.
+
+Using the same plugin in both slots
+-----------------------------------
+The same VST3 effect can be assigned to slot 1 and slot 2. This is allowed and useful for staged processing such as light compression followed by limiting, or two different delay/reverb settings. Each slot owns its own saved plugin state, Enable flag, and Bypass flag. During preview/export, slot 1 renders first and slot 2 processes the result.
+NOTE: When the same plugin is open in both slots, use the editor toolbar/title context to verify the target. The compact toolbar uses wording like Track #1 - S1 - Reverb. The custom title bar can show fuller wording like Track: #1 - Lead Vocal | S2 | Plugin: Compressor.
+
+Effect editor toolbar
+---------------------
+Toolbar item | Purpose | Important detail
+--- | --- | ---
+Compact context label | Shows the target as Track #1 - S1 - Reverb. | Useful when multiple tracks or duplicate plugins are open.
+Apply Changes | Captures the current plugin state into the owning track slot. | Required after editing plugin parameters.
+Test Effect | Processes the bundled short WAV through this slot. | Uses the editor's owning slot, not a different track.
+Snapshot Slot 1-5 | Choose a host-side snapshot slot. | Snapshots are stored outside the project under workspace\vst3\snapshots.
+Load | Load a snapshot into the current editor and apply it. | Check the compact toolbar/title context first.
+Save | Save the current plugin state to the selected snapshot. | Useful for reusable favorite settings.
+Clear Current | Clear the selected snapshot slot. | Asks for confirmation.
+Clear All | Clear all five snapshot slots for that plugin/role. | Asks for confirmation.
+
+Effect chain troubleshooting checklist
+--------------------------------------
+- Confirm the desired slot has a Supported Effect selected in the dropdown.
+- Confirm Enable is checked for that slot.
+- Confirm Bypass is unchecked for that slot.
+- Click Apply Track Settings after changing dropdown, Enable, or Bypass.
+- Open the correct slot editor and click Apply Changes after changing plugin parameters.
+- Check the log for missing bundle, unsupported plugin, processing, or render errors.
+
+12. VST3 Plugin Manager And Instrument Hosting
+==============================================
+VST3 support is experimental. VST instruments can be used as track instruments; VST effects can be used in the two-slot effect chain when classified as Supported Effects. Plugins can crash inside their own native code, so save important work before testing unfamiliar plugins.
+
+Plugin folders
+--------------
+Folder | Purpose | Notes
+--- | --- | ---
+workspace\vst3 | User/test VST3 bundles bundled with the workspace. | Good place for portable testing.
+C:\Program Files\Common Files\VST3 | Standard Windows VST3 install location. | Many installers place plugins here.
+workspace\vst3\test | Runtime VST effect test WAV. | The test WAV stays as a normal runtime file, not embedded BinaryData.
+workspace\vst3\snapshots | Host-side snapshot storage. | Used by Load/Save/Clear snapshot toolbar buttons.
+
+Plugin classification
+---------------------
+Classification | Appears where | When to use
+--- | --- | ---
+Supported Instrument | Instrument dropdown when backend is VST3 Plugin | Use as a MIDI track instrument.
+Supported Effect | VST Effect 1 and VST Effect 2 dropdowns | Use as an insert effect during offline preview/export.
+Warning | May show with a warning marker/log details | Use only if you understand the risk.
+Unsupported/Failed | Hidden from normal assignment controls | Review details in the Plugin Manager; rescan after fixing.
+
+Safe VST testing workflow
+-------------------------
+Step | Action | Reason
+--- | --- | ---
+1 | Save the project before scanning or opening unknown plugins. | A crashing plugin can take down the app.
+2 | Scan VST3 Plugins. | Builds the known plugin catalog.
+3 | Check status/classification in the Plugin Manager. | Avoid assigning a plugin in the wrong role.
+4 | Assign one plugin to one test track first. | Limits troubleshooting scope.
+5 | Open the editor and use Apply Changes. | Captures parameter state.
+6 | Use Test Effect or short preview before full render. | Finds failures quickly.
+
+13. SoundFont, SF3, And SFZ Workflows
+=====================================
 
 SoundFont/SF3
 -------------
-
-SoundFont and SF3 instruments are rendered through FluidSynth. Choose a file, refresh the preset list, choose a preset, then apply the project or track setting. General MIDI preset matching is used when importing tracks where possible.
+SoundFont and SF3 instruments are rendered through FluidSynth. Choose a file, refresh/inspect presets when needed, select a preset, and apply the project or track setting. General MIDI matching can help imported MIDI tracks choose sensible presets.
+Task | Control/path | Advice
+--- | --- | ---
+Choose library | SoundFont selector | Keep stable libraries under workspace\soundfonts.
+Choose preset | Preset/instrument dropdown | Use General MIDI names where possible.
+Render | FluidSynth path/settings | Check the log if rendering fails.
 
 SFZ
 ---
+SFZ instruments are rendered through sfizz. Keep the .sfz file, sample folders, and included files together. Poor Man's Studio validates sample references so missing files can be caught before render.
+Issue | Likely cause | Fix
+--- | --- | ---
+SFZ render silent or failed | Missing sample files or wrong relative paths | Keep samples beside the SFZ or adjust paths.
+Key switch not working | Wrong key switch note | Set the optional key switch value for the SFZ.
+Expression/modulation missing | CC1/CC11 not configured | Set optional CC1/CC11 values where the instrument expects them.
 
-Poor Man's Studio supports individual SFZ files and sidecar SFZ packs. If the selected file is:
+14. Preview, Render, Export, And Stems
+======================================
+Preview and render paths create temporary or final audio by rendering tracks, applying enabled effect chains, and mixing the result. Selected-track and selected-sequence render are useful for debugging before a full export.
 
-workspace\sfz\TheOpenSourceDrumKit-Complete-V1.sfz
+Render settings
+---------------
+Setting | Purpose | Recommended use
+--- | --- | ---
+Sample Rate | Sets output sample rate. | 48 kHz is a practical default; use project/client requirements when known.
+Channels | Mono or stereo output. | Use stereo for most music renders.
+Bitrate | Compressed output quality. | Higher values improve MP3/OGG quality at larger file size.
+Keep WAV stems | Preserve per-track audio stems. | Use when you want to inspect or mix stems elsewhere.
+Keep MIDI stems | Preserve per-track MIDI stem files. | Use for debugging instrument/render problems.
+Cleanup rendered output | Remove temporary render sidecars when appropriate. | Use to keep workspace tidy after exports.
 
-then the app also checks this pack root:
+How effects are applied during render
+-------------------------------------
+Track type | First stage | Effect stage | Output stage
+--- | --- | --- | ---
+MIDI + SF2/SF3 | Render MIDI through FluidSynth | Process enabled slot 1 then slot 2 | Mix/export
+MIDI + SFZ | Render MIDI through sfizz | Process enabled slot 1 then slot 2 | Mix/export
+MIDI + VST3 instrument | Render MIDI through VST3 instrument | Process enabled slot 1 then slot 2 | Mix/export
+Imported AudioClip | Read staged/committed source audio | Create temporary processed WAV through slot chain | Mix/export; source stays dry
+Recorded AudioClip | Read staged/committed dry take | Create temporary processed WAV through slot chain | Mix/export; take stays dry
 
-workspace\sfz\TheOpenSourceDrumKit-Complete-V1\
+15. Clean Temp And Media Safety
+===============================
+Clean Temp is the safe way to remove temporary render files, preview files, test-effect output, and abandoned staged AudioClip media. It should not remove committed media inside saved project folders.
 
-Keep the .sfz file and the same-name folder together. The SFZ option list treats Name.sfz plus Name\ as one public pack option. Preflight and render checks resolve sample= and #include paths from the pack root when needed.
+What Clean Temp can remove
+--------------------------
+Item | Removed by Clean Temp | Notes
+--- | --- | ---
+Preview files | Yes | Temporary by design.
+Test Effect output | Yes | The source test WAV remains a runtime file.
+Abandoned staging sessions | Yes, after confirmation | Includes staged imported and recorded AudioClip media not committed to a saved project.
+Committed input\audio\imported | No | Saved project media is not temp.
+Committed input\audio\recorded | No | Saved project media is not temp.
+Final exports | No | Exports are user output, not temp.
 
-VST3 Plugin Instruments
+Discard safety
+--------------
+New Project, Open Project, Start From File, and Exit discard paths should remove the active staging session before moving on. This prevents staged AudioClip imports or recording takes from being left behind or accidentally reused by the wrong project/session.
+
+16. Settings, Themes, And Helper Bubbles
+========================================
+
+Helper bubbles
+--------------
+Helper bubbles show explanatory text when hovering on controls for about two seconds. They are useful while learning the app and can be toggled from the Help menu.
+
+Themes
+------
+Themes affect visual styling only. Theme changes do not alter project audio data, plugin assignments, render settings, or media paths.
+
+Preferences
+-----------
+Preference area | Purpose | Notes
+--- | --- | ---
+VST graphics adapter | Stores compact numeric preferred adapter selection. | The full adapter cache list is stored separately under workspace\settings\vst_graphics_adapters.txt.
+Window/theme preferences | Control UI appearance. | Does not affect render output.
+Paths | Remember common tool/library locations. | Keep external tools in predictable workspace folders when possible.
+
+17. Example Workflows
+=====================
+
+Example A - MIDI sketch with SoundFont output
+---------------------------------------------
+Step | Action
+--- | ---
+1 | Put a SoundFont/SF3 file under workspace\soundfonts.
+2 | Choose Backend = SF2/SF3 and select the SoundFont preset.
+3 | Click Apply Project Defaults.
+4 | Start From File and import a MIDI or MusicXML file.
+5 | Review each track and adjust presets where needed.
+6 | Click Apply Track Settings after selected-track changes.
+7 | Preview Project, then Render final WAV or compressed audio.
+
+Example B - Imported vocal with EQ and compressor
+-------------------------------------------------
+Step | Action
+--- | ---
+1 | Start or open a project and import the vocal audio file.
+2 | Select the imported AudioClip track.
+3 | In VST Effect 1, choose an EQ plugin; check Enable; leave Bypass unchecked.
+4 | In VST Effect 2, choose a compressor plugin; check Enable; leave Bypass unchecked.
+5 | Click Apply Track Settings.
+6 | Open Slot 1, adjust EQ, click Apply Changes.
+7 | Open Slot 2, adjust compression, click Apply Changes.
+8 | Render Selected Track to verify the effect chain.
+9 | Save Project to commit the imported AudioClip if the project was unsaved.
+
+Example C - Same plugin in both effect slots
+--------------------------------------------
+Step | Action
+--- | ---
+1 | Assign the same plugin to VST Effect 1 and VST Effect 2.
+2 | Enable both slots and click Apply Track Settings.
+3 | Open Slot 1 and set the first-stage processing; click Apply Changes.
+4 | Open Slot 2 and set the second-stage processing; click Apply Changes.
+5 | Check the compact toolbar/title before editing so you know which track and slot are being changed.
+6 | Preview/export. Slot 1 renders first; slot 2 processes slot 1's output.
+
+Example D - Unsaved project with imported audio
+-----------------------------------------------
+Step | Action
+--- | ---
+1 | Create a new project but do not save it yet.
+2 | Import an audio file.
+3 | Confirm the log reports a staging path under workspace\temp\recordings\rec_....
+4 | Preview and adjust effects as needed.
+5 | Choose Save Project to keep the import, or Discard to remove the active staging session.
+
+Example E - Record a dry take and render with effects
+-----------------------------------------------------
+Step | Action
+--- | ---
+1 | Select or create the target AudioClip track.
+2 | Record a take and stop.
+3 | Click Save / Apply to attach the take to the project in memory.
+4 | Assign VST Effect slots on the track, check Enable, and click Apply Track Settings.
+5 | Open slot editors as needed and click Apply Changes after parameter edits.
+6 | Preview/render. The dry take is processed only through temporary render files.
+7 | Save Project to commit the take into input\audio\recorded.
+
+18. Troubleshooting
+===================
+
+VST Effect chain issues
 -----------------------
+Symptom | Likely cause | Fix
+--- | --- | ---
+Enable checkbox appears to turn off again | Control state was refreshed before the click was committed in older builds. | Use this build or later; click Enable, then Apply Track Settings if needed.
+Effect selected but not audible | Enable is off, Bypass is on, or Apply Track Settings was not clicked. | Check slot controls and apply track settings.
+Plugin parameter edits do not render | Apply Changes was not clicked in the editor. | Open the correct slot and apply changes.
+Wrong slot edited | Same plugin used in both slots or multiple windows open. | Read the editor toolbar/title context, for example Track #1 - S1 - Reverb.
+Effect missing from dropdown | Plugin is not classified as Supported Effect. | Review Plugin Manager status and rescan or classify appropriately.
+Render fails on effect | Plugin failed to load or crashed during offline processing. | Check log details, bypass/remove the plugin, or mark it unsupported.
 
-VST3 support is experimental. A plugin can crash inside its own native code, and because instruments are currently hosted in-process, a plugin crash can take down the main app. Save your work before trying unfamiliar plugins.
+AudioClip staging issues
+------------------------
+Symptom | Likely cause | Fix
+--- | --- | ---
+Imported audio disappeared after discard | Discard intentionally removed the active unsaved staging session. | Save Project before discard if you want to keep the clip.
+Unexpected folder in workspace\projects | Import path should not create project folders before Save Project. | Check the log and use the current build; report the exact steps if it reappears.
+Clip missing after moving project | Only .mwproj was moved, not the full project folder. | Move/share the entire saved project folder.
+Staging folder still contains old media | Abandoned sessions were not cleaned. | Use Clean Temp after confirming no wanted unsaved media remains.
 
-Poor Man's Studio scans VST3 bundles from:
+Render and external tool issues
+-------------------------------
+Symptom | Likely cause | Fix
+--- | --- | ---
+MP3/FLAC/OGG export fails | FFmpeg path missing or invalid. | Configure FFmpeg and check the log command.
+SF2 render fails | FluidSynth path/library issue. | Verify FluidSynth executable and SoundFont path.
+SFZ render fails | sfizz path or sample references missing. | Check sfizz setup and SFZ sample includes.
+Preview works but final render differs | Different selected track/sequence/render settings. | Apply settings and render a selected track/sequence to isolate.
 
-workspace\vst3
-C:\Program Files\Common Files\VST3
+19. Button And Menu Index
+=========================
+This index is text-only for now. A future final guide can make the Contents and Index clickable. The list below is intentionally broad so button names can be found quickly.
+Button/Menu | Where | Summary
+--- | --- | ---
+Apply Changes | VST editor toolbar | Capture plugin UI state for the editor's owning track/slot.
+Apply Project Defaults | Main window Project Defaults | Commit backend/instrument defaults for future tracks.
+Apply Track Settings | Main window Track Controls | Commit selected-track instrument, mixer, and VST effect-slot controls.
+Bypass | VST Effect slot rows | Skip a configured effect slot without clearing it.
+Cancel Render | Render controls | Request render cancellation.
+Change Library | Track Controls | Pick the selected track's library/source.
+Clean Temp | Utility/menu | Remove temp files and abandoned staged media after confirmation.
+Clear All | VST editor snapshots | Clear all host snapshots for the plugin/role.
+Clear Current | VST editor snapshots | Clear the selected host snapshot slot.
+Enable | VST Effect slot rows | Allow that slot to process during preview/export.
+Export MIDI | Render/export controls | Export MIDI data.
+Helper Bubbles | Help menu | Toggle delayed tooltips/help bubbles.
+Import Audio | Start From File/import workflow | Create an AudioClip track from audio media.
+Load | VST editor snapshots | Load selected snapshot into the current editor.
+Mute | Track Controls | Mute selected track.
+Open Slot 1 | VST Effect 1 row | Open effect slot 1 editor after a plugin is assigned and Enable is checked.
+Open Slot 2 | VST Effect 2 row | Open effect slot 2 editor after a plugin is assigned and Enable is checked.
+Open VST Instrument | Track Controls | Open selected track's VST instrument editor.
+Window > VST Instrument | Window menu | Side submenu listing open VST instrument editors; choose an item to bring that editor to the front.
+Window > VST Effect | Window menu | Side submenu listing open VST effect editors by track/slot/plugin; choose an item to bring that editor to the front.
+Preview Project | Render controls | Temporary full-project preview.
+Record Test | AudioClip Recorder | Record/play/delete a short test.
+Render | Render controls | Final project export.
+Render Selected Sequence | Render controls | Export active sequence only.
+Render Selected Track | Render controls | Export selected track only.
+Save | VST editor snapshots | Save current plugin state as a host snapshot.
+Save / Apply | AudioClip Recorder | Attach stopped take to current project in memory.
+Save Project | Project controls | Write .mwproj and commit attached staged AudioClip media.
+Scan VST3 Plugins | VST Plugins menu | Build/update plugin catalog.
+Solo | Track Controls | Solo selected track.
+Start From File | Project controls | Create/replace project from a supported file.
+Test Effect | VST editor toolbar | Process bundled short WAV through the editor's owning slot.
+VST Plugins Manager | VST Plugins menu | Review plugin status/classification.
 
-A Windows VST3 plugin may look like a file in Explorer, but it is often a bundle folder ending in .vst3. Keep the outer .vst3 bundle intact. The app registers the outer bundle path, not the inner Contents\x86_64-win binary.
-
-Recommended VST3 project workflow:
-
-1. Put test/user VST3 bundles in workspace\vst3 or install plugins in the standard Windows VST3 folder.
-2. Use VST Plugins > Scan VST3 Plugins.
-3. Set the project Backend dropdown to VST3 Plugin.
-4. Choose a scanned VST3 instrument from the Instrument dropdown.
-5. Click Apply Project Defaults.
-6. A one-time dragon warning appears before VST3 becomes active through project defaults, track assignment, plugin editor opening, preview, or render. Click OK to acknowledge that the feature is experimental and may crash the program.
-7. Import MIDI/MusicXML or add new MIDI tracks.
-
-New/imported MIDI tracks seed from the applied VST3 project default. Each seeded track receives its own independent plugin assignment and state, even when multiple tracks use the same plugin bundle.
-
-Important VST3 rules:
-
-- Applying Project Defaults affects future imported/added tracks.
-- Existing tracks are not overwritten.
-- Use Apply Track Settings to commit per-track VST3 plugin changes.
-- Use Open VST Plugin to open the selected track's applied VST3 editor.
-- One VST plugin editor window is allowed per track.
-- VST3 Settings controls Safe Plugin UI Mode, VST Plugin Graphics Adapter, and maximum open plugin windows.
-- Effects, MIDI tools, and unsupported plugins are not shown as track instruments unless manually enabled in Plugin Manager.
-- Unknown plugins are hidden by default. Enable them only when you know they accept MIDI notes and produce audio.
+20. Dialog And Window Reference
+===============================
+This section summarizes the major secondary windows and dialogs. It is a text/table substitute for screenshots and should remain useful even after final screenshots are added later.
 
 VST3 Plugin Manager
 -------------------
+Area | Purpose | Workflow notes
+--- | --- | ---
+Plugin catalog | Shows scanned VST3 bundles and their status/classification. | Use this before assigning plugins to tracks or effect slots.
+Supported Instruments | Plugins that can act as MIDI track instruments. | These appear in the Instrument dropdown when Backend is VST3 Plugin.
+Supported Effects | Plugins that can process audio as track insert effects. | These appear in both VST Effect dropdowns.
+Manual classification | Override classification when you know a plugin role. | Use carefully; an instrument forced as an effect may not process audio correctly.
+Failure details | Shows scan/load problems. | If a plugin disappears from dropdowns, check this first.
 
-Open VST Plugins > VST3 Plugin Manager to review scanned plugins. The manager uses a dual-pane layout:
+AudioClip Recorder window
+-------------------------
+Area | Purpose | Workflow notes
+--- | --- | ---
+Target status | Shows the selected recording target and active sequence. | Make sure the intended track is selected before recording.
+Format/quality | Chooses the media format for new takes. | Use WAV/FLAC for archival takes; compressed formats save space.
+Mic gain | Adjusts input gain before recording. | Keep peaks below clipping.
+Record controls | Record, stop, save/apply, redo, or discard a take. | Save / Apply attaches to the project in memory; Save Project commits it.
+Track Live Effect | Monitor-only effect path through the first active track effect. | The recorded take remains dry.
+Record Test | Short temporary recording test with automatic playback/cleanup. | Use before recording important takes.
 
-- Left pane: plugins not available as track instruments.
-- Right pane: plugins available in the Instrument dropdown.
+Render Settings window
+----------------------
+Setting | Purpose | When to use
+--- | --- | ---
+Keep WAV stems | Preserve intermediate audio stems. | Debug a track or mix stems elsewhere.
+Keep MIDI stems | Preserve intermediate MIDI files. | Inspect imported/converted MIDI track content.
+Output cleanup | Control whether intermediate files are removed. | Keep the workspace tidy after normal renders.
+Parallel/stem rendering options | Control render strategy where available. | Use defaults unless debugging performance or failures.
 
-Use the filter dropdown and search box to narrow the list. Select one or more plugins and use the arrow buttons to move them between panes. Changes are pending until Apply Changes is clicked.
+Window menu VST switchers
+-------------------------
+Menu area | Purpose | Workflow notes
+--- | --- | ---
+VST Instrument submenu | Lists currently open VST instrument editor windows. | Use Window > VST Instrument when multiple instrument editors are open and you want to bring one track's editor forward.
+VST Effect submenu | Lists currently open VST effect editor windows. | Entries use compact track/slot/plugin wording so slot 1 and slot 2 editors can be distinguished.
+Piano Rolls submenu | Lists open Piano Roll editors when more than one is open. | The VST submenus follow the same window-switching idea as the Piano Roll window list.
 
-The picker panes use larger text, taller rows, and both vertical and horizontal scrolling. Long plugin names, vendors, categories, paths, and status text can be reviewed without relying on clipped rows.
+Piano Roll Preview Player
+-------------------------
+Area | Purpose | Workflow notes
+--- | --- | ---
+Preview transport | Play a temporary Piano Roll preview render. | Useful for short phrase checks.
+Preview file status | Shows whether a temporary preview exists. | Temporary preview files are not project media.
+Cleanup behavior | Preview files can be removed automatically or by Clean Temp. | Do not rely on preview files for final exports.
 
-The details panel shows metadata, paths, classification reasons, compatibility notes, and failure status for the highlighted plugin. If multiple plugins are selected, it shows a bulk-selection summary.
+21. Workflow Checklists
+=======================
+Use these checklists when testing a build or when confirming a project is ready to save/render. They are written as user workflows rather than internal build history.
 
-VST3 Settings And Plugin Windows
---------------------------------
+Before saving a project
+-----------------------
+Check | Why
+--- | ---
+Project name/base name is correct. | Keeps .mwproj and output filenames clear.
+Imported AudioClip tracks play correctly. | Confirms staged media is reachable before commit.
+Recorded takes have been Save / Applied or discarded. | Avoids losing a wanted take or keeping an unwanted one.
+Track settings have been applied after changes. | Ensures dropdowns, Enable, Bypass, mute/solo, and volume are saved.
+Open VST editors have had Apply Changes clicked after parameter edits. | Captures plugin state into the project.
+Preview sounds correct. | Catches missing tools, muted tracks, or wrong effect states before saving/exporting.
 
-VST3 Settings includes:
+Before rendering final audio
+----------------------------
+Check | Why
+--- | ---
+Output format, sample rate, channels, and bitrate are correct. | Prevents accidental low-quality or wrong-format exports.
+Muted/soloed tracks are intentional. | Solo left on can make final exports incomplete.
+VST Effect slots show assigned + enabled + not bypassed where needed. | Only active slots process.
+Save Project has committed wanted staged media. | Makes the project portable before final export.
+A selected-track render has been tested for risky VST chains. | Catches plugin processing failures early.
+The log has no unresolved error messages. | External tools and plugins report failures there.
 
-- Safe Plugin UI Mode.
-- VST Plugin Graphics Adapter. System Default / Auto lets Windows and the plugin choose. Detected adapters are listed as Hardware or Software when Windows reports that information; Poor Man's Studio does not guess whether an adapter is integrated or dedicated. Use Refresh Adapter List when hardware, drivers, monitors, or external GPUs change.
-- Maximum open VST plugin windows, default 4, hard safety cap 12.
-- Compatibility warning controls.
+Before discarding a project
+---------------------------
+Check | Why
+--- | ---
+No wanted imported audio is still only staged. | Discard removes the active staging session.
+No wanted recording take is unapplied or unsaved. | Discard removes active unsaved project/session state.
+Cancel rather than Discard if unsure. | Cancel keeps the current project and staging session active.
+Use Save Project first if the media should be retained. | Save commits attached staged media to input\audio.
 
-Plugin editor windows are edit/control surfaces. Piano Roll Preview and render handle note playback. Plugins usually do not play notes by themselves when you move controls; preview the track to hear the current state.
-
-When a plugin editor is open, a small borderless host-controls palette appears with Apply Changes. The palette:
-
-- is separate from the plugin UI,
-- stays above the editor,
-- uses the VST plugin window icon,
-- can be dragged by click-holding anywhere on the palette, including over the button,
-- can be moved outside the plugin window,
-- closes automatically with the plugin editor.
-
-After editing plugin controls, click Apply Changes so Piano Roll Preview and project rendering use the updated plugin state. Apply uses a compact one-button palette and a conservative deferred state-capture path. Normal note edits, Piano Roll undo/redo, preview, render, and closing the plugin editor do not auto-capture VST state blobs, which reduces stale native plugin state risk.
-
-Full out-of-process crash isolation is reserved for the helper host in workspace\vst_host\PoorMansStudioVstHost.exe. Until then, VST3 plugin hosting remains in-process.
-
-Tracks And Sequences
-====================
-
-MIDI Tracks
------------
-
-A MIDI track contains note events and uses an assigned instrument source. Supported MIDI sources are SF2/SF3, SFZ, and VST3 plugin instruments.
-
-MIDI tracks are editable in the main window, Track Manager, and Piano Roll. Multiple Piano Roll windows can be open at once, but each track is limited to one Piano Roll window. Reopening a track that already has a Piano Roll open focuses that existing window.
-
-AudioClip Tracks
-----------------
-
-An AudioClip track contains one imported or recorded audio file.
-
-1 imported/recorded audio file = 1 AudioClip = 1 AudioClip track
-
-AudioClip tracks use the built-in Custom Audio identity. They are managed like normal tracks in Track Manager and are included in preview and render paths.
-
-Sequences
----------
-
-Sequences group tracks for organization and preview/render workflows. The Track Manager and Change Track Seq picker stay synchronized with sequence membership and show empty sequences explicitly.
-
-Track Manager
--------------
-
-Track Manager edits track names, sequence placement, mute/solo, order, and related track organization. It prompts before closing when there are unapplied changes. Apply Changes commits the edit session. Discard and Exit abandons the edit session.
-
-Piano Roll
-==========
-
-The Piano Roll edits MIDI notes for one track. It shows the current or pending instrument in the header and stages instrument/library changes until Apply Track Settings is clicked.
-
-Common Piano Roll controls:
-
-- Add, move, resize, and delete notes.
-- Change default note length and velocity.
-- Scroll the pitch view with the mouse wheel or scrollbar.
-- Use note up/down controls for note-range steps.
-- Adjust beat windows and pages to focus on smaller or larger sections.
-- Preview the track to hear note playback.
-
-Piano Roll windows preserve unsaved note edits and pending track settings while sequence membership changes are made elsewhere.
-
-AudioClip Import And Recording
+22. Detailed Setting Reference
 ==============================
 
-Import Audio supports WAV, MP3, FLAC, and OGG. Imported audio is copied or converted into the current project folder and stored as an AudioClip track. Saved AudioClip formats include WAV, FLAC, MP3, and OGG.
+AudioClip media settings
+------------------------
+Setting | Values | Notes
+--- | --- | ---
+AudioClip Format | WAV, FLAC, MP3, OGG where available | Controls imported/recorded stored media format where conversion is used.
+Clip Quality | Bitrate choices for compressed formats | Ignored by lossless formats.
+Channels | Mono/stereo render target | AudioClip source may be converted during processing/export.
+Sample Rate | Common rates such as 44100/48000/96000 | External tools and VST processing use render/request sample rates.
 
-The AudioClip Recorder opens without auto-recording. Recorder behavior:
+VST settings
+------------
+Setting | Values | Notes
+--- | --- | ---
+Max open VST windows | Configured limit | Prevents too many native plugin editors from being open at once.
+Experimental acknowledgement | OK-only prompt | Shown from VST enable/open actions to remind users of plugin risk.
+Graphics adapter preference | Compact numeric preference | Stored separately from the adapter cache list.
+Plugin classification | Instrument, Effect, Warning, Unsupported | Controls where plugins appear in assignment dropdowns.
 
-- Input device dropdown applies immediately.
-- Refresh Devices rescans input devices.
-- Mic Gain applies software recording gain before writing the WAV file.
-- Record Test runs a 3-second countdown, records a 5-second temporary check, plays it back once, then deletes it.
-- Record Test does not create an AudioClip track.
-- Record starts after a short safety delay.
-- Record With Delay supports 3, 5, 10, or custom delay up to 99 seconds.
-- Pause pauses without writing a silent gap.
-- Save / Apply commits the take as an AudioClip track.
-- Discard Take cleans up temp audio.
-
-Preview And Render
-==================
-
-Preview supports selected track, sequence, or full project playback, including AudioClip tracks. For VST3 tracks, Piano Roll Preview uses an independent render instance and the latest state intentionally committed with Apply Changes.
-
-Render Settings include:
-
-- output format,
-- sample rate,
-- bitrate,
-- channel count,
-- keep stem files,
-- parallel stem renders.
-
-Parallel Stem Renders can be Auto, 1, 2, 4, 6, 8, 12, or 16. This controls how many independent MIDI stem render jobs may run at the same time; it is not a literal CPU-core selector. Auto is the safest default.
-
-Saving And Project Safety
-=========================
-
-Save Project writes the .mwproj metadata and project-relative paths. Start From File checks for unsaved project/editor changes before replacing the current project.
-
-Dirty-change prompts use clear choices:
-
-- Save As or Save and Exit when you want to keep the current project.
-- Discard when you intentionally want to abandon changes.
-- Cancel when you want to return to editing.
-
-Troubleshooting
-===============
-
-No VST3 plugins appear
+Render-output settings
 ----------------------
+Setting | Values | Notes
+--- | --- | ---
+Output format | WAV, FLAC, MP3, OGG, MIDI depending on action | Final audio format is separate from AudioClip storage format.
+Base filename | User-entered text | Used for final render names.
+Export folder | Folder path | Defaults to workspace\exports.
+Stem retention | Keep/remove options | Useful for debugging or external mixing.
 
-Use VST Plugins > Scan VST3 Plugins. Confirm the plugin bundle is in workspace\vst3 or the standard Windows VST3 folder. Confirm the plugin is an instrument, not an effect or MIDI tool.
+23. Final Documentation Production Notes
+========================================
+This draft intentionally contains no screenshots or temporary image panels. The final polished product can add screenshots once the UI stabilizes, and can make the Contents and Index clickable. The current priority is complete, reliable text coverage of controls, settings, features, examples, workflows, and troubleshooting.
+Future documentation feature | Current draft behavior
+--- | ---
+Clickable contents | Text contents list is present.
+Clickable index | Text index is present.
+Screenshots | Omitted for now to avoid stale visuals.
+Button tables | Included throughout the guide.
+Workflow examples | Included as step-by-step tables.
 
-A plugin is hidden from the Instrument dropdown
------------------------------------------------
-
-Open VST3 Plugin Manager, select the plugin, and read the details panel. Effects and MIDI tools are not track instruments. Unknown plugins can be manually enabled only when you know they produce audio from MIDI notes.
-
-A VST plugin crashes or fails to open
--------------------------------------
-
-Save your project, reopen the app, and use VST3 Plugin Manager to clear or review failed/blocked state. Try Safe Plugin UI Mode. Avoid unfamiliar plugins in important projects until they are tested.
-
-No sound from Piano Roll with VST3
-----------------------------------
-
-Make sure the track is assigned to a VST3 instrument plugin, not an effect. Open the Piano Roll, confirm the instrument header, then use Piano Roll Preview to send the track notes through the plugin.
-
-Audio media is missing after moving a project
----------------------------------------------
-
-Move or share the full project folder. The .mwproj file does not contain bulk audio media.
-
-SFZ samples are missing
------------------------
-
-Keep the .sfz file and its same-name folder together. Check sample= and #include paths in the SFZ file. Use Test SFZ or render preflight messages to locate missing samples.
+24. Glossary
+============
+Term | Meaning
+--- | ---
+AudioClip | A track/media reference for imported or recorded audio.
+Bypass | Skip a configured effect while preserving assignment and state.
+Dry | Source audio without printed effects.
+Effect chain | Ordered slot processing: slot 1 then slot 2.
+Offline preview/export | Temporary or final render path where effects are processed.
+Project defaults | Template settings for future imported/new MIDI tracks.
+Snapshot | Host-side saved plugin state slot for reuse.
+Staged media | Unsaved-session audio media not yet committed to a saved project folder.
+Supported Effect | A VST3 plugin classified for use in VST Effect dropdowns.
+Supported Instrument | A VST3 plugin classified for use as a MIDI track instrument.
+Track settings | Selected-track instrument, mixer, and VST effect-slot controls.

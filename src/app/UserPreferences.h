@@ -34,7 +34,8 @@ namespace mw::app
         bool vstGraphicsProfileDetected = false;
         std::string vstGraphicsProfileSource;
         std::string vstGraphicsProfileLastDetected;
-        std::string vstPreferredPluginGpuId = "auto";
+        int vstPreferredPluginGpuIndex = 1; // 1 = System Default / Auto, 2+ = cached adapter row
+        std::string vstPreferredPluginGpuId = "auto"; // legacy read-only fallback
         int vstMaxOpenPluginWindows = 4;
         std::string vstGraphicsProfileSummary;
         bool vstExperimentalWarningAcknowledged = false;

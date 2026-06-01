@@ -182,6 +182,7 @@ namespace mw::app
         preferences.vstGraphicsProfileDetected = getInt(values, "vstGraphicsProfileDetected", preferences.vstGraphicsProfileDetected ? 1 : 0) != 0;
         preferences.vstGraphicsProfileSource = getString(values, "vstGraphicsProfileSource", preferences.vstGraphicsProfileSource);
         preferences.vstGraphicsProfileLastDetected = getString(values, "vstGraphicsProfileLastDetected", preferences.vstGraphicsProfileLastDetected);
+        preferences.vstPreferredPluginGpuIndex = getInt(values, "vstPreferredPluginGpuIndex", preferences.vstPreferredPluginGpuIndex);
         preferences.vstPreferredPluginGpuId = getString(values, "vstPreferredPluginGpuId", preferences.vstPreferredPluginGpuId);
         const int loadedMaxOpenVstPluginWindows = getInt(values, "vstMaxOpenPluginWindows", preferences.vstMaxOpenPluginWindows);
         preferences.vstMaxOpenPluginWindows = loadedMaxOpenVstPluginWindows <= 0
@@ -212,7 +213,9 @@ namespace mw::app
                 const auto equals = line.find('=');
                 const auto key = equals == std::string::npos ? std::string() : trim(line.substr(0, equals));
 
-                if (key == "lastBaseFileName")
+                if (key == "lastBaseFileName"
+                    || key == "vstPreferredPluginGpuId"
+                    || key == "vstGraphicsProfileAdapters")
                     continue;
 
                 lines.push_back(line);
@@ -241,7 +244,9 @@ namespace mw::app
 
         for (const auto& [key, value] : updates)
         {
-            if (key == "lastBaseFileName")
+            if (key == "lastBaseFileName"
+                || key == "vstPreferredPluginGpuId"
+                || key == "vstGraphicsProfileAdapters")
                 continue;
 
             if (!key.empty() && writtenKeys.find(key) == writtenKeys.end())
@@ -315,7 +320,7 @@ namespace mw::app
         file << "vstGraphicsProfileDetected=" << (preferences.vstGraphicsProfileDetected ? 1 : 0) << "\n";
         file << "vstGraphicsProfileSource=" << preferences.vstGraphicsProfileSource << "\n";
         file << "vstGraphicsProfileLastDetected=" << preferences.vstGraphicsProfileLastDetected << "\n";
-        file << "vstPreferredPluginGpuId=" << preferences.vstPreferredPluginGpuId << "\n";
+        file << "vstPreferredPluginGpuIndex=" << std::max(1, preferences.vstPreferredPluginGpuIndex) << "\n";
         file << "vstMaxOpenPluginWindows=" << std::clamp(preferences.vstMaxOpenPluginWindows, 1, 12) << "\n";
         file << "vstGraphicsProfileSummary=" << preferences.vstGraphicsProfileSummary << "\n";
         file << "vstExperimentalWarningAcknowledged=" << (preferences.vstExperimentalWarningAcknowledged ? 1 : 0) << "\n";

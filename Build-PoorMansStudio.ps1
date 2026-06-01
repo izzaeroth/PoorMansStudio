@@ -52,6 +52,7 @@ $Started = Get-Date
 $Timer = [System.Diagnostics.Stopwatch]::StartNew()
 $Result = "FAILED"
 $OutputExe = ""
+$VstHostOutputExe = ""
 
 function Write-Section {
     param([string]$Text)
@@ -157,6 +158,39 @@ function Find-OutputExe {
     return ""
 }
 
+function Find-VstHostOutputExe {
+    $preferredPaths = @(
+        [System.IO.Path]::Combine($ProjectRoot, "workspace", "vst_host", "PoorMansStudioVstHost.exe"),
+        [System.IO.Path]::Combine($ProjectRoot, $BuildDir, "PoorMansStudioVstHost_artefacts", $Configuration, "PoorMansStudioVstHost.exe"),
+        [System.IO.Path]::Combine($ProjectRoot, $BuildDir, $Configuration, "PoorMansStudioVstHost.exe")
+    )
+
+    foreach ($path in $preferredPaths) {
+        if (Test-Path $path) {
+            return $path
+        }
+    }
+
+    $searchRoots = @(
+        [System.IO.Path]::Combine($ProjectRoot, "workspace", "vst_host"),
+        [System.IO.Path]::Combine($ProjectRoot, $BuildDir)
+    )
+
+    foreach ($root in $searchRoots) {
+        if (Test-Path $root) {
+            $exe = Get-ChildItem -Path $root -Recurse -Filter "PoorMansStudioVstHost.exe" -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending |
+                Select-Object -First 1
+
+            if ($null -ne $exe) {
+                return $exe.FullName
+            }
+        }
+    }
+
+    return ""
+}
+
 function Require-Command {
     param([string]$Name)
 
@@ -228,9 +262,14 @@ try {
     }
 
     $OutputExe = Find-OutputExe
+    $VstHostOutputExe = Find-VstHostOutputExe
 
     if ([string]::IsNullOrWhiteSpace($OutputExe)) {
         Write-Warning "Build finished, but the Poor Man's Studio executable was not found under workspace\program or $BuildDir."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($VstHostOutputExe)) {
+        Write-Warning "Build finished, but the VST host helper executable was not found under workspace\vst_host or $BuildDir."
     }
 
     $Result = "SUCCESS"
@@ -248,6 +287,10 @@ finally {
 
     if ([string]::IsNullOrWhiteSpace($OutputExe)) {
         $OutputExe = Find-OutputExe
+    }
+
+    if ([string]::IsNullOrWhiteSpace($VstHostOutputExe)) {
+        $VstHostOutputExe = Find-VstHostOutputExe
     }
 
     Write-Host ""
@@ -268,6 +311,13 @@ finally {
     }
     else {
         Write-Host "Output:         not found"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($VstHostOutputExe)) {
+        Write-Host ("VST Host:       {0}" -f $VstHostOutputExe)
+    }
+    else {
+        Write-Host "VST Host:       not found"
     }
 
     Write-Host ""

@@ -21,6 +21,9 @@ namespace mw::vst
         std::string message;
         std::unique_ptr<juce::AudioPluginInstance> instance;
         juce::PluginDescription description;
+        bool savedStateApplied = false;
+        bool savedStateRestoreFailed = false;
+        std::string savedStateMessage;
     };
 
     struct VstRenderRequest
@@ -42,12 +45,38 @@ namespace mw::vst
         std::filesystem::path wavPath;
     };
 
+    struct VstEffectProcessRequest
+    {
+        mw::core::Track track;
+        std::filesystem::path inputWavPath;
+        std::filesystem::path outputWavPath;
+        int blockSize = 512;
+        double tailSeconds = 2.0;
+        // -1 means process every enabled effect slot in order. 0/1 processes
+        // one slot only, which is useful for Test Effect from an editor window.
+        int effectSlotIndex = -1;
+        std::atomic<bool>* cancelRequested = nullptr;
+    };
+
+    struct VstEffectProcessResult
+    {
+        bool success = false;
+        bool cancelled = false;
+        bool effectApplied = false;
+        std::string message;
+        std::filesystem::path wavPath;
+    };
+
     class VstInstrumentHost
     {
     public:
+        static VstLoadResult loadPluginAssignment(const mw::core::VstPluginAssignment& pluginAssignment, double sampleRate, int blockSize, int inputChannels, int outputChannels);
         static VstLoadResult loadInstrumentForTrack(const mw::core::Track& track, double sampleRate, int blockSize);
         static VstRenderResult renderTrackToWav(const VstRenderRequest& request);
+        static VstEffectProcessResult processWavWithTrackEffectChain(const VstEffectProcessRequest& request);
+        static VstEffectProcessResult processWavWithFirstTrackEffect(const VstEffectProcessRequest& request);
         static bool trackHasVstPlugin(const mw::core::Track& track);
+        static bool trackHasEnabledVstEffect(const mw::core::Track& track);
         static juce::MidiBuffer buildMidiForBlock(const mw::core::Track& track, std::int64_t blockStartSample, int blockNumSamples, double samplesPerTick);
     };
 }
