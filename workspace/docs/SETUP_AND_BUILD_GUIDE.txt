@@ -1,105 +1,412 @@
-Poor Man's Studio - Setup And Build Guide
-==========================================
+Windows Setup and Build Guide
 
-Current app version: 0.60.6
+This section explains how to set up a Windows development machine for building Poor Man’s Studio from source.
 
-This guide describes the current source/build layout and runtime folder expectations. It documents current setup and runtime expectations only.
+Poor Man’s Studio is a C++ / JUCE / CMake application. The recommended Windows build path uses Microsoft Visual Studio with the MSVC compiler.
 
-Build Environment
-=================
+1. Required Tools
 
-Recommended Windows environment:
+Install these tools before building the project.
 
-- Windows 10 or Windows 11, 64-bit.
-- Visual Studio Community with Desktop development with C++.
-- MSVC C++ x64/x86 build tools.
-- Windows 10 or Windows 11 SDK.
-- MSBuild.
-- C++ CMake tools for Windows.
-- CMake 3.24 or newer.
-- Git for Windows, recommended for obtaining/updating JUCE.
-- C++20-capable compiler.
+Tool	Required?	Purpose
+Windows 10 or Windows 11	Yes	Target development platform
+Visual Studio Community, Professional, or Enterprise	Yes	C++ compiler, debugger, IDE, and MSBuild
+Desktop development with C++ workload	Yes	Installs MSVC compiler, Windows SDK, and C++ build tools
+CMake	Yes	Generates Visual Studio build files from CMakeLists.txt
+Git for Windows	Recommended	Cloning, version control, tags, and source management
+JUCE source tree	Yes	Audio/application framework used by the app
+VST3 plugins	Optional for app launch, needed for VST testing	Used to test instrument/effect scanning and hosting
+2. Recommended Folder Layout
 
-JUCE
-====
+Use a short path with no special characters.
 
-The source bundle expects JUCE at:
+Recommended:
 
-external\JUCE
+C:\Dev\PoorMansStudio
+C:\Dev\JUCE
+C:\Dev\VST3SDK
 
-JUCE is not bundled as a runtime dependency. Add the JUCE source tree before configuring the CMake project.
+Avoid paths such as:
 
-Configure And Build
-===================
+C:\Users\Your Name\Desktop\New Folder\PoorMansStudio Build Test Copy Final
 
-From a Visual Studio Developer PowerShell or normal PowerShell with CMake/MSBuild available:
+Long paths and spaces usually work, but they make command-line build troubleshooting harder.
 
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release
+3. Install Visual Studio
 
-The helper target PoorMansStudioVstHost is copied into workspace\vst_host by the local build. The main app expects its workspace folders beside the executable/source layout.
+Install Visual Studio Community or another Visual Studio edition that includes C++ desktop development.
 
-Source Tree
-===========
+During installation, select:
 
-PoorMansStudio\
-  CMakeLists.txt
-  README.md
-  THIRD_PARTY_NOTICES.txt
-  resources\
-  src\
-  workspace\
-    docs\
-    exports\
-    ffmpeg\
-    fluidsynth\
-    input\
-    projects\
-    settings\
-    sfizz\
-    sfz\
-    soundfonts\
-    temp\
-    themes\
-    vst3\
-  external\
-    JUCE\
+Desktop development with C++
 
-Workspace Runtime Notes
-=======================
+Recommended optional components:
 
-- workspace\exports is the default render/export destination.
-- workspace\projects contains saved project folders.
-- workspace\temp contains preview files, temporary renders, and active AudioClip staging sessions.
-- workspace\vst3 contains portable/test VST3 bundles, snapshots, and the bundled test WAV under workspace\vst3\test.
-- runtime temp/projects/settings folders are intentionally excluded from source bundles.
+MSVC v143 or newer C++ build tools
+Windows 10/11 SDK
+C++ CMake tools for Windows
+MSBuild
 
-AudioClip Staging
-=================
+After installation, verify that Visual Studio can build C++ projects.
 
-Imported and recorded AudioClip media is not embedded into .mwproj files. Unsaved imports and Save / Apply recorded takes stage in the active workspace\temp\recordings\rec_... session. Save Project moves attached staged imports into input\audio\imported and attached staged recordings into input\audio\recorded inside the saved project folder. Discarding unsaved changes from New/Open/Start From File/Exit prompts removes the active staged session so media cannot attach to the wrong later project.
+Open:
 
-VST3 Setup
-==========
+Start Menu → Visual Studio Installer → Modify
 
-Use VST Plugins > Scan VST3 Plugins after adding or installing plugins. The Plugin Manager classifies plugins as Supported Instruments, Supported Effects, or Unsupported. Supported Effects populate both VST Effect dropdowns in the track inspector. Supported Instruments can be chosen through Change Library > Choose scanned VST3 plugin, which opens a full chooser dialog. Open plugin editors can be found again from Window > VST Instrument and Window > VST Effect side submenus.
+Confirm that Desktop development with C++ is checked.
 
-Two-slot VST Effect Chain
-=========================
+4. Install CMake
 
-Each track has two effect slots:
+Install the current stable Windows CMake installer.
 
-VST Effect 1: [dropdown] [Enable] [Bypass] [Open Slot 1]
-VST Effect 2: [dropdown] [Enable] [Bypass] [Open Slot 2]
+During setup, choose one of these PATH options:
 
-Processing order is source -> slot 1 -> slot 2 -> preview/export. Open Slot 1/2 is available only when that slot has an assigned plugin and its Enable checkbox is checked. Use Apply Track Settings after changing dropdowns, Enable, or Bypass. Use Apply Changes in the plugin editor after changing plugin parameters. Imported and recorded AudioClip source media stays dry; preview/export uses temporary processed WAVs.
+Add CMake to the system PATH for all users
 
-The AudioClip Recorder Track Live Effect option is monitor-only. It uses the first active effect slot it can find on the target/source track for monitoring while keeping the recorded clip dry.
+or:
 
-Troubleshooting Build Issues
-============================
+Add CMake to the PATH for the current user
 
-- If CMake cannot find JUCE, confirm external\JUCE exists and contains JUCE's CMake files.
-- If the app builds but render/export fails, configure FluidSynth, FFmpeg, and sfizz-render runtime tools.
-- If VST3 scanning fails, check the plugin bundle path and mark failed plugins unsupported until reviewed.
-- If a plugin editor behaves badly, enable Safe Plugin UI Mode and lower the maximum open plugin-window count.
+After installation, open a new Command Prompt and run:
+
+cmake --version
+
+Expected result:
+
+cmake version ...
+
+If Windows says cmake is not recognized, close and reopen Command Prompt. If it still fails, reinstall CMake and enable the PATH option.
+
+5. Install Git for Windows
+
+Install Git for Windows if you plan to clone the repo, commit changes, push tags, or use GitHub.
+
+Recommended setup choices:
+
+Installer Page	Recommended Choice
+Default editor	Any editor you are comfortable with
+Initial branch name	Git default or project standard
+PATH environment	Git from the command line and third-party software
+HTTPS transport	OpenSSL
+Line endings	Checkout Windows-style, commit Unix-style
+Terminal emulator	MinTTY or Windows console, either is okay
+
+Verify installation:
+
+git --version
+6. Get JUCE
+
+Poor Man’s Studio uses JUCE as its application/audio framework.
+
+Recommended folder:
+
+C:\Dev\JUCE
+
+If using Git:
+
+cd C:\Dev
+git clone https://github.com/juce-framework/JUCE.git JUCE
+
+If using a ZIP download:
+
+Download JUCE from the official JUCE/GitHub release/source location.
+Extract it to:
+C:\Dev\JUCE
+Confirm this file exists:
+C:\Dev\JUCE\CMakeLists.txt
+
+If that file is missing, the folder is probably nested one level too deep, such as:
+
+C:\Dev\JUCE\JUCE-main\CMakeLists.txt
+
+In that case, either move the inner contents up or point CMake to the inner folder.
+
+7. Get the Poor Man’s Studio Source
+
+If cloning from GitHub:
+
+cd C:\Dev
+git clone <repo-url> PoorMansStudio
+cd PoorMansStudio
+
+If using a release ZIP:
+
+Extract the source ZIP to:
+C:\Dev\PoorMansStudio
+Confirm these files/folders exist:
+CMakeLists.txt
+src
+workspace
+README.md
+
+Do not build directly inside the ZIP preview window. Extract the ZIP first.
+
+8. Configure the Build with CMake
+
+From a regular Command Prompt:
+
+cd C:\Dev\PoorMansStudio
+cmake -S . -B builds -G "Visual Studio 17 2022" -A x64
+
+If using a newer Visual Studio generator, adjust the generator name as needed.
+
+For example:
+
+cmake -S . -B builds -A x64
+
+CMake should detect Visual Studio and generate the build files under:
+
+C:\Dev\PoorMansStudio\builds
+9. Build from the Command Line
+
+Build the Debug configuration:
+
+cmake --build builds --config Debug
+
+Build the Release configuration:
+
+cmake --build builds --config Release
+
+Debug builds are useful for troubleshooting.
+
+Release builds are better for normal testing.
+
+10. Build from Visual Studio
+
+After configuring with CMake, open the generated solution or folder in Visual Studio.
+
+Common options:
+
+Open Visual Studio → Open a local folder → C:\Dev\PoorMansStudio
+
+or open the generated solution if present under:
+
+C:\Dev\PoorMansStudio\builds
+
+In Visual Studio:
+
+Set configuration to Debug or Release.
+Set platform to x64.
+Build the project.
+Run the Poor Man’s Studio executable.
+11. Locate the Built Application
+
+The exact output path can vary by generator/configuration, but common locations include:
+
+builds\Debug
+builds\Release
+builds\PoorMansStudio_artefacts
+
+Search for:
+
+dir /s /b PoorMansStudio.exe
+
+Run the executable from its output folder or through Visual Studio.
+
+12. Workspace Folder Expectations
+
+The app expects a workspace-style folder layout for runtime files.
+
+Important folders:
+
+Folder	Purpose
+workspace/docs	User guide and setup/build guide
+workspace/vst3	VST-related runtime files and notes
+workspace/vst3/test	VST test WAV used by Test Effect
+workspace/vst3/snapshots	VST effect snapshot files
+workspace/temp	Temporary runtime work
+workspace/projects	Saved projects
+workspace/settings	Local runtime settings
+
+Do not commit local runtime junk unless intentionally part of the source package.
+
+13. VST3 Plugin Setup for Testing
+
+Poor Man’s Studio can scan VST3 instruments and effects.
+
+Common Windows VST3 locations:
+
+C:\Program Files\Common Files\VST3
+C:\Program Files\VST3
+
+Typical workflow:
+
+Install one or more VST3 plugins.
+Open Poor Man’s Studio.
+Use the VST Plugin Manager or VST scan controls.
+Scan the folder containing .vst3 plugins.
+Confirm plugins appear as instruments or effects.
+Assign an instrument to a MIDI track or assign effects to VST Effect Slot 1/2.
+Use preview/export to test offline processing.
+14. Testing VST Instruments
+
+Basic instrument test:
+
+Create or select a MIDI/instrument track.
+Choose a scanned VST3 instrument.
+Open the instrument editor.
+Add MIDI notes in Piano Roll.
+Preview playback.
+Render/export to confirm the instrument is included.
+
+The VST instrument title bar should include track context so it is clear which track owns the editor.
+
+15. Testing VST Effects
+
+Basic effect test:
+
+Select a track.
+Assign a VST effect in VST Effect 1.
+Tick Enable for Slot 1.
+Click Open Slot 1.
+Adjust plugin settings.
+Click Apply Changes in the plugin editor.
+Click Apply Track Settings in the main window.
+Preview or export.
+
+For two effects:
+
+Assign Slot 1.
+Assign Slot 2.
+Enable both slots.
+Preview/export.
+
+Processing order:
+
+source track → VST Effect 1 → VST Effect 2 → preview/export
+16. AudioClip Import and Recording Test
+
+Imported and recorded AudioClip tracks should behave the same for VST effect processing.
+
+Important behavior:
+
+Action	Expected Behavior
+Import audio into unsaved project	Audio is staged in the active temp session
+Record audio into unsaved project	Recording is staged in the active temp session
+Save Project	Staged media is committed into the saved project folder
+Discard changes	Active staged media is cleaned up
+Preview/export	Enabled VST effects are applied to temporary processed files
+Source audio	Remains dry and unchanged
+17. Clean Rebuild
+
+If the build becomes inconsistent, remove the build folder and regenerate.
+
+cd C:\Dev\PoorMansStudio
+rmdir /s /q builds
+cmake -S . -B builds -G "Visual Studio 17 2022" -A x64
+cmake --build builds --config Release
+
+Do not delete the src or workspace/docs folders.
+
+18. Common Problems
+cmake is not recognized
+
+Cause:
+
+CMake is not on PATH.
+
+Fix:
+
+Reinstall CMake.
+Enable the PATH option.
+Close and reopen Command Prompt.
+Run:
+cmake --version
+Visual Studio generator not found
+
+Cause:
+
+Visual Studio is missing or C++ tools are not installed.
+
+Fix:
+
+Open Visual Studio Installer.
+Modify installation.
+Install Desktop development with C++.
+Re-run CMake.
+Windows SDK errors
+
+Cause:
+
+Windows SDK component is missing.
+
+Fix:
+
+Open Visual Studio Installer.
+Modify Visual Studio.
+Install a Windows 10 or Windows 11 SDK.
+Reconfigure CMake.
+Build succeeds but app cannot find VST test WAV
+
+Check that this file exists:
+
+workspace\vst3\test\pms_vst_effect_test_sample.wav
+
+This file should remain a normal runtime file. It should not be embedded into BinaryData.
+
+VST plugins do not appear
+
+Check:
+
+Plugin is actually VST3.
+Plugin folder was scanned.
+Plugin is installed for the same architecture as the app, usually x64.
+Plugin is not blocked by Windows security.
+Try rescanning from the VST Plugin Manager.
+Imported audio appears in the wrong place
+
+Expected unsaved-project behavior:
+
+workspace\temp\recordings\rec_...\input\audio\imported
+
+Expected saved-project behavior:
+
+workspace\projects\<project name>\input\audio\imported
+
+If imported audio creates a project folder before saving, that is not expected.
+
+19. Packaging Rules
+
+When creating a source bundle, exclude:
+
+.git
+builds
+workspace\temp
+workspace\projects
+workspace\settings
+workspace\exports
+generated zip files
+local IDE cache folders
+continuation .md handoff files
+
+Keep:
+
+src
+CMakeLists.txt
+README.md
+workspace\docs
+workspace\vst3\README.md
+workspace\vst3\test\pms_vst_effect_test_sample.wav
+
+The continuation handoff file should be provided separately, not inside the source ZIP.
+
+20. Quick Build Checklist
+
+Use this checklist for a fresh machine:
+
+[ ] Install Visual Studio with Desktop development with C++
+[ ] Install CMake and add it to PATH
+[ ] Install Git for Windows
+[ ] Download or clone JUCE
+[ ] Download or clone Poor Man’s Studio
+[ ] Confirm CMakeLists.txt exists at the project root
+[ ] Configure with CMake
+[ ] Build Debug or Release
+[ ] Launch the app
+[ ] Scan VST3 plugins
+[ ] Test VST instrument
+[ ] Test VST Effect Slot 1
+[ ] Test VST Effect Slot 2
+[ ] Test imported AudioClip preview/export
+[ ] Test recorded AudioClip preview/export
+[ ] Save, reopen, and verify project media paths
