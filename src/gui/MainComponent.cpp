@@ -1677,6 +1677,56 @@ namespace
                     g.drawLine(row.getX() + 5.0f, row.getCentreY(), row.getRight(), row.getCentreY(), 2.2f);
                 }
             }
+
+            void drawAudioClipRecorderIcon(juce::Graphics& g, juce::Rectangle<float> area)
+            {
+                area = area.reduced(6.0f, 4.0f);
+
+                const auto centre = area.getCentreX();
+                const auto bodyWidth = area.getWidth() * 0.34f;
+                const auto bodyHeight = area.getHeight() * 0.52f;
+                const auto body = juce::Rectangle<float>(centre - bodyWidth * 0.5f,
+                                                         area.getY() + 4.0f,
+                                                         bodyWidth,
+                                                         bodyHeight);
+
+                g.setColour(juce::Colour(0xff202124));
+                g.fillRoundedRectangle(body, bodyWidth * 0.45f);
+                g.setColour(juce::Colour(0xff6ec6ff));
+                g.drawRoundedRectangle(body, bodyWidth * 0.45f, 2.2f);
+
+                g.setColour(juce::Colours::white.withAlpha(0.42f));
+                for (float offset : { -0.18f, 0.0f, 0.18f })
+                {
+                    const float grilleX = centre + bodyWidth * offset;
+                    g.drawLine(grilleX, body.getY() + 7.0f, grilleX, body.getBottom() - 7.0f, 1.2f);
+                }
+
+                g.setColour(juce::Colour(0xff202124));
+
+                const auto arc = juce::Rectangle<float>(centre - bodyWidth * 0.85f,
+                                                        body.getCentreY() - bodyHeight * 0.18f,
+                                                        bodyWidth * 1.7f,
+                                                        bodyHeight * 0.86f);
+                juce::Path arcPath;
+                arcPath.addCentredArc(arc.getCentreX(),
+                                       arc.getCentreY(),
+                                       arc.getWidth() * 0.5f,
+                                       arc.getHeight() * 0.5f,
+                                       0.0f,
+                                       juce::MathConstants<float>::pi * 0.08f,
+                                       juce::MathConstants<float>::pi * 0.92f,
+                                       true);
+                g.strokePath(arcPath, juce::PathStrokeType(3.2f));
+
+                const auto stemTop = body.getBottom() + 4.0f;
+                const auto stemBottom = area.getBottom() - 8.0f;
+                g.drawLine(centre, stemTop, centre, stemBottom, 3.2f);
+                g.drawLine(centre - bodyWidth * 0.55f, stemBottom, centre + bodyWidth * 0.55f, stemBottom, 3.2f);
+
+                g.setColour(juce::Colour(0xffff4d57));
+                g.fillEllipse(area.getRight() - 14.0f, area.getY() + 6.0f, 8.0f, 8.0f);
+            }
     
             void drawEditInfoIcon(juce::Graphics& g, juce::Rectangle<float> area)
             {
@@ -1820,6 +1870,7 @@ namespace
         {
             PianoRoll,
             TrackManager,
+            AudioClipRecorder,
             EditInfo,
             PreviewPlayer,
             ColourWheel,
@@ -1868,6 +1919,10 @@ namespace
 
                 case PoorMansStudioWindowIcon::TrackManager:
                     drawTrackManagerIcon(g, area);
+                    break;
+
+                case PoorMansStudioWindowIcon::AudioClipRecorder:
+                    drawAudioClipRecorderIcon(g, area);
                     break;
 
                 case PoorMansStudioWindowIcon::EditInfo:
@@ -5814,6 +5869,22 @@ juce::Label helpLabel;
         return std::max(1.0, endBeat);
     }
 
+
+    double getAudioFileDurationSeconds(const std::filesystem::path& path)
+    {
+        if (path.empty() || !std::filesystem::exists(path))
+            return 0.0;
+
+        juce::AudioFormatManager formatManager;
+        formatManager.registerBasicFormats();
+
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(juce::File(path.string())));
+        if (reader == nullptr || reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
+            return 0.0;
+
+        return static_cast<double>(reader->lengthInSamples) / reader->sampleRate;
+    }
+
     juce::String formatPreviewClockTime(double seconds)
     {
         seconds = std::max(0.0, seconds);
@@ -6254,57 +6325,6 @@ namespace mw::gui
 
             label << instrumentName;
             return label;
-        }
-
-        juce::Image createMicrophoneWindowIconImage()
-        {
-            juce::Image image(juce::Image::ARGB, 32, 32, true);
-            juce::Graphics g(image);
-            g.fillAll(juce::Colours::transparentBlack);
-
-            auto bounds = juce::Rectangle<float>(3.0f, 2.0f, 26.0f, 28.0f);
-            const auto centre = bounds.getCentreX();
-            const auto bodyWidth = bounds.getWidth() * 0.34f;
-            const auto bodyHeight = bounds.getHeight() * 0.52f;
-            const auto body = juce::Rectangle<float>(centre - bodyWidth * 0.5f,
-                                                     bounds.getY() + 2.0f,
-                                                     bodyWidth,
-                                                     bodyHeight);
-
-            g.setColour(juce::Colour(0xff202124));
-            g.fillRoundedRectangle(body, bodyWidth * 0.45f);
-            g.setColour(juce::Colour(0xff6ec6ff));
-            g.drawRoundedRectangle(body, bodyWidth * 0.45f, 1.2f);
-
-            g.setColour(juce::Colours::white.withAlpha(0.42f));
-            for (float offset : { -0.18f, 0.0f, 0.18f })
-            {
-                const float grilleX = centre + bodyWidth * offset;
-                g.drawLine(grilleX, body.getY() + 4.0f, grilleX, body.getBottom() - 4.0f, 0.7f);
-            }
-
-            g.setColour(juce::Colour(0xff202124));
-
-            const auto arc = juce::Rectangle<float>(centre - bodyWidth * 0.85f,
-                                                    body.getCentreY() - bodyHeight * 0.18f,
-                                                    bodyWidth * 1.7f,
-                                                    bodyHeight * 0.86f);
-            juce::Path arcPath;
-            arcPath.addCentredArc(arc.getCentreX(),
-                                   arc.getCentreY(),
-                                   arc.getWidth() * 0.5f,
-                                   arc.getHeight() * 0.5f,
-                                   0.0f,
-                                   juce::MathConstants<float>::pi * 0.08f,
-                                   juce::MathConstants<float>::pi * 0.92f,
-                                   true);
-            g.strokePath(arcPath, juce::PathStrokeType(1.8f));
-
-            const auto stemTop = body.getBottom() + 2.0f;
-            const auto stemBottom = bounds.getBottom() - 4.0f;
-            g.drawLine(centre, stemTop, centre, stemBottom, 1.8f);
-            g.drawLine(centre - bodyWidth * 0.55f, stemBottom, centre + bodyWidth * 0.55f, stemBottom, 1.8f);
-            return image;
         }
 
 
@@ -14157,6 +14177,14 @@ void MainComponent::importMusicXmlOnly()
             clip.projectRelativePath = result.relativePath;
             clip.originalSourcePath = isImportedClip && !previousOriginalSourcePath.empty() ? previousOriginalSourcePath : result.absolutePath;
             clip.sizeBytes = result.sizeBytes;
+            if (result.durationSamples > 0)
+                clip.durationSamples = result.durationSamples;
+            if (result.sampleRate > 0.0)
+                clip.sampleRate = result.sampleRate;
+            if (result.channelCount > 0)
+                clip.channelCount = result.channelCount;
+            if (result.bitDepth > 0)
+                clip.bitDepth = result.bitDepth;
             clip.missingMedia = false;
 
             std::error_code removeError;
@@ -14516,9 +14544,12 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
                 clip.projectRelativePath = result.absolutePath;
                 clip.originalSourcePath = sourcePath;
                 clip.startTick = section.startTick;
-                clip.sampleRate = static_cast<double>(sampleRateCombo.getSelectedId() > 0 ? sampleRateCombo.getSelectedId() : 48000);
-                clip.channelCount = channelsCombo.getSelectedId() == 1 ? 1 : 2;
-                clip.bitDepth = 24;
+                clip.durationSamples = result.durationSamples;
+                clip.sampleRate = result.sampleRate > 0.0
+                    ? result.sampleRate
+                    : static_cast<double>(sampleRateCombo.getSelectedId() > 0 ? sampleRateCombo.getSelectedId() : 48000);
+                clip.channelCount = result.channelCount > 0 ? result.channelCount : (channelsCombo.getSelectedId() == 1 ? 1 : 2);
+                clip.bitDepth = result.bitDepth > 0 ? result.bitDepth : 24;
                 clip.sizeBytes = result.sizeBytes;
 
                 addAudioClipToProject(std::move(clip));
@@ -14573,10 +14604,8 @@ void MainComponent::openAudioRecorderWindow()
         audioRecorderContent = std::move(content);
         window->setContentNonOwned(audioRecorderContent.get(), false);
         window->centreWithSize(960, 390);
-        window->setIcon(createMicrophoneWindowIconImage());
         window->setVisible(true);
-        if (auto* peer = window->getPeer())
-            peer->setIcon(createMicrophoneWindowIconImage());
+        applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::AudioClipRecorder);
         refreshAudioRecorderInputDevices();
         setAudioRecorderMicGainDb(audioRecorderMicGainDb);
         if (auto* recorderContent = dynamic_cast<AudioRecorderWindowContent*>(audioRecorderContent.get()))
@@ -15558,10 +15587,14 @@ void MainComponent::openAudioRecorderWindow()
                                         generatedPreviewFiles.push_back(result.finalAudioPath);
 
                                     lastPianoRollPreviewWavPath = result.finalAudioPath;
-                                    lastPianoRollPreviewDurationBeats = std::max(1.0, previewDurationBeats > 0.0 ? previewDurationBeats : static_cast<double>(getSelectedTrackEndBeat()));
                                     lastPianoRollPreviewTempoBpm = pianoRollBpmBox.getText().getDoubleValue() > 0.0
                                         ? pianoRollBpmBox.getText().getDoubleValue()
                                         : 120.0;
+
+                                    const auto renderedPreviewSeconds = getAudioFileDurationSeconds(result.finalAudioPath);
+                                    lastPianoRollPreviewDurationBeats = renderedPreviewSeconds > 0.0
+                                        ? std::max(0.01, renderedPreviewSeconds * lastPianoRollPreviewTempoBpm / 60.0)
+                                        : std::max(1.0, previewDurationBeats > 0.0 ? previewDurationBeats : static_cast<double>(getSelectedTrackEndBeat()));
                                     pianoRollPreviewPaused = false;
                                     pendingPianoRollPreviewStartSeconds = 0.0;
 
@@ -20657,6 +20690,16 @@ void MainComponent::refreshTrackSelector()
         std::sort(target.trackNumbers.begin(), target.trackNumbers.end());
         target.trackNumbers.erase(std::unique(target.trackNumbers.begin(), target.trackNumbers.end()), target.trackNumbers.end());
 
+        int movedAudioClipCount = 0;
+        for (auto& clip : currentProject->getAudioClips())
+        {
+            if (clip.trackIndex == trackNumber - 1 && clip.sequenceNumber != targetSequenceNumber)
+            {
+                clip.sequenceNumber = targetSequenceNumber;
+                ++movedAudioClipCount;
+            }
+        }
+
         // Commit the membership change immediately to both the live sequence list and
         // project metadata.  The main Track dropdown and the console rebuild from this
         // same state, so selecting away and back must retain the new sequence.
@@ -20703,6 +20746,9 @@ void MainComponent::refreshTrackSelector()
                 << " now has tracks: "
                 << formatSequenceTrackSummary(targetSequenceNumber - 1)
                 << ".";
+
+        if (movedAudioClipCount > 0)
+            message << " AudioClip metadata moved with the track: " << movedAudioClipCount << ".";
 
         if (movingTrackWithUnappliedPianoRollState)
             message << " Open Piano Roll edits and pending track settings were preserved.";

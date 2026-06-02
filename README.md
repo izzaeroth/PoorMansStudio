@@ -319,7 +319,7 @@ Example summary:
 ```text
 Poor Man's Studio Build Summary
 --------------------------------
-Version:        0.60.6
+Version:        0.60.7
 Configuration:  Release
 Generator:      Visual Studio 18 2026
 Platform:       x64

@@ -2,9 +2,12 @@
 
 #include "audio/ExternalFfmpegEncoder.h"
 
+#include <juce_audio_formats/juce_audio_formats.h>
+
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <memory>
 #include <system_error>
 
 namespace
@@ -35,6 +38,36 @@ namespace
             value = "audio_clip";
 
         return value;
+    }
+
+
+    struct AudioFileInfo
+    {
+        long long durationSamples = 0;
+        double sampleRate = 48000.0;
+        int channelCount = 2;
+        int bitDepth = 24;
+    };
+
+    AudioFileInfo readAudioFileInfo(const std::filesystem::path& path)
+    {
+        AudioFileInfo info;
+
+        if (path.empty() || !std::filesystem::exists(path))
+            return info;
+
+        juce::AudioFormatManager formatManager;
+        formatManager.registerBasicFormats();
+
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(juce::File(path.string())));
+        if (reader == nullptr)
+            return info;
+
+        info.durationSamples = static_cast<long long>(reader->lengthInSamples > 0 ? reader->lengthInSamples : 0);
+        info.sampleRate = reader->sampleRate > 0.0 ? reader->sampleRate : info.sampleRate;
+        info.channelCount = std::max(1, static_cast<int>(reader->numChannels));
+        info.bitDepth = reader->bitsPerSample > 0 ? static_cast<int>(reader->bitsPerSample) : info.bitDepth;
+        return info;
     }
 
     mw::audio::EncodedAudioFormat toFfmpegFormat(mw::core::AudioClipSavedFormat format)
@@ -186,6 +219,13 @@ namespace mw::audio
         result.relativePath = std::filesystem::relative(outputPath, request.projectFolder, ec);
         if (ec)
             result.relativePath = outputPath;
+
+        const auto importedInfo = readAudioFileInfo(outputPath);
+        const auto sourceInfo = importedInfo.durationSamples > 0 ? importedInfo : readAudioFileInfo(request.sourcePath);
+        result.durationSamples = sourceInfo.durationSamples;
+        result.sampleRate = sourceInfo.sampleRate > 0.0 ? sourceInfo.sampleRate : result.sampleRate;
+        result.channelCount = sourceInfo.channelCount > 0 ? sourceInfo.channelCount : result.channelCount;
+        result.bitDepth = sourceInfo.bitDepth > 0 ? sourceInfo.bitDepth : result.bitDepth;
 
         result.sizeBytes = std::filesystem::exists(outputPath, ec) ? std::filesystem::file_size(outputPath, ec) : 0;
         result.message = "Imported AudioClip media: " + result.relativePath.string();

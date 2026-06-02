@@ -1,6 +1,4 @@
 Poor Man's Studio - Comprehensive User Guide
-Current app version: 0.60.6
-This document explains current behavior. It is current-behavior documentation only.
 
 Contents
 ========

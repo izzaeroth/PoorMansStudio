@@ -25,6 +25,10 @@ namespace mw::audio
         bool success = false;
         std::filesystem::path relativePath;
         std::filesystem::path absolutePath;
+        long long durationSamples = 0;
+        double sampleRate = 48000.0;
+        int channelCount = 2;
+        int bitDepth = 24;
         std::uintmax_t sizeBytes = 0;
         std::string message;
     };
