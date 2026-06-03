@@ -1,9 +1,11 @@
 #include "audio/ExternalFfmpegMixer.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <sstream>
 #include <string>
+#include <cmath>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -17,6 +19,59 @@ namespace
     std::string quotePath(const std::filesystem::path& path)
     {
         return "\"" + path.string() + "\"";
+    }
+
+    double inputStartOffsetSecondsAt(const mw::audio::FfmpegMixRequest& request, std::size_t index)
+    {
+        if (index >= request.inputStartOffsetsSeconds.size())
+            return 0.0;
+
+        const auto seconds = request.inputStartOffsetsSeconds[index];
+        return std::isfinite(seconds) ? std::max(0.0, seconds) : 0.0;
+    }
+
+    bool hasAnyInputOffset(const mw::audio::FfmpegMixRequest& request)
+    {
+        for (std::size_t i = 0; i < request.inputWavPaths.size(); ++i)
+        {
+            if (inputStartOffsetSecondsAt(request, i) > 0.0005)
+                return true;
+        }
+
+        return false;
+    }
+
+    long long inputStartOffsetMillisecondsAt(const mw::audio::FfmpegMixRequest& request, std::size_t index)
+    {
+        return static_cast<long long>(std::llround(inputStartOffsetSecondsAt(request, index) * 1000.0));
+    }
+
+    std::string buildFilterComplex(const mw::audio::FfmpegMixRequest& request)
+    {
+        const auto inputCount = request.inputWavPaths.size();
+
+        if (!hasAnyInputOffset(request))
+            return "amix=inputs=" + std::to_string(inputCount) + ":duration=longest:normalize=0";
+
+        std::ostringstream filter;
+        for (std::size_t i = 0; i < inputCount; ++i)
+        {
+            const auto delayMs = inputStartOffsetMillisecondsAt(request, i);
+            filter << "[" << i << ":a]";
+
+            if (delayMs > 0)
+                filter << "adelay=" << delayMs << ":all=1";
+            else
+                filter << "anull";
+
+            filter << "[a" << i << "];";
+        }
+
+        for (std::size_t i = 0; i < inputCount; ++i)
+            filter << "[a" << i << "]";
+
+        filter << "amix=inputs=" << inputCount << ":duration=longest:normalize=0";
+        return filter.str();
     }
 
 #ifdef _WIN32
@@ -33,10 +88,11 @@ namespace
         for (const auto& input : request.inputWavPaths)
             command << L"-i " << quotePathW(input) << L" ";
 
+        const auto filter = buildFilterComplex(request);
         command
-            << L"-filter_complex \"amix=inputs="
-            << request.inputWavPaths.size()
-            << L":duration=longest:normalize=0\" "
+            << L"-filter_complex \""
+            << std::wstring(filter.begin(), filter.end())
+            << L"\" "
             << L"-c:a pcm_s16le "
             << quotePathW(request.outputWavPath);
 
@@ -142,9 +198,9 @@ namespace mw::audio
             command << "-i " << quotePath(input) << " ";
 
         command
-            << "-filter_complex \"amix=inputs="
-            << request.inputWavPaths.size()
-            << ":duration=longest:normalize=0\" "
+            << "-filter_complex \""
+            << buildFilterComplex(request)
+            << "\" "
             << "-c:a pcm_s16le "
             << quotePath(request.outputWavPath);
 

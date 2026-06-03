@@ -6419,6 +6419,7 @@ namespace mw::gui
                                        std::function<void()> redoCallback,
                                        std::function<void()> discardCallback,
                                        std::function<void()> closeCallback,
+                                       std::function<bool()> recordingPausedCallback,
                                        std::function<void(const juce::String&)> inputDeviceChangedCallback,
                                        std::function<void()> refreshDevicesCallback)
                 : onStart(std::move(startCallback)),
@@ -6431,6 +6432,7 @@ namespace mw::gui
                   onRedo(std::move(redoCallback)),
                   onDiscard(std::move(discardCallback)),
                   onClose(std::move(closeCallback)),
+                  onRecordingPausedCheck(std::move(recordingPausedCallback)),
                   onInputDeviceChanged(std::move(inputDeviceChangedCallback)),
                   onRefreshDevices(std::move(refreshDevicesCallback))
             {
@@ -6526,13 +6528,13 @@ namespace mw::gui
                         onRefreshDevices();
                 };
 
-                startButton.setTooltip("Start recording into the selected blank target track after a short 0.25 second safety delay. If the take is paused, this resumes the same take and appends audio instead of starting over.");
-                delayedStartButton.setTooltip("Start or resume recording into the selected blank target track after the chosen countdown delay. If the take is paused, it appends to the same take instead of overwriting it.");
+                startButton.setTooltip("Start recording into the selected blank target track after a short 0.25 second safety delay. If the take is paused, Record prompts to save, discard/start over, or cancel instead of resuming.");
+                delayedStartButton.setTooltip("Start recording into the selected blank target track after the chosen countdown delay. If the take is paused, Record With Delay prompts to save, discard/start over, or cancel instead of resuming.");
                 recordTestButton.setTooltip("Run a quick mic check without needing a target track: 3 second countdown, 5 second recording, automatic playback, then automatic temp cleanup. It does not create an AudioClip track.");
                 micGainDownButton.setTooltip("Reduce the recorder's software mic gain by 3 dB.");
                 micGainUpButton.setTooltip("Increase the recorder's software mic gain by 3 dB. Too much boost can add noise or clip.");
                 micGainResetButton.setTooltip("Reset software mic gain to 0.0 dB.");
-                pauseButton.setTooltip("Pause the active take. Paused status stays visible; either Record button can resume the same take without adding silence.");
+                pauseButton.setTooltip("Pause the active take. When paused, this button changes to Resume and is the only control that continues the same take.");
                 stopButton.setTooltip("Stop the active take so it can be saved, redone, or discarded.");
                 keepButton.setTooltip("Save/apply the stopped take into the project audio folder and place it on the selected target track.");
                 redoButton.setTooltip("Discard the current temp take and restart from the original top/start position.");
@@ -6565,8 +6567,28 @@ namespace mw::gui
                 addAndMakeVisible(countdownOverlay);
                 countdownOverlay.setVisible(false);
 
-                startButton.onClick = [this] { beginStartCountdown(0.25, false); };
-                delayedStartButton.onClick = [this] { beginStartCountdown(getSelectedDelaySeconds(), false); };
+                startButton.onClick = [this]
+                {
+                    if (onRecordingPausedCheck && onRecordingPausedCheck())
+                    {
+                        if (onStart)
+                            onStart();
+                        return;
+                    }
+
+                    beginStartCountdown(0.25, false);
+                };
+                delayedStartButton.onClick = [this]
+                {
+                    if (onRecordingPausedCheck && onRecordingPausedCheck())
+                    {
+                        if (onStart)
+                            onStart();
+                        return;
+                    }
+
+                    beginStartCountdown(getSelectedDelaySeconds(), false);
+                };
                 recordTestButton.onClick = [this] { beginStartCountdown(3.0, true); };
                 micGainDownButton.onClick = [this] { setMicGainDb(currentMicGainDb - 3.0, true); };
                 micGainUpButton.onClick = [this] { setMicGainDb(currentMicGainDb + 3.0, true); };
@@ -6640,6 +6662,16 @@ namespace mw::gui
             void setTestModeActive(bool active)
             {
                 testModeActive = active;
+                updateControlAvailability();
+            }
+
+            void setRecordingPaused(bool paused)
+            {
+                recordingPaused = paused;
+                pauseButton.setButtonText(recordingPaused ? "Resume" : "Pause");
+                pauseButton.setTooltip(recordingPaused
+                    ? "Resume the paused take and continue appending audio. Use Record only when you want to start over instead."
+                    : "Pause the active take. When paused, this button changes to Resume and is the only control that continues the same take.");
                 updateControlAvailability();
             }
 
@@ -6725,8 +6757,8 @@ namespace mw::gui
             void updateControlAvailability()
             {
                 const bool controlsEnabled = !testModeActive;
-                startButton.setEnabled(controlsEnabled && targetTrackAvailable);
-                delayedStartButton.setEnabled(controlsEnabled && targetTrackAvailable);
+                startButton.setEnabled(controlsEnabled && (targetTrackAvailable || recordingPaused));
+                delayedStartButton.setEnabled(controlsEnabled && (targetTrackAvailable || recordingPaused));
                 recordTestButton.setEnabled(controlsEnabled);
                 pauseButton.setEnabled(controlsEnabled);
                 stopButton.setEnabled(controlsEnabled);
@@ -6879,6 +6911,7 @@ namespace mw::gui
             bool targetTrackAvailable = false;
             bool targetTrackLiveEffectAvailable = false;
             bool requestedTrackLiveEffectEnabled = false;
+            bool recordingPaused = false;
             bool suppressInputDeviceChange = false;
             mw::gui::HelperTooltipLookAndFeel helperTooltipLookAndFeel;
             std::unique_ptr<juce::TooltipWindow> helperTooltipWindow;
@@ -6892,6 +6925,7 @@ namespace mw::gui
             std::function<void()> onRedo;
             std::function<void()> onDiscard;
             std::function<void()> onClose;
+            std::function<bool()> onRecordingPausedCheck;
             std::function<void(const juce::String&)> onInputDeviceChanged;
             std::function<void()> onRefreshDevices;
         };
@@ -14911,6 +14945,7 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
                 clip.bitDepth = result.bitDepth > 0 ? result.bitDepth : 24;
                 clip.sizeBytes = result.sizeBytes;
 
+                expandSequenceEndTickForAudioClip(clip);
                 addAudioClipToProject(std::move(clip));
 
                 trackCombo.setSelectedId(trackIndex + 1, juce::sendNotification);
@@ -14955,6 +14990,7 @@ void MainComponent::openAudioRecorderWindow()
             [this] { redoAudioRecordingTake(); },
             [this] { discardAudioRecordingTake(); },
             [this] { closeAudioRecorderWindowWithPrompt(); },
+            [this] { return audioClipRecorder && audioClipRecorder->isRecording() && audioClipRecorder->isPaused(); },
             [this](const juce::String& deviceName) { selectAudioRecorderInputDevice(deviceName); },
             [this] { refreshAudioRecorderInputDevices(); }
         );
@@ -15368,6 +15404,7 @@ void MainComponent::openAudioRecorderWindow()
         content->setRecorderTargetAvailable(hasRecordingTarget, hasLiveEffectTarget);
         content->setTrackLiveEffectEnabled(audioRecorderTrackLiveEffectEnabled);
         content->setTestModeActive(audioRecorderTestActive || audioRecorderTestPlaybackActive);
+        content->setRecordingPaused(audioClipRecorder && audioClipRecorder->isRecording() && audioClipRecorder->isPaused() && !audioRecorderTestActive);
         content->setStatusText(status);
         content->setDurationText(audioClipRecorder ? formatSecondsFromSamples(audioClipRecorder->getSamplesWritten(), audioClipRecorder->getSampleRate()) : juce::String("0.00s"));
     }
@@ -15385,8 +15422,7 @@ void MainComponent::openAudioRecorderWindow()
         {
             if (audioClipRecorder->isPaused())
             {
-                audioClipRecorder->resume();
-                logMessage("AudioClip recording resumed; appending to the same take.");
+                promptForPausedAudioRecordingStartOver();
                 refreshAudioRecorderWindowStatus();
                 return;
             }
@@ -15544,6 +15580,63 @@ void MainComponent::openAudioRecorderWindow()
         refreshAudioRecorderWindowStatus();
     }
 
+    void MainComponent::promptForPausedAudioRecordingStartOver()
+    {
+        if (audioRecorderPausedStartOverPromptOpen)
+            return;
+
+        if (!audioClipRecorder || !audioClipRecorder->isRecording() || !audioClipRecorder->isPaused())
+            return;
+
+        audioRecorderPausedStartOverPromptOpen = true;
+        auto* alert = new juce::AlertWindow(
+            "Paused AudioClip Take",
+            "Record starts a new take instead of resuming the paused one. Save/apply the paused take, discard it and start over from the same track/sequence, or cancel?",
+            juce::AlertWindow::WarningIcon
+        );
+
+        alert->addButton("Save / Apply Take", 2);
+        alert->addButton("Discard and Start Over", 1);
+        alert->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+        alert->enterModalState(
+            true,
+            juce::ModalCallbackFunction::create(
+                [this, alert](int result)
+                {
+                    std::unique_ptr<juce::AlertWindow> cleanup(alert);
+                    audioRecorderPausedStartOverPromptOpen = false;
+
+                    if (result == 0)
+                    {
+                        refreshAudioRecorderWindowStatus();
+                        return;
+                    }
+
+                    if (result == 2)
+                    {
+                        if (audioClipRecorder && audioClipRecorder->isRecording())
+                            stopAudioRecordingTake();
+
+                        const bool wasDirty = audioRecordingTakeDirty;
+                        keepAudioRecordingTake();
+                        if (wasDirty && audioRecordingTakeDirty)
+                            return; // save/apply failed; leave the paused/stopped take recoverable
+
+                        logMessage("AudioClip Recorder: saved/applied the paused take. Select or add a blank track before recording another AudioClip.");
+                        refreshAudioRecorderWindowStatus();
+                        return;
+                    }
+
+                    if (result == 1)
+                    {
+                        redoAudioRecordingTake();
+                        return;
+                    }
+                }
+            )
+        );
+    }
+
     void MainComponent::stopAudioRecordingTake()
     {
         if (audioRecorderTestActive || audioRecorderTestPlaybackActive)
@@ -15638,6 +15731,7 @@ void MainComponent::openAudioRecorderWindow()
         clip.bitDepth = 24;
         clip.sizeBytes = pendingFileError ? 0 : sizeBytes;
 
+        expandSequenceEndTickForAudioClip(clip);
         addAudioClipToProject(std::move(clip));
 
         activeRecordingTempWavPath.clear();
@@ -16594,7 +16688,10 @@ mw::audio::RenderJob MainComponent::createRenderJobSnapshot() const
         mw::audio::RenderJob job;
 
         if (currentProject)
+        {
             job.project = *currentProject;
+            applySequenceContainerTimingToProjectSnapshot(job.project);
+        }
 
         job.sourceInputPath = std::filesystem::path(musicXmlPathBox.getText().toStdString());
         job.exportFolder = exportFolderOrWorkspaceDefault(std::filesystem::path(exportFolderBox.getText().toStdString()));
@@ -18910,13 +19007,18 @@ void MainComponent::refreshTrackSelector()
             : (trackAssignment.backendType == mw::core::SampleBackendType::SFZ ? 3 : 2);
         trackBackendCombo.setSelectedId(backendComboId, juce::dontSendNotification);
 
+        // Rebuild the instrument list before selecting the MIDI track's instrument.
+        // AudioClip tracks replace this combo with the single Custom Audio item, so
+        // switching from an AudioClip track to a newly added blank MIDI track must
+        // repopulate the project-default SF2/SFZ/VST choices first.
+        populateInstrumentCombo();
+
         if (trackAssignment.backendType == mw::core::SampleBackendType::VST3)
         {
             // populateInstrumentCombo() already selects the VST plugin matching the
             // selected track's bundle path. Do not force item #1 here; that made a
             // newly added blank track appear to reset the selected plugin even while
             // the backend/library still showed VST3 correctly.
-            populateInstrumentCombo();
         }
         else if (trackAssignment.backendType == mw::core::SampleBackendType::SFZ)
         {
@@ -19185,7 +19287,7 @@ void MainComponent::refreshTrackSelector()
     int MainComponent::getCurrentPianoRollTotalPages() const
     {
         const auto beatWindow = getCurrentPianoRollBeatWindow();
-        const auto totalBeats = std::max(beatWindow, getSelectedTrackEndBeat());
+        const auto totalBeats = std::max(beatWindow, getTrackLocalEndBeat(getSelectedTrackIndex()));
 
         return std::max(1, static_cast<int>(std::ceil(static_cast<double>(totalBeats) / static_cast<double>(beatWindow))));
     }
@@ -19400,18 +19502,7 @@ void MainComponent::refreshTrackSelector()
         if (track.getNotes().empty())
             return;
 
-        std::int64_t endTick = 0;
-
-        for (const auto& note : track.getNotes())
-            endTick = std::max(endTick, note.startTick + note.durationTicks);
-
-        const auto endBeat =
-            static_cast<int>(
-                std::ceil(
-                    static_cast<double>(endTick)
-                    / static_cast<double>(mw::core::Project::ticksPerQuarterNote)
-                )
-            );
+        const auto endBeat = getTrackLocalEndBeat(index);
 
         int beatWindow = 16;
 
@@ -19491,7 +19582,7 @@ void MainComponent::refreshTrackSelector()
             )
         );
 
-        const auto totalBeats = std::max(beatWindow, std::max(localEndBeat, getTrackEndBeat(state.trackIndex)));
+        const auto totalBeats = std::max(beatWindow, std::max(localEndBeat, getTrackLocalEndBeat(state.trackIndex)));
         return std::max(1, static_cast<int>(std::ceil(static_cast<double>(totalBeats) / static_cast<double>(beatWindow))));
     }
 
@@ -19652,7 +19743,7 @@ void MainComponent::refreshTrackSelector()
             return;
         }
 
-        const auto endBeat = getTrackEndBeat(state.trackIndex);
+        const auto endBeat = getTrackLocalEndBeat(state.trackIndex);
         int beatWindow = 16;
 
         if (endBeat <= 4) beatWindow = 4;
@@ -19713,8 +19804,12 @@ void MainComponent::refreshTrackSelector()
         applyPianoRollSettings(state);
 
         auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
-        const auto changed = !noteListsEqual(track.getNotes(), state.roll.getNotes());
-        track.getNotes() = state.roll.getNotes();
+        auto absoluteNotes = makeAbsoluteNotesForTrackFromLocal(index, state.roll.getNotes());
+        const auto changed = !noteListsEqual(track.getNotes(), absoluteNotes);
+        track.getNotes() = std::move(absoluteNotes);
+
+        expandSequenceEndTickForTrack(index);
+        syncSequencesToProjectMetadata();
 
         if (index == getSelectedTrackIndex())
             refreshNoteEditor();
@@ -19744,7 +19839,7 @@ void MainComponent::refreshTrackSelector()
         if (index >= 0 && index < static_cast<int>(currentProject->getTracks().size()))
         {
             state.suppressDirty = true;
-            state.roll.setNotes(currentProject->getTracks()[static_cast<std::size_t>(index)].getNotes());
+            state.roll.setNotes(makeSequenceLocalNotesForTrack(index));
             state.suppressDirty = false;
 
             if (index == getSelectedTrackIndex())
@@ -19919,7 +20014,7 @@ void MainComponent::refreshTrackSelector()
         const auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
         pianoRoll.setTempoBpm(currentProject->getTempoBpm());
         suppressPianoRollEditorDirty = true;
-        pianoRoll.setNotes(track.getNotes());
+        pianoRoll.setNotes(makeSequenceLocalNotesForTrack(index));
         suppressPianoRollEditorDirty = false;
         clearPianoRollEditorDirty();
 
@@ -20003,8 +20098,12 @@ void MainComponent::refreshTrackSelector()
             return false;
 
         auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
-        const auto changed = !noteListsEqual(track.getNotes(), pianoRoll.getNotes());
-        track.getNotes() = pianoRoll.getNotes();
+        auto absoluteNotes = makeAbsoluteNotesForTrackFromLocal(index, pianoRoll.getNotes());
+        const auto changed = !noteListsEqual(track.getNotes(), absoluteNotes);
+        track.getNotes() = std::move(absoluteNotes);
+
+        expandSequenceEndTickForTrack(index);
+        syncSequencesToProjectMetadata();
 
         if (index == selectedIndex)
             refreshNoteEditor();
@@ -20049,7 +20148,7 @@ void MainComponent::refreshTrackSelector()
         if (index >= 0 && index < static_cast<int>(currentProject->getTracks().size()))
         {
             suppressPianoRollEditorDirty = true;
-            pianoRoll.setNotes(currentProject->getTracks()[static_cast<std::size_t>(index)].getNotes());
+            pianoRoll.setNotes(makeSequenceLocalNotesForTrack(index));
             suppressPianoRollEditorDirty = false;
 
             if (index == selectedIndex)
@@ -20381,7 +20480,7 @@ void MainComponent::refreshTrackSelector()
             sequence.notes = section.notes.toStdString();
             sequence.locked = section.locked;
             sequence.startTick = section.startTick;
-            sequence.endTick = section.endTick;
+            sequence.endTick = getSequenceEndTickIncludingAudioClips(i + 1, section.endTick);
             sequence.tracks = section.trackNumbers;
             std::sort(sequence.tracks.begin(), sequence.tracks.end());
             sequence.tracks.erase(std::unique(sequence.tracks.begin(), sequence.tracks.end()), sequence.tracks.end());
@@ -20428,9 +20527,13 @@ void MainComponent::refreshTrackSelector()
                 // This prevents a moved-away source sequence from still drawing a colored block.
                 section.endTick = section.startTick;
             }
-            else if (section.endTick < section.startTick)
+            else
             {
-                section.endTick = section.startTick;
+                if (section.endTick < section.startTick)
+                    section.endTick = section.startTick;
+
+                if (hasAudioClips)
+                    section.endTick = getSequenceEndTickIncludingAudioClips(i + 1, section.endTick);
             }
         }
     }
@@ -20487,6 +20590,176 @@ void MainComponent::refreshTrackSelector()
         }
 
         return -1;
+    }
+
+    std::int64_t MainComponent::getSequenceStartTickForTrackIndex(int trackIndex) const
+    {
+        const auto sequenceIndex = getSequenceIndexForTrack(trackIndex + 1);
+
+        if (sequenceIndex >= 0 && sequenceIndex < static_cast<int>(importSections.size()))
+            return std::max<std::int64_t>(0, importSections[static_cast<std::size_t>(sequenceIndex)].startTick);
+
+        return 0;
+    }
+
+    std::vector<mw::core::NoteEvent> MainComponent::makeSequenceLocalNotesForTrack(int trackIndex) const
+    {
+        std::vector<mw::core::NoteEvent> localNotes;
+
+        if (!currentProject || trackIndex < 0 || trackIndex >= static_cast<int>(currentProject->getTracks().size()))
+            return localNotes;
+
+        const auto sequenceStartTick = getSequenceStartTickForTrackIndex(trackIndex);
+        const auto& sourceNotes = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getNotes();
+        localNotes.reserve(sourceNotes.size());
+
+        bool treatStoredNotesAsAlreadyLocal = false;
+        if (sequenceStartTick > 0 && !sourceNotes.empty())
+        {
+            treatStoredNotesAsAlreadyLocal = true;
+            for (const auto& note : sourceNotes)
+            {
+                if (note.startTick >= sequenceStartTick)
+                {
+                    treatStoredNotesAsAlreadyLocal = false;
+                    break;
+                }
+            }
+        }
+
+        for (auto note : sourceNotes)
+        {
+            if (!treatStoredNotesAsAlreadyLocal)
+                note.startTick = std::max<std::int64_t>(0, note.startTick - sequenceStartTick);
+            else
+                note.startTick = std::max<std::int64_t>(0, note.startTick);
+
+            localNotes.push_back(note);
+        }
+
+        return localNotes;
+    }
+
+    std::vector<mw::core::NoteEvent> MainComponent::makeAbsoluteNotesForTrackFromLocal(int trackIndex, const std::vector<mw::core::NoteEvent>& localNotes) const
+    {
+        std::vector<mw::core::NoteEvent> absoluteNotes;
+        absoluteNotes.reserve(localNotes.size());
+
+        const auto sequenceStartTick = getSequenceStartTickForTrackIndex(trackIndex);
+
+        for (auto note : localNotes)
+        {
+            note.startTick = sequenceStartTick + std::max<std::int64_t>(0, note.startTick);
+            absoluteNotes.push_back(note);
+        }
+
+        return absoluteNotes;
+    }
+
+    int MainComponent::getTrackLocalEndBeat(int trackIndex) const
+    {
+        if (!currentProject || trackIndex < 0 || trackIndex >= static_cast<int>(currentProject->getTracks().size()))
+            return 0;
+
+        const auto localNotes = makeSequenceLocalNotesForTrack(trackIndex);
+        std::int64_t endTick = 0;
+
+        for (const auto& note : localNotes)
+            endTick = std::max(endTick, note.startTick + note.durationTicks);
+
+        return static_cast<int>(
+            std::ceil(
+                static_cast<double>(endTick)
+                / static_cast<double>(mw::core::Project::ticksPerQuarterNote)
+            )
+        );
+    }
+
+    void MainComponent::expandSequenceEndTickForTrack(int trackIndex)
+    {
+        if (!currentProject || trackIndex < 0 || trackIndex >= static_cast<int>(currentProject->getTracks().size()))
+            return;
+
+        const auto sequenceIndex = getSequenceIndexForTrack(trackIndex + 1);
+
+        if (sequenceIndex < 0 || sequenceIndex >= static_cast<int>(importSections.size()))
+            return;
+
+        auto& section = importSections[static_cast<std::size_t>(sequenceIndex)];
+
+        for (const auto& note : currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getNotes())
+            section.endTick = std::max(section.endTick, note.startTick + note.durationTicks);
+
+        section.endTick = getSequenceEndTickIncludingAudioClips(sequenceIndex + 1, std::max(section.endTick, section.startTick));
+    }
+
+    void MainComponent::refreshOpenPianoRollAfterSequenceTimingChange(int sequenceNumber)
+    {
+        if (!currentProject || sequenceNumber <= 0 || sequenceNumber > static_cast<int>(importSections.size()))
+            return;
+
+        const auto& section = importSections[static_cast<std::size_t>(sequenceNumber - 1)];
+
+        for (const auto trackNumber : section.trackNumbers)
+        {
+            auto* state = findPianoRollEditorWindow(trackNumber - 1);
+
+            if (state == nullptr || state->dirty || state->hasPendingInstrumentAssignment)
+                continue;
+
+            state->suppressDirty = true;
+            state->roll.setNotes(makeSequenceLocalNotesForTrack(state->trackIndex));
+            state->suppressDirty = false;
+            updatePianoRollPageIndicator(*state);
+            updatePianoRollWindowDirtyIndicator(*state);
+        }
+    }
+
+    void MainComponent::applySequenceContainerTimingToProjectSnapshot(mw::core::Project& project) const
+    {
+        for (int sequenceIndex = 0; sequenceIndex < static_cast<int>(importSections.size()); ++sequenceIndex)
+        {
+            const auto& section = importSections[static_cast<std::size_t>(sequenceIndex)];
+            const auto sequenceStartTick = std::max<std::int64_t>(0, section.startTick);
+
+            if (sequenceStartTick <= 0)
+                continue;
+
+            for (const auto trackNumber : section.trackNumbers)
+            {
+                const auto trackIndex = trackNumber - 1;
+
+                if (trackIndex < 0 || trackIndex >= static_cast<int>(project.getTracks().size()))
+                    continue;
+
+                auto& track = project.getTracks()[static_cast<std::size_t>(trackIndex)];
+
+                if (track.getNotes().empty())
+                    continue;
+
+                bool hasNoteBeforeSequenceStart = false;
+                bool hasNoteAtOrAfterSequenceStart = false;
+
+                for (const auto& note : track.getNotes())
+                {
+                    if (note.startTick < sequenceStartTick)
+                        hasNoteBeforeSequenceStart = true;
+                    else
+                        hasNoteAtOrAfterSequenceStart = true;
+                }
+
+                // Current render/export code expects absolute project ticks.  New
+                // Piano Roll saves now write absolute ticks, but this snapshot
+                // repair keeps older projects safe when notes were accidentally
+                // stored sequence-local inside a later sequence.  Only shift when
+                // the whole track clearly sits before the sequence container start.
+                if (!hasNoteBeforeSequenceStart || hasNoteAtOrAfterSequenceStart)
+                    continue;
+
+                for (auto& note : track.getNotes())
+                    note.startTick = sequenceStartTick + std::max<std::int64_t>(0, note.startTick);
+            }
+        }
     }
 
     bool MainComponent::ensureSelectedTrackHasSequenceForPianoRoll()
@@ -21096,6 +21369,10 @@ void MainComponent::refreshTrackSelector()
 
         const int sourceSequenceIndex = getSequenceIndexForTrack(trackNumber);
         const int sourceSequenceNumber = sourceSequenceIndex >= 0 ? sourceSequenceIndex + 1 : 0;
+        const auto sourceSequenceStartTick = sourceSequenceIndex >= 0
+            && sourceSequenceIndex < static_cast<int>(importSections.size())
+            ? importSections[static_cast<std::size_t>(sourceSequenceIndex)].startTick
+            : 0;
 
         for (auto& section : importSections)
         {
@@ -21113,15 +21390,30 @@ void MainComponent::refreshTrackSelector()
         std::sort(target.trackNumbers.begin(), target.trackNumbers.end());
         target.trackNumbers.erase(std::unique(target.trackNumbers.begin(), target.trackNumbers.end()), target.trackNumbers.end());
 
+        int movedMidiNoteCount = 0;
+        auto& movedTrack = currentProject->getTracks()[static_cast<std::size_t>(trackNumber - 1)];
+        for (auto& note : movedTrack.getNotes())
+        {
+            const auto relativeNoteStartTick = std::max<std::int64_t>(0, note.startTick - sourceSequenceStartTick);
+            note.startTick = target.startTick + relativeNoteStartTick;
+            target.endTick = std::max(target.endTick, note.startTick + note.durationTicks);
+            ++movedMidiNoteCount;
+        }
+
         int movedAudioClipCount = 0;
         for (auto& clip : currentProject->getAudioClips())
         {
             if (clip.trackIndex == trackNumber - 1 && clip.sequenceNumber != targetSequenceNumber)
             {
+                const auto relativeClipStartTick = std::max<std::int64_t>(0, clip.startTick - sourceSequenceStartTick);
                 clip.sequenceNumber = targetSequenceNumber;
+                clip.startTick = target.startTick + relativeClipStartTick;
+                target.endTick = std::max(target.endTick, audioClipEndTickForTempo(clip, static_cast<double>(currentProject->getTempoBpm())));
                 ++movedAudioClipCount;
             }
         }
+
+        target.endTick = getSequenceEndTickIncludingAudioClips(targetSequenceNumber, std::max(target.endTick, target.startTick));
 
         // Commit the membership change immediately to both the live sequence list and
         // project metadata.  The main Track dropdown and the console rebuild from this
@@ -21169,6 +21461,9 @@ void MainComponent::refreshTrackSelector()
                 << " now has tracks: "
                 << formatSequenceTrackSummary(targetSequenceNumber - 1)
                 << ".";
+
+        if (movedMidiNoteCount > 0)
+            message << " MIDI notes rebased into the target sequence container: " << movedMidiNoteCount << ".";
 
         if (movedAudioClipCount > 0)
             message << " AudioClip metadata moved with the track: " << movedAudioClipCount << ".";
@@ -21700,14 +21995,18 @@ void MainComponent::refreshTrackSelector()
                 continue;
 
             for (auto& note : tracks[static_cast<std::size_t>(trackIndex)].getNotes())
-            {
-                if (note.startTick >= section.startTick && note.startTick < section.endTick)
-                    note.startTick = std::max<std::int64_t>(0, note.startTick + delta);
-            }
+                note.startTick = std::max<std::int64_t>(0, note.startTick + delta);
+        }
+
+        for (auto& clip : currentProject->getAudioClips())
+        {
+            if (clip.sequenceNumber == sectionNumber)
+                clip.startTick = std::max<std::int64_t>(0, clip.startTick + delta);
         }
 
         section.startTick = std::max<std::int64_t>(0, section.startTick + delta);
         section.endTick = std::max(section.startTick, section.endTick + delta);
+        section.endTick = getSequenceEndTickIncludingAudioClips(sectionNumber, section.endTick);
         activeImportSectionIndex = sectionNumber - 1;
         trackManagerSectionStartBeatBox.setText(juce::String(newStartBeat, 2), juce::dontSendNotification);
 
@@ -21722,6 +22021,7 @@ void MainComponent::refreshTrackSelector()
             trackManagerMapStartBeatBox.setText(juce::String(sequenceMapStartBeat), juce::dontSendNotification);
         }
 
+        refreshOpenPianoRollAfterSequenceTimingChange(sectionNumber);
         refreshNoteEditor();
         syncPianoRollFromSelectedTrack();
         fitPianoRollToSelectedTrack();
@@ -22135,7 +22435,8 @@ void MainComponent::refreshTrackSelector()
             trackManagerSectionStartBeatBox.setText(juce::String(static_cast<double>(active.startTick) / mw::core::Project::ticksPerQuarterNote, 2), juce::dontSendNotification);
 
             const auto startBeat = static_cast<double>(active.startTick) / mw::core::Project::ticksPerQuarterNote;
-            const auto endBeat = static_cast<double>(active.endTick) / mw::core::Project::ticksPerQuarterNote;
+            const auto activeEndTick = getSequenceEndTickIncludingAudioClips(activeImportSectionIndex + 1, active.endTick);
+            const auto endBeat = static_cast<double>(activeEndTick) / mw::core::Project::ticksPerQuarterNote;
             const auto lengthBeat = std::max(0.0, endBeat - startBeat);
 
             text << "ACTIVE SEQUENCE CONTEXT\n";
@@ -22168,7 +22469,8 @@ void MainComponent::refreshTrackSelector()
                 const auto tracksText = formatSequenceTrackSummary(i);
 
                 const auto startBeat = static_cast<double>(section.startTick) / mw::core::Project::ticksPerQuarterNote;
-                const auto endBeat = static_cast<double>(section.endTick) / mw::core::Project::ticksPerQuarterNote;
+                const auto sequenceEndTick = getSequenceEndTickIncludingAudioClips(i + 1, section.endTick);
+                const auto endBeat = static_cast<double>(sequenceEndTick) / mw::core::Project::ticksPerQuarterNote;
                 const auto lengthBeat = std::max(0.0, endBeat - startBeat);
 
                 text << "Seq #" << right(juce::String(i + 1), 3)
@@ -22464,6 +22766,9 @@ void MainComponent::selectTrackFromManagerPage()
             note.startTick = std::max<std::int64_t>(0, note.startTick + delta);
 
         trackCombo.setSelectedId(trackNumber, juce::sendNotification);
+        const int sequenceNumber = getSequenceIndexForTrack(trackNumber) + 1;
+        if (sequenceNumber > 0)
+            refreshOpenPianoRollAfterSequenceTimingChange(sequenceNumber);
         refreshNoteEditor();
         syncPianoRollFromSelectedTrack();
         fitPianoRollToSelectedTrack();
@@ -22539,6 +22844,9 @@ void MainComponent::selectTrackFromManagerPage()
         trackCombo.setSelectedId(newTrackNumber, juce::sendNotification);
         trackManagerSelectBox.setText(juce::String(newTrackNumber), juce::dontSendNotification);
 
+        const int sequenceNumber = getSequenceIndexForTrack(newTrackNumber) + 1;
+        if (sequenceNumber > 0)
+            refreshOpenPianoRollAfterSequenceTimingChange(sequenceNumber);
         refreshNoteEditor();
         syncPianoRollFromSelectedTrack();
         fitPianoRollToSelectedTrack();
@@ -22718,6 +23026,32 @@ std::optional<mw::core::Project> MainComponent::importProjectFromPath(const std:
             endTick = std::max(endTick, audioClipEndTickForTempo(clip, tempo));
 
         return endTick;
+    }
+
+    std::int64_t MainComponent::getSequenceEndTickIncludingAudioClips(int sequenceNumber, std::int64_t fallbackEndTick) const
+    {
+        auto endTick = fallbackEndTick;
+
+        if (!currentProject || sequenceNumber <= 0)
+            return endTick;
+
+        const auto tempo = static_cast<double>(currentProject->getTempoBpm());
+        for (const auto& clip : currentProject->getAudioClips())
+        {
+            if (clip.sequenceNumber == sequenceNumber)
+                endTick = std::max(endTick, audioClipEndTickForTempo(clip, tempo));
+        }
+
+        return endTick;
+    }
+
+    void MainComponent::expandSequenceEndTickForAudioClip(const mw::core::AudioClip& clip)
+    {
+        if (!currentProject || clip.sequenceNumber <= 0 || clip.sequenceNumber > static_cast<int>(importSections.size()))
+            return;
+
+        auto& section = importSections[static_cast<std::size_t>(clip.sequenceNumber - 1)];
+        section.endTick = std::max(section.endTick, audioClipEndTickForTempo(clip, static_cast<double>(currentProject->getTempoBpm())));
     }
 
 void MainComponent::refreshAfterMultiFileImport()
@@ -23991,7 +24325,7 @@ void MainComponent::openPianoRollWindow()
 
         state->suppressDirty = true;
         state->roll.setTempoBpm(currentProject->getTempoBpm());
-        state->roll.setNotes(track.getNotes());
+        state->roll.setNotes(makeSequenceLocalNotesForTrack(trackIndex));
         state->suppressDirty = false;
 
         auto stateRaw = state.get();

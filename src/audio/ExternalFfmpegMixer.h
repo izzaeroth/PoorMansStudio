@@ -10,6 +10,9 @@ namespace mw::audio
     {
         std::filesystem::path ffmpegExePath;
         std::vector<std::filesystem::path> inputWavPaths;
+        // Optional per-input timeline offsets in seconds.  Empty means all inputs
+        // start at 0.0, matching the original mixer behavior.
+        std::vector<double> inputStartOffsetsSeconds;
         std::filesystem::path outputWavPath;
         int timeoutSeconds = 600;
     };

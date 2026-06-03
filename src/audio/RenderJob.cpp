@@ -78,6 +78,28 @@ namespace
         );
     }
 
+    struct AudioClipRenderInput
+    {
+        std::filesystem::path path;
+        double startOffsetSeconds = 0.0;
+    };
+
+    double ticksToSeconds(std::int64_t ticks, int tempoBpm)
+    {
+        const auto safeTempo = tempoBpm > 0 ? tempoBpm : 120;
+        const auto safeTicks = std::max<std::int64_t>(0, ticks);
+        const auto beats = static_cast<double>(safeTicks) / static_cast<double>(mw::core::Project::ticksPerQuarterNote);
+        return beats * 60.0 / static_cast<double>(safeTempo);
+    }
+
+    bool hasAnyAudioClipStartOffset(const std::vector<AudioClipRenderInput>& inputs)
+    {
+        return std::any_of(
+            inputs.begin(),
+            inputs.end(),
+            [](const auto& input) { return input.startOffsetSeconds > 0.0005; });
+    }
+
     std::filesystem::path resolveAudioClipPath(const mw::audio::RenderJob& job, const mw::core::AudioClip& clip)
     {
         if (clip.projectRelativePath.empty())
@@ -113,13 +135,13 @@ namespace
         }
     }
 
-    std::vector<std::filesystem::path> collectAudioClipInputs(
+    std::vector<AudioClipRenderInput> collectAudioClipInputs(
         const mw::audio::RenderJob& job,
         std::atomic<bool>& cancelRequested,
         const mw::audio::RenderJobCallbacks& callbacks,
         std::string& errorMessage)
     {
-        std::vector<std::filesystem::path> inputs;
+        std::vector<AudioClipRenderInput> inputs;
 
         auto cleanName = [](std::string value)
         {
@@ -175,7 +197,7 @@ namespace
 
             if (track == nullptr || !mw::vst::VstInstrumentHost::trackHasEnabledVstEffect(*track))
             {
-                inputs.push_back(path);
+                inputs.push_back({ path, ticksToSeconds(clip.startTick, job.project.getTempoBpm()) });
                 ++clipIndex;
                 continue;
             }
@@ -238,7 +260,7 @@ namespace
                 return {};
             }
 
-            inputs.push_back(processedWav);
+            inputs.push_back({ processedWav, ticksToSeconds(clip.startTick, job.project.getTempoBpm()) });
             log(callbacks, sourceKindTitle + " AudioClip VST3 effect processed for track: " + track->getName() + " -> " + processedWav.string());
             ++clipIndex;
         }
@@ -248,7 +270,7 @@ namespace
 
     bool buildAudioClipOnlyWav(
         const mw::audio::RenderJob& job,
-        const std::vector<std::filesystem::path>& audioInputs,
+        const std::vector<AudioClipRenderInput>& audioInputs,
         const std::filesystem::path& outputWav,
         const mw::audio::RenderJobCallbacks& callbacks,
         std::string& errorMessage)
@@ -259,11 +281,11 @@ namespace
             return false;
         }
 
-        if (audioInputs.size() == 1)
+        if (audioInputs.size() == 1 && !hasAnyAudioClipStartOffset(audioInputs))
         {
             mw::audio::FfmpegEncodeRequest encodeRequest;
             encodeRequest.ffmpegExePath = job.ffmpegPath;
-            encodeRequest.inputWavPath = audioInputs.front();
+            encodeRequest.inputWavPath = audioInputs.front().path;
             encodeRequest.outputPath = outputWav;
             encodeRequest.format = mw::audio::EncodedAudioFormat::Wav;
             encodeRequest.outputChannels = job.channelCount;
@@ -287,7 +309,11 @@ namespace
 
         mw::audio::FfmpegMixRequest mixRequest;
         mixRequest.ffmpegExePath = job.ffmpegPath;
-        mixRequest.inputWavPaths = audioInputs;
+        for (const auto& input : audioInputs)
+        {
+            mixRequest.inputWavPaths.push_back(input.path);
+            mixRequest.inputStartOffsetsSeconds.push_back(input.startOffsetSeconds);
+        }
         mixRequest.outputWavPath = outputWav;
 
         const auto mixResult = mw::audio::ExternalFfmpegMixer::mixWavFiles(mixRequest);
@@ -304,7 +330,7 @@ namespace
 
     bool mixAudioClipsWithRenderedWav(
         const mw::audio::RenderJob& job,
-        const std::vector<std::filesystem::path>& audioInputs,
+        const std::vector<AudioClipRenderInput>& audioInputs,
         const std::filesystem::path& renderedWav,
         const mw::audio::RenderJobCallbacks& callbacks,
         std::string& errorMessage)
@@ -312,16 +338,18 @@ namespace
         if (audioInputs.empty())
             return true;
 
-        std::vector<std::filesystem::path> mixInputs;
-        mixInputs.push_back(renderedWav);
-        mixInputs.insert(mixInputs.end(), audioInputs.begin(), audioInputs.end());
-
         auto mixedPath = renderedWav;
         mixedPath.replace_filename(renderedWav.stem().string() + "_with_audioclips.wav");
 
         mw::audio::FfmpegMixRequest mixRequest;
         mixRequest.ffmpegExePath = job.ffmpegPath;
-        mixRequest.inputWavPaths = mixInputs;
+        mixRequest.inputWavPaths.push_back(renderedWav);
+        mixRequest.inputStartOffsetsSeconds.push_back(0.0);
+        for (const auto& input : audioInputs)
+        {
+            mixRequest.inputWavPaths.push_back(input.path);
+            mixRequest.inputStartOffsetsSeconds.push_back(input.startOffsetSeconds);
+        }
         mixRequest.outputWavPath = mixedPath;
 
         const auto mixResult = mw::audio::ExternalFfmpegMixer::mixWavFiles(mixRequest);
@@ -997,20 +1025,22 @@ namespace mw::audio
                 log(callbacks, "ERROR: " + result.message);
                 return result;
             }
+            std::vector<double> stemStartOffsetsSeconds(stemWavs.size(), 0.0);
             for (const auto& audioClipInput : stemAudioClipInputs)
             {
-                stemWavs.push_back(audioClipInput);
-                log(callbacks, "Added AudioClip media to stem mix: " + audioClipInput.string());
+                stemWavs.push_back(audioClipInput.path);
+                stemStartOffsetsSeconds.push_back(audioClipInput.startOffsetSeconds);
+                log(callbacks, "Added AudioClip media to stem mix: " + audioClipInput.path.string());
             }
 
-            stemWavs.erase(
-                std::remove_if(
-                    stemWavs.begin(),
-                    stemWavs.end(),
-                    [](const auto& path) { return path.empty(); }
-                ),
-                stemWavs.end()
-            );
+            for (int i = static_cast<int>(stemWavs.size()) - 1; i >= 0; --i)
+            {
+                if (stemWavs[static_cast<std::size_t>(i)].empty())
+                {
+                    stemWavs.erase(stemWavs.begin() + i);
+                    stemStartOffsetsSeconds.erase(stemStartOffsetsSeconds.begin() + i);
+                }
+            }
 
             if (stemWavs.empty())
             {
@@ -1027,7 +1057,10 @@ namespace mw::audio
 
             status(callbacks, "Mixing stems and AudioClips...");
 
-            if (stemWavs.size() == 1)
+            const bool singleStemCanCopy = stemWavs.size() == 1
+                && (stemStartOffsetsSeconds.empty() || stemStartOffsetsSeconds.front() <= 0.0005);
+
+            if (singleStemCanCopy)
             {
                 std::filesystem::copy_file(stemWavs.front(), result.wavPath, std::filesystem::copy_options::overwrite_existing, ignored);
                 log(callbacks, "Copied single stem to final WAV: " + result.wavPath.string());
@@ -1037,6 +1070,7 @@ namespace mw::audio
                 mw::audio::FfmpegMixRequest mixRequest;
                 mixRequest.ffmpegExePath = job.ffmpegPath;
                 mixRequest.inputWavPaths = stemWavs;
+                mixRequest.inputStartOffsetsSeconds = stemStartOffsetsSeconds;
                 mixRequest.outputWavPath = result.wavPath;
 
                 const auto mixResult = mw::audio::ExternalFfmpegMixer::mixWavFiles(mixRequest);

@@ -606,6 +606,7 @@ namespace mw::gui
         bool trackIsBlankForAudioClipTarget(int trackIndex) const;
         bool trackHasUsableLiveEffectForAudioRecorder(int trackIndex) const;
         void pauseOrResumeAudioRecordingTake();
+        void promptForPausedAudioRecordingStartOver();
         void stopAudioRecordingTake();
         void keepAudioRecordingTake();
         void redoAudioRecordingTake();
@@ -711,6 +712,8 @@ namespace mw::gui
         void importFilesAsSequence();
         std::optional<mw::core::Project> importProjectFromPath(const std::filesystem::path& path);
         std::int64_t getProjectEndTick() const;
+        std::int64_t getSequenceEndTickIncludingAudioClips(int sequenceNumber, std::int64_t fallbackEndTick) const;
+        void expandSequenceEndTickForAudioClip(const mw::core::AudioClip& clip);
         void refreshAfterMultiFileImport();
         void rebuildSectionsFromTracksIfNeeded();
         void recordImportSection(const juce::String& name, const std::filesystem::path& sourcePath, std::int64_t startTick, std::int64_t endTick, const std::vector<int>& trackNumbers, bool isLayer, const juce::String& createdBy = "manual");
@@ -874,6 +877,13 @@ namespace mw::gui
         int getFirstOpenPianoRollTrackNumberForSequence(int sequenceIndex) const;
         void updateOpenPianoRollTrackNames();
         void refreshOpenPianoRollAfterTrackSequenceMove(int trackIndex);
+        std::int64_t getSequenceStartTickForTrackIndex(int trackIndex) const;
+        std::vector<mw::core::NoteEvent> makeSequenceLocalNotesForTrack(int trackIndex) const;
+        std::vector<mw::core::NoteEvent> makeAbsoluteNotesForTrackFromLocal(int trackIndex, const std::vector<mw::core::NoteEvent>& localNotes) const;
+        int getTrackLocalEndBeat(int trackIndex) const;
+        void expandSequenceEndTickForTrack(int trackIndex);
+        void refreshOpenPianoRollAfterSequenceTimingChange(int sequenceNumber);
+        void applySequenceContainerTimingToProjectSnapshot(mw::core::Project& project) const;
 
         juce::TextButton chooseMusicXmlButton {"Start From File"};
         juce::TextButton importAudioButton {"Import Audio"};
@@ -1167,6 +1177,7 @@ namespace mw::gui
         std::optional<std::filesystem::path> activeRecordingProjectFolder;
         bool audioRecordingTakeStopped = false;
         bool audioRecordingTakeDirty = false;
+        bool audioRecorderPausedStartOverPromptOpen = false;
         double activeRecordingSampleRate = 48000.0;
         int activeRecordingChannelCount = 1;
         long long activeRecordingStartTick = 0;
