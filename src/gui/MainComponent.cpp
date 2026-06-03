@@ -7274,6 +7274,7 @@ namespace mw::gui
             }
 
             case 6:
+            {
                 menu.addItem(menuVstScan, "Scan VST3 Plugins");
                 menu.addItem(menuVstPluginManager, "VST3 Plugin Manager...");
                 menu.addItem(menuVstSettings, "VST3 Settings...");
@@ -7282,8 +7283,32 @@ namespace mw::gui
                 menu.addSeparator();
                 menu.addItem(menuVstOpenSelectedTrackUi, "Open Selected Track VST Instrument", selectedTrackHasAppliedVstPlugin());
                 menu.addItem(menuVstOpenSelectedTrackEffectUi, "Open Selected Track VST Effect", selectedTrackHasOpenableVstEffect(0));
-                menu.addItem(menuVstCloseAllWindows, "Close All VST Plugin Windows");
+
+                bool hasOpenVstPluginWindows = false;
+                for (const auto& entry : vstPluginEditorWindows)
+                {
+                    if (entry.second != nullptr)
+                    {
+                        hasOpenVstPluginWindows = true;
+                        break;
+                    }
+                }
+
+                if (!hasOpenVstPluginWindows)
+                {
+                    for (const auto& entry : vstEffectEditorWindows)
+                    {
+                        if (entry.second != nullptr)
+                        {
+                            hasOpenVstPluginWindows = true;
+                            break;
+                        }
+                    }
+                }
+
+                menu.addItem(menuVstCloseAllWindows, "Close All VST Plugin Windows", hasOpenVstPluginWindows);
                 break;
+            }
 
             case 7:
                 menu.addItem(menuUserGuide, "Open User Guide PDF");
