@@ -14763,6 +14763,7 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
         }
 
         currentProject->getAudioClips().push_back(std::move(clip));
+        normalizeEmptySequencesAfterMembershipChange();
         syncSequencesToProjectMetadata();
         refreshTrackSelector();
         updateTrackSummary(*currentProject);
@@ -20524,6 +20525,64 @@ void MainComponent::refreshTrackSelector()
 
         const auto trackCount = static_cast<int>(currentProject->getTracks().size());
 
+        std::map<int, int> audioTrackToSequenceNumber;
+        std::set<int> ambiguousAudioClipTracks;
+
+        for (const auto& clip : currentProject->getAudioClips())
+        {
+            if (clip.trackIndex < 0 || clip.trackIndex >= trackCount)
+                continue;
+
+            if (clip.sequenceNumber <= 0 || clip.sequenceNumber > static_cast<int>(importSections.size()))
+                continue;
+
+            const auto existing = audioTrackToSequenceNumber.find(clip.trackIndex);
+            if (existing == audioTrackToSequenceNumber.end())
+            {
+                audioTrackToSequenceNumber[clip.trackIndex] = clip.sequenceNumber;
+            }
+            else if (existing->second != clip.sequenceNumber)
+            {
+                // A legacy project may contain multiple AudioClips on one track in
+                // different sequences.  Do not guess that track's single sequence
+                // membership; leave its existing section membership alone.
+                ambiguousAudioClipTracks.insert(clip.trackIndex);
+            }
+        }
+
+        for (const auto trackIndex : ambiguousAudioClipTracks)
+            audioTrackToSequenceNumber.erase(trackIndex);
+
+        // AudioClip metadata is the authoritative sequence source for AudioClip
+        // tracks.  Repair stale section.trackNumbers rows so the main Active Seq
+        // field, Track Manager console, save metadata, and preview/render scope all
+        // agree after switching between AudioClip tracks in different sequences.
+        for (auto& section : importSections)
+        {
+            section.trackNumbers.erase(
+                std::remove_if(
+                    section.trackNumbers.begin(),
+                    section.trackNumbers.end(),
+                    [&](int trackNumber)
+                    {
+                        if (trackNumber <= 0 || trackNumber > trackCount)
+                            return true;
+
+                        return audioTrackToSequenceNumber.find(trackNumber - 1) != audioTrackToSequenceNumber.end();
+                    }
+                ),
+                section.trackNumbers.end()
+            );
+        }
+
+        for (const auto& [trackIndex, sequenceNumber] : audioTrackToSequenceNumber)
+        {
+            auto& section = importSections[static_cast<std::size_t>(sequenceNumber - 1)];
+            const int trackNumber = trackIndex + 1;
+            if (std::find(section.trackNumbers.begin(), section.trackNumbers.end(), trackNumber) == section.trackNumbers.end())
+                section.trackNumbers.push_back(trackNumber);
+        }
+
         for (int i = 0; i < static_cast<int>(importSections.size()); ++i)
         {
             auto& section = importSections[static_cast<std::size_t>(i)];
@@ -20543,10 +20602,10 @@ void MainComponent::refreshTrackSelector()
             std::sort(section.trackNumbers.begin(), section.trackNumbers.end());
             section.trackNumbers.erase(std::unique(section.trackNumbers.begin(), section.trackNumbers.end()), section.trackNumbers.end());
 
-            const bool hasMidiTracks = !section.trackNumbers.empty();
+            const bool hasMemberTracks = !section.trackNumbers.empty();
             const bool hasAudioClips = sequenceHasAudioClips(i + 1);
 
-            if (!hasMidiTracks && !hasAudioClips)
+            if (!hasMemberTracks && !hasAudioClips)
             {
                 // Keep the sequence row itself, but make the timeline/map clearly empty.
                 // This prevents a moved-away source sequence from still drawing a colored block.
@@ -20605,6 +20664,42 @@ void MainComponent::refreshTrackSelector()
     {
         if (trackNumber <= 0)
             return -1;
+
+        const int trackIndex = trackNumber - 1;
+        if (currentProject
+            && trackIndex >= 0
+            && trackIndex < static_cast<int>(currentProject->getTracks().size()))
+        {
+            const auto& track = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)];
+            if (track.isAudioClipTrack())
+            {
+                int audioClipSequenceIndex = -1;
+
+                for (const auto& clip : currentProject->getAudioClips())
+                {
+                    if (clip.trackIndex != trackIndex)
+                        continue;
+
+                    const int candidateIndex = clip.sequenceNumber - 1;
+                    if (candidateIndex < 0 || candidateIndex >= static_cast<int>(importSections.size()))
+                        continue;
+
+                    if (audioClipSequenceIndex < 0)
+                        audioClipSequenceIndex = candidateIndex;
+                    else if (audioClipSequenceIndex != candidateIndex)
+                    {
+                        // Legacy/malformed multi-clip tracks can span more than one
+                        // sequence.  Fall back to the section membership list instead
+                        // of pretending there is one unambiguous active sequence.
+                        audioClipSequenceIndex = -1;
+                        break;
+                    }
+                }
+
+                if (audioClipSequenceIndex >= 0)
+                    return audioClipSequenceIndex;
+            }
+        }
 
         for (int i = 0; i < static_cast<int>(importSections.size()); ++i)
         {
