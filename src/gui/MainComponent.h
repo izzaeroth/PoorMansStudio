@@ -629,6 +629,7 @@ namespace mw::gui
         juce::String getAudioClipSummaryForTrack(int trackIndex) const;
         juce::String getAudioClipSummaryForSequence(int sequenceNumber) const;
         bool sequenceHasAudioClips(int sequenceNumber) const;
+        void showAudioClipPianoRollBlockedWarning(int trackNumber, const juce::String& sourceLabel);
         void refreshAudioRecorderWindowStatus();
         mw::audio::RenderJob createRenderJobSnapshot() const;
         void renderCurrentProjectOnBackgroundThread();

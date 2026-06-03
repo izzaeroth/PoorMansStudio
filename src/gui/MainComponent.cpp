@@ -14786,7 +14786,7 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
                 continue;
 
             ++count;
-            summary << "  AudioClip #" << clip.id << ": " << clip.name
+            summary << "  AudioClip media #" << clip.id << ": " << clip.name
                     << " | Seq #" << clip.sequenceNumber
                     << " | " << mw::core::audioClipSavedFormatToString(clip.savedFormat).c_str()
                     << " | " << formatSecondsFromSamples(clip.durationSamples, clip.sampleRate)
@@ -14796,9 +14796,9 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
         }
 
         if (count == 0)
-            return "  AudioClips: none\n";
+            return "  AudioClip media: none\n";
 
-        return "  AudioClips: " + juce::String(count) + "\n" + summary;
+        return "  AudioClip media attached to this track: " + juce::String(count) + "\n" + summary;
     }
 
     juce::String MainComponent::getAudioClipSummaryForSequence(int sequenceNumber) const
@@ -14815,8 +14815,8 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
                 continue;
 
             ++count;
-            summary << "  AudioClip #" << clip.id << ": " << clip.name
-                    << " | Track #" << (clip.trackIndex + 1)
+            summary << "  Track #" << (clip.trackIndex + 1)
+                    << " AudioClip media #" << clip.id << ": " << clip.name
                     << " | " << mw::core::audioClipSourceTypeToString(clip.sourceType).c_str()
                     << " | " << formatSecondsFromSamples(clip.durationSamples, clip.sampleRate)
                     << " | " << formatBytes(clip.sizeBytes)
@@ -14825,9 +14825,9 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
         }
 
         if (count == 0)
-            return "  AudioClips: none\n";
+            return "  AudioClip media: none\n";
 
-        return "  AudioClips: " + juce::String(count) + "\n" + summary;
+        return "  AudioClip media attached to sequence tracks: " + juce::String(count) + "\n" + summary;
     }
 
     bool MainComponent::sequenceHasAudioClips(int sequenceNumber) const
@@ -20882,6 +20882,24 @@ void MainComponent::refreshTrackSelector()
         }
     }
 
+    void MainComponent::showAudioClipPianoRollBlockedWarning(int trackNumber, const juce::String& sourceLabel)
+    {
+        juce::String logText;
+        logText << sourceLabel << ": Piano Roll is MIDI-only.";
+
+        if (trackNumber > 0)
+            logText << " Track #" << trackNumber << " is an AudioClip track.";
+
+        logText << " Use AudioClip tools for audio editing.";
+        logMessage(logText);
+
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::InfoIcon,
+            "Open In Piano Roll",
+            "Piano Roll is MIDI-only. AudioClip tracks cannot be opened there. Use Track Manager for sequence placement; trimming and keep/trim editing should belong in a dedicated AudioClip Editor."
+        );
+    }
+
     bool MainComponent::ensureSelectedTrackHasSequenceForPianoRoll()
     {
         if (!currentProject)
@@ -20900,7 +20918,7 @@ void MainComponent::refreshTrackSelector()
 
         if (currentProject->getTracks()[static_cast<std::size_t>(index)].isAudioClipTrack())
         {
-            logMessage("Piano Roll is MIDI-only. AudioClip tracks are managed like normal tracks in Track Manager.");
+            showAudioClipPianoRollBlockedWarning(index + 1, "Main Window");
             return false;
         }
 
@@ -22307,6 +22325,13 @@ void MainComponent::refreshTrackSelector()
                 tracksText << ", ";
 
             tracksText << "#" << trackNumber;
+
+            if (currentProject
+                && trackNumber <= static_cast<int>(currentProject->getTracks().size())
+                && currentProject->getTracks()[static_cast<std::size_t>(trackNumber - 1)].isAudioClipTrack())
+            {
+                tracksText << " (AudioClip)";
+            }
         }
 
         return tracksText.isEmpty() ? juce::String("(empty)") : tracksText;
@@ -22834,6 +22859,33 @@ void MainComponent::selectTrackFromManagerPage()
 
     void MainComponent::openSelectedTrackInPianoRollFromManager()
     {
+        if (!currentProject)
+        {
+            logMessage("Track Manager: no project loaded.");
+            return;
+        }
+
+        auto trackNumber = trackManagerSelectBox.getText().getIntValue();
+
+        if (trackNumber <= 0)
+            trackNumber = trackCombo.getSelectedId();
+
+        const auto maxTrack = static_cast<int>(currentProject->getTracks().size());
+
+        if (trackNumber <= 0 || trackNumber > maxTrack)
+        {
+            logMessage("Track Manager: select a valid track before opening Piano Roll.");
+            return;
+        }
+
+        const auto& track = currentProject->getTracks()[static_cast<std::size_t>(trackNumber - 1)];
+        if (track.isAudioClipTrack())
+        {
+            trackManagerSelectBox.setText(juce::String(trackNumber), juce::dontSendNotification);
+            showAudioClipPianoRollBlockedWarning(trackNumber, "Track Manager");
+            return;
+        }
+
         selectTrackFromManagerPage();
         openPianoRollWindow();
     }
