@@ -689,6 +689,8 @@ namespace mw::gui
         int captureOpenVstPluginStatesForProjectSave();
         bool closeVstPluginWindowForTrack(int trackIndex, const juce::String& reason = {});
         void closeAllVstPluginWindows();
+        void closeAllOpenWindows();
+        void finishClosingAllOpenWindows();
 
         void populateInstrumentCombo();
         void refreshPresetListFromSelectedSoundFont();
@@ -1130,6 +1132,8 @@ namespace mw::gui
         std::unique_ptr<juce::DocumentWindow> vstHostHelperStatusWindow;
         std::map<int, std::unique_ptr<juce::DocumentWindow>> vstPluginEditorWindows;
         std::map<int, std::unique_ptr<juce::DocumentWindow>> vstEffectEditorWindows;
+        std::map<int, int> windowMenuVstInstrumentCommandToTrack;
+        std::map<int, int> windowMenuVstEffectCommandToKey;
         std::unique_ptr<juce::DocumentWindow> projectInfoWindow;
         std::unique_ptr<juce::Component> rawNotesContent;
         std::unique_ptr<juce::Component> trackManagerContent;

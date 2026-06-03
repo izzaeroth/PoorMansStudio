@@ -323,12 +323,13 @@ Version:        0.60.7
 Configuration:  Release
 Generator:      Visual Studio 18 2026
 Platform:       x64
-Parallel Jobs:  8
-Started:        2026-05-30 14:08:12
-Finished:       2026-05-30 14:11:46
-Elapsed:        3 min 34 sec
+Parallel Jobs:  16
+Started:        2026-06-02 18:16:47
+Finished:       2026-06-02 18:20:04
+Elapsed:        3 min 17 sec
 Result:         SUCCESS
 Output:         C:\Dev\PoorMansStudio\workspace\program\Poor Man's Studio.exe
+VST Host:       C:\Dev\PoorMansStudio\workspace\vst_host\PoorMansStudioVstHost.exe
 ```
 
 Useful options:

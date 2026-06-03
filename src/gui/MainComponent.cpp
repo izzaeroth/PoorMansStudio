@@ -71,6 +71,12 @@ namespace
         virtual void stopLiveAuditionForPreview() = 0;
     };
 
+    struct WindowPendingCloseHandler
+    {
+        virtual ~WindowPendingCloseHandler() = default;
+        virtual bool requestCloseWithPendingPrompt(std::function<void()> closeAction) = 0;
+    };
+
     int sanitizeMaxOpenVstPluginWindows(int value)
     {
         if (value <= 0)
@@ -3590,7 +3596,8 @@ namespace
         std::function<void()> onCancel;
     };
 
-    class SequenceThoughtsEditorContent final : public juce::Component
+    class SequenceThoughtsEditorContent final : public juce::Component,
+                                          public WindowPendingCloseHandler
     {
     public:
         SequenceThoughtsEditorContent(
@@ -3672,11 +3679,16 @@ namespace
 
         void requestClose()
         {
+            requestCloseWithPendingPrompt(onClose);
+        }
+
+        bool requestCloseWithPendingPrompt(std::function<void()> closeAction) override
+        {
             if (! isDirty())
             {
-                if (onClose)
-                    onClose();
-                return;
+                if (closeAction)
+                    closeAction();
+                return true;
             }
 
             auto* alert = new juce::AlertWindow(
@@ -3691,14 +3703,14 @@ namespace
             alert->enterModalState(
                 true,
                 juce::ModalCallbackFunction::create(
-                    [this, alert](int result)
+                    [this, alert, closeAction](int result)
                     {
                         std::unique_ptr<juce::AlertWindow> cleanup(alert);
 
                         if (result == 1)
                         {
-                            if (onClose)
-                                onClose();
+                            if (closeAction)
+                                closeAction();
                             return;
                         }
 
@@ -3708,6 +3720,7 @@ namespace
                 ),
                 true
             );
+            return false;
         }
 
     private:
@@ -6934,6 +6947,10 @@ namespace mw::gui
             menuWindowSequenceThoughts,
             menuWindowSequenceColor,
             menuWindowRenderSettings,
+            menuWindowVstPluginManager,
+            menuWindowVstSettings,
+            menuWindowVstHostHelperStatus,
+            menuWindowCloseAllOpen = 1650,
             menuWindowPianoRollBase = 1700,
             menuWindowVstInstrumentBase = 18000,
             menuWindowVstEffectBase = 19000,
@@ -7004,7 +7021,28 @@ namespace mw::gui
 
             case 5:
             {
+                windowMenuVstInstrumentCommandToTrack.clear();
+                windowMenuVstEffectCommandToKey.clear();
+
+                const bool hasOpenAuxiliaryWindows = trackManagerWindow != nullptr
+                    || rawNotesWindow != nullptr
+                    || pianoRollPreviewPlayerWindow != nullptr
+                    || audioRecorderWindow != nullptr
+                    || projectInfoWindow != nullptr
+                    || sequencePickerWindow != nullptr
+                    || sequenceThoughtsWindow != nullptr
+                    || sequenceColorWindow != nullptr
+                    || renderSettingsWindow != nullptr
+                    || vstPluginManagerWindow != nullptr
+                    || vstSettingsWindow != nullptr
+                    || vstHostHelperStatusWindow != nullptr
+                    || !pianoRollEditorWindows.empty()
+                    || !vstPluginEditorWindows.empty()
+                    || !vstEffectEditorWindows.empty();
+
                 menu.addItem(menuWindowMain, "Main UI", true);
+                menu.addItem(menuWindowCloseAllOpen, "Close All Open Windows", hasOpenAuxiliaryWindows);
+                menu.addSeparator();
 
                 if (trackManagerWindow != nullptr)
                     menu.addItem(menuWindowTrackManager, "Track / Sequence Manager");
@@ -7032,6 +7070,15 @@ namespace mw::gui
 
                 if (renderSettingsWindow != nullptr)
                     menu.addItem(menuWindowRenderSettings, "Render Settings");
+
+                if (vstPluginManagerWindow != nullptr)
+                    menu.addItem(menuWindowVstPluginManager, "VST3 Plugin Manager");
+
+                if (vstSettingsWindow != nullptr)
+                    menu.addItem(menuWindowVstSettings, "VST3 Settings");
+
+                if (vstHostHelperStatusWindow != nullptr)
+                    menu.addItem(menuWindowVstHostHelperStatus, "VST Host Helper Status");
 
                 auto makeTrackMenuLabel = [this](int trackIndex) -> juce::String
                 {
@@ -7134,8 +7181,10 @@ namespace mw::gui
                     {
                         if (entry.second != nullptr)
                         {
+                            const int commandId = menuWindowVstInstrumentBase + openVstInstrumentCount;
+                            windowMenuVstInstrumentCommandToTrack[commandId] = entry.first;
                             ++openVstInstrumentCount;
-                            vstInstrumentMenu.addItem(menuWindowVstInstrumentBase + entry.first, makeInstrumentMenuLabel(entry.first));
+                            vstInstrumentMenu.addItem(commandId, makeInstrumentMenuLabel(entry.first));
                         }
                     }
 
@@ -7153,8 +7202,10 @@ namespace mw::gui
                     {
                         if (entry.second != nullptr)
                         {
+                            const int commandId = menuWindowVstEffectBase + openVstEffectCount;
+                            windowMenuVstEffectCommandToKey[commandId] = entry.first;
                             ++openVstEffectCount;
-                            vstEffectMenu.addItem(menuWindowVstEffectBase + entry.first, makeEffectMenuLabel(entry.first));
+                            vstEffectMenu.addItem(commandId, makeEffectMenuLabel(entry.first));
                         }
                     }
 
@@ -7175,6 +7226,9 @@ namespace mw::gui
                     && sequenceThoughtsWindow == nullptr
                     && sequenceColorWindow == nullptr
                     && renderSettingsWindow == nullptr
+                    && vstPluginManagerWindow == nullptr
+                    && vstSettingsWindow == nullptr
+                    && vstHostHelperStatusWindow == nullptr
                     && pianoRollEditorWindows.empty()
                     && vstPluginEditorWindows.empty()
                     && vstEffectEditorWindows.empty())
@@ -7238,18 +7292,21 @@ namespace mw::gui
         if (menuItemID == menuWindowSequenceThoughts) { focusWindow(sequenceThoughtsWindow); return; }
         if (menuItemID == menuWindowSequenceColor) { focusWindow(sequenceColorWindow); return; }
         if (menuItemID == menuWindowRenderSettings) { focusWindow(renderSettingsWindow); return; }
+        if (menuItemID == menuWindowVstPluginManager) { focusWindow(vstPluginManagerWindow); return; }
+        if (menuItemID == menuWindowVstSettings) { focusWindow(vstSettingsWindow); return; }
+        if (menuItemID == menuWindowVstHostHelperStatus) { focusWindow(vstHostHelperStatusWindow); return; }
 
-        if (menuItemID >= menuWindowVstEffectBase && menuItemID < menuWindowDynamicEnd)
+        if (auto foundCommand = windowMenuVstEffectCommandToKey.find(menuItemID); foundCommand != windowMenuVstEffectCommandToKey.end())
         {
-            const auto effectWindowKey = menuItemID - menuWindowVstEffectBase;
+            const auto effectWindowKey = foundCommand->second;
             if (auto found = vstEffectEditorWindows.find(effectWindowKey); found != vstEffectEditorWindows.end() && found->second != nullptr)
                 found->second->toFront(true);
             return;
         }
 
-        if (menuItemID >= menuWindowVstInstrumentBase && menuItemID < menuWindowVstEffectBase)
+        if (auto foundCommand = windowMenuVstInstrumentCommandToTrack.find(menuItemID); foundCommand != windowMenuVstInstrumentCommandToTrack.end())
         {
-            const auto trackIndex = menuItemID - menuWindowVstInstrumentBase;
+            const auto trackIndex = foundCommand->second;
             if (auto found = vstPluginEditorWindows.find(trackIndex); found != vstPluginEditorWindows.end() && found->second != nullptr)
                 found->second->toFront(true);
             return;
@@ -7269,6 +7326,12 @@ namespace mw::gui
 
     void MainComponent::menuItemSelected(int menuItemID, int)
     {
+        if (menuItemID == menuWindowCloseAllOpen)
+        {
+            closeAllOpenWindows();
+            return;
+        }
+
         if (menuItemID == menuWindowMain
             || menuItemID == menuWindowTrackManager
             || menuItemID == menuWindowPreviewPlayer
@@ -7279,7 +7342,12 @@ namespace mw::gui
             || menuItemID == menuWindowSequenceThoughts
             || menuItemID == menuWindowSequenceColor
             || menuItemID == menuWindowRenderSettings
-            || (menuItemID >= menuWindowPianoRollBase && menuItemID < menuWindowDynamicEnd))
+            || menuItemID == menuWindowVstPluginManager
+            || menuItemID == menuWindowVstSettings
+            || menuItemID == menuWindowVstHostHelperStatus
+            || (menuItemID >= menuWindowPianoRollBase && menuItemID < menuWindowVstInstrumentBase)
+            || windowMenuVstInstrumentCommandToTrack.find(menuItemID) != windowMenuVstInstrumentCommandToTrack.end()
+            || windowMenuVstEffectCommandToKey.find(menuItemID) != windowMenuVstEffectCommandToKey.end())
         {
             focusOpenWindowByMenuId(menuItemID);
             return;
@@ -8571,7 +8639,8 @@ namespace mw::gui
             return;
         }
 
-        class VstPluginManagerContent final : public juce::Component
+        class VstPluginManagerContent final : public juce::Component,
+                                             public WindowPendingCloseHandler
         {
         public:
             explicit VstPluginManagerContent(std::vector<mw::vst::VstPluginDescriptor> pluginsIn)
@@ -8780,7 +8849,7 @@ namespace mw::gui
                 details.setBounds(area);
             }
 
-            bool requestCloseWithPendingPrompt(std::function<void()> closeAction)
+            bool requestCloseWithPendingPrompt(std::function<void()> closeAction) override
             {
                 if (!hasPendingChanges())
                 {
@@ -9786,7 +9855,6 @@ namespace mw::gui
         window->setContentOwned(content, true);
         window->centreWithSize(content->getWidth(), content->getHeight());
         window->setVisible(true);
-        applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::VSTPlugin);
         vstHostHelperStatusWindow = std::move(window);
     }
 
@@ -11885,6 +11953,275 @@ namespace mw::gui
         vstEffectEditorWindows.clear();
         updateOpenVstPluginButtonState();
         logMessage("Closed all VST plugin/effect windows.");
+    }
+
+    void MainComponent::closeAllOpenWindows()
+    {
+        auto continueClose = std::make_shared<std::function<void()>>();
+
+        *continueClose = [this, continueClose]
+        {
+            const bool hasDirtyAudioTake = audioRecorderWindow != nullptr
+                && (audioRecordingTakeDirty || (audioClipRecorder && audioClipRecorder->isRecording() && !audioRecorderTestActive));
+
+            if (hasDirtyAudioTake)
+            {
+                auto* alert = new juce::AlertWindow(
+                    "Unsaved AudioClip Take",
+                    "There is an active or unsaved AudioClip take. Save it, discard it, or cancel Close All Open Windows?",
+                    juce::AlertWindow::WarningIcon
+                );
+
+                alert->addButton("Save Take and Close", 2);
+                alert->addButton("Discard and Close", 1);
+                alert->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+                alert->enterModalState(
+                    true,
+                    juce::ModalCallbackFunction::create(
+                        [this, alert, continueClose](int result)
+                        {
+                            std::unique_ptr<juce::AlertWindow> cleanup(alert);
+                            if (result == 0)
+                            {
+                                logMessage("Close All Open Windows cancelled by AudioClip Recorder prompt.");
+                                return;
+                            }
+
+                            if (result == 2)
+                            {
+                                if (audioClipRecorder && audioClipRecorder->isRecording())
+                                    stopAudioRecordingTake();
+
+                                const bool wasDirty = audioRecordingTakeDirty;
+                                keepAudioRecordingTake();
+                                if (wasDirty && audioRecordingTakeDirty)
+                                {
+                                    logMessage("Close All Open Windows stopped because the AudioClip take could not be saved.");
+                                    return;
+                                }
+                            }
+                            else if (result == 1)
+                            {
+                                discardAudioRecordingTake();
+                            }
+
+                            closeAudioRecorderWindowNow();
+                            juce::MessageManager::callAsync([continueClose] { (*continueClose)(); });
+                        }
+                    )
+                );
+                return;
+            }
+
+            if (trackManagerWindow != nullptr && trackManagerEditorDirty)
+            {
+                auto* alert = new juce::AlertWindow(
+                    "Track Manager Has Unapplied Changes",
+                    "Apply your Track Manager changes to the open project, discard them and close, or cancel Close All Open Windows?",
+                    juce::AlertWindow::QuestionIcon
+                );
+
+                alert->addButton("Apply Changes", 1, juce::KeyPress(juce::KeyPress::returnKey));
+                alert->addButton("Discard and Exit", 2);
+                alert->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+
+                alert->enterModalState(
+                    true,
+                    juce::ModalCallbackFunction::create(
+                        [this, alert, continueClose](int result)
+                        {
+                            std::unique_ptr<juce::AlertWindow> cleanup(alert);
+
+                            if (result == 1)
+                            {
+                                applyTrackManagerEditorChanges();
+                                finishClosingTrackManagerWindow();
+                            }
+                            else if (result == 2)
+                            {
+                                discardTrackManagerEditorChanges();
+                                finishClosingTrackManagerWindow();
+                            }
+                            else
+                            {
+                                logMessage("Close All Open Windows cancelled by Track Manager prompt.");
+                                return;
+                            }
+
+                            juce::MessageManager::callAsync([continueClose] { (*continueClose)(); });
+                        }
+                    )
+                );
+                return;
+            }
+
+            if ((pianoRollWindow != nullptr || !pianoRollEditorWindows.empty()) && pianoRollEditorDirty)
+            {
+                const bool multiWindowPianoRoll = !pianoRollEditorWindows.empty();
+                auto* alert = new juce::AlertWindow(
+                    multiWindowPianoRoll ? "Piano Roll Windows Have Unapplied Changes" : "Piano Roll Has Unapplied Changes",
+                    multiWindowPianoRoll
+                        ? "Apply all open Piano Roll edits to the project, discard them and close all Piano Rolls, or cancel Close All Open Windows?"
+                        : "Apply your Piano Roll note edits to the open project, discard them and close, or cancel Close All Open Windows?",
+                    juce::AlertWindow::QuestionIcon
+                );
+
+                alert->addButton("Apply Changes", 1, juce::KeyPress(juce::KeyPress::returnKey));
+                alert->addButton("Discard and Exit", 2);
+                alert->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+
+                alert->enterModalState(
+                    true,
+                    juce::ModalCallbackFunction::create(
+                        [this, alert, continueClose](int result)
+                        {
+                            std::unique_ptr<juce::AlertWindow> cleanup(alert);
+
+                            if (result == 1)
+                            {
+                                applyPianoRollEditorChanges();
+                                finishClosingPianoRollWindow();
+                            }
+                            else if (result == 2)
+                            {
+                                discardPianoRollEditorChanges();
+                                finishClosingPianoRollWindow();
+                            }
+                            else
+                            {
+                                logMessage("Close All Open Windows cancelled by Piano Roll prompt.");
+                                return;
+                            }
+
+                            juce::MessageManager::callAsync([continueClose] { (*continueClose)(); });
+                        }
+                    )
+                );
+                return;
+            }
+
+            if (sequenceThoughtsWindow != nullptr)
+            {
+                if (auto* pendingClose = dynamic_cast<WindowPendingCloseHandler*>(sequenceThoughtsWindow->getContentComponent()))
+                {
+                    const bool closedImmediately = pendingClose->requestCloseWithPendingPrompt(
+                        [this, continueClose]
+                        {
+                            if (sequenceThoughtsWindow != nullptr)
+                            {
+                                sequenceThoughtsWindow->setVisible(false);
+                                sequenceThoughtsWindow.reset();
+                            }
+                            juce::MessageManager::callAsync([continueClose] { (*continueClose)(); });
+                        });
+
+                    static_cast<void>(closedImmediately);
+                    return;
+                }
+            }
+
+            if (vstPluginManagerWindow != nullptr)
+            {
+                if (auto* pendingClose = dynamic_cast<WindowPendingCloseHandler*>(vstPluginManagerWindow->getContentComponent()))
+                {
+                    const bool closedImmediately = pendingClose->requestCloseWithPendingPrompt(
+                        [this, continueClose]
+                        {
+                            if (vstPluginManagerWindow != nullptr)
+                            {
+                                vstPluginManagerWindow->setVisible(false);
+                                vstPluginManagerWindow.reset();
+                            }
+                            juce::MessageManager::callAsync([continueClose] { (*continueClose)(); });
+                        });
+
+                    static_cast<void>(closedImmediately);
+                    return;
+                }
+            }
+
+            finishClosingAllOpenWindows();
+        };
+
+        (*continueClose)();
+    }
+
+    void MainComponent::finishClosingAllOpenWindows()
+    {
+        int closedCount = 0;
+
+        auto closeOwnedWindow = [&closedCount](std::unique_ptr<juce::DocumentWindow>& window)
+        {
+            if (window != nullptr)
+            {
+                window->setVisible(false);
+                window.reset();
+                ++closedCount;
+            }
+        };
+
+        auto closeNonOwnedWindow = [&closedCount](std::unique_ptr<juce::DocumentWindow>& window,
+                                                  std::unique_ptr<juce::Component>& content)
+        {
+            if (window != nullptr)
+            {
+                window->setVisible(false);
+                window->setContentOwned(nullptr, false);
+                window.reset();
+                content.reset();
+                ++closedCount;
+            }
+        };
+
+        if (!vstPluginEditorWindows.empty() || !vstEffectEditorWindows.empty())
+        {
+            closedCount += static_cast<int>(vstPluginEditorWindows.size() + vstEffectEditorWindows.size());
+            closeAllVstPluginWindows();
+        }
+
+        if (trackManagerWindow != nullptr)
+        {
+            finishClosingTrackManagerWindow();
+            ++closedCount;
+        }
+
+        if (pianoRollWindow != nullptr || !pianoRollEditorWindows.empty())
+        {
+            const int pianoRollCount = !pianoRollEditorWindows.empty()
+                ? static_cast<int>(pianoRollEditorWindows.size())
+                : 1;
+            finishClosingPianoRollWindow();
+            closedCount += pianoRollCount;
+        }
+
+        if (audioRecorderWindow != nullptr)
+        {
+            closeAudioRecorderWindowNow();
+            ++closedCount;
+        }
+
+        if (pianoRollPreviewPlayerWindow != nullptr)
+        {
+            cleanupPianoRollPreviewFiles();
+            closeNonOwnedWindow(pianoRollPreviewPlayerWindow, pianoRollPreviewPlayerContent);
+        }
+
+        closeNonOwnedWindow(rawNotesWindow, rawNotesContent);
+        closeNonOwnedWindow(projectInfoWindow, projectInfoContent);
+        closeNonOwnedWindow(renderSettingsWindow, renderSettingsContent);
+
+        closeOwnedWindow(sequencePickerWindow);
+        closeOwnedWindow(sequenceThoughtsWindow);
+        closeNonOwnedWindow(sequenceColorWindow, sequenceColorContent);
+
+        closeOwnedWindow(vstPluginManagerWindow);
+        closeOwnedWindow(vstSettingsWindow);
+        closeOwnedWindow(vstHostHelperStatusWindow);
+
+        updateOpenVstPluginButtonState();
+        logMessage(closedCount > 0
+            ? (juce::String("Closed ") + juce::String(closedCount) + " open auxiliary window" + (closedCount == 1 ? "." : "s."))
+            : "Close All Open Windows: no auxiliary windows were open.");
     }
 
 
