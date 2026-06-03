@@ -603,6 +603,7 @@ namespace mw::gui
         void setAudioRecorderTrackLiveEffectEnabled(bool enabled);
         mw::audio::AudioClipRecorderLiveEffectOptions buildAudioRecorderLiveEffectOptions(int targetTrackIndex, int sourceTrackIndex) const;
         int getAudioRecorderTargetTrackIndex() const;
+        bool trackIsBlankForAudioClipTarget(int trackIndex) const;
         bool trackHasUsableLiveEffectForAudioRecorder(int trackIndex) const;
         void pauseOrResumeAudioRecordingTake();
         void stopAudioRecordingTake();

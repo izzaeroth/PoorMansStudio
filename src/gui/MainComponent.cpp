@@ -6526,8 +6526,8 @@ namespace mw::gui
                         onRefreshDevices();
                 };
 
-                startButton.setTooltip("Start recording into the selected target track after a short 0.25 second safety delay. If the take is paused, this resumes the same take and appends audio instead of starting over.");
-                delayedStartButton.setTooltip("Start or resume recording into the selected target track after the chosen countdown delay. If the take is paused, it appends to the same take instead of overwriting it.");
+                startButton.setTooltip("Start recording into the selected blank target track after a short 0.25 second safety delay. If the take is paused, this resumes the same take and appends audio instead of starting over.");
+                delayedStartButton.setTooltip("Start or resume recording into the selected blank target track after the chosen countdown delay. If the take is paused, it appends to the same take instead of overwriting it.");
                 recordTestButton.setTooltip("Run a quick mic check without needing a target track: 3 second countdown, 5 second recording, automatic playback, then automatic temp cleanup. It does not create an AudioClip track.");
                 micGainDownButton.setTooltip("Reduce the recorder's software mic gain by 3 dB.");
                 micGainUpButton.setTooltip("Increase the recorder's software mic gain by 3 dB. Too much boost can add noise or clip.");
@@ -8297,8 +8297,8 @@ namespace mw::gui
         };
 
         chooseMusicXmlButton.setTooltip("Import a MusicXML or MIDI file and start a new project from it.");
-        importAudioButton.setTooltip("Import WAV, MP3, FLAC, or OGG audio as a new AudioClip track in the active sequence.");
-        recordAudioButton.setTooltip("Open the AudioClip recorder. Kept takes become new AudioClip tracks in the active sequence.");
+        importAudioButton.setTooltip("Import WAV, MP3, FLAC, or OGG audio onto the selected blank track, or create a new blank AudioClip track when no blank target is selected.");
+        recordAudioButton.setTooltip("Open the AudioClip recorder. Recording requires a selected blank track; kept takes turn that blank track into an AudioClip track in the active sequence.");
         newProjectButton.setTooltip("Create a fresh empty project. You will be asked before discarding unsaved work.");
         openProjectButton.setTooltip("Open a saved Poor Man's Studio .mwproj project file.");
         saveProjectButton.setTooltip("Save the current project as a .mwproj file.");
@@ -12652,6 +12652,13 @@ namespace mw::gui
         currentProjectFilePath.reset();
         currentProjectFolderPath.reset();
         activeRecordingProjectFolder.reset();
+        activeRecordingTempWavPath.clear();
+        activeRecordingSourceWavPath.clear();
+        activeRecordingTrackIndex = -1;
+        activeRecordingSequenceNumber = 1;
+        activeRecordingStartTick = 0;
+        audioRecordingTakeStopped = false;
+        audioRecordingTakeDirty = false;
         trackManagerUndoStack.clear();
         importSections.clear();
         activeImportSectionIndex = -1;
@@ -12675,6 +12682,7 @@ namespace mw::gui
         noteEditorBox.clear();
         trackSummaryBox.clear();
         trackManagerBox.setText("No project loaded.\n", juce::dontSendNotification);
+        refreshMainSequenceSelector();
 
         pianoRoll.setNotes({});
         pianoRoll.stopPreviewPlayhead();
@@ -14829,12 +14837,26 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
                     return;
                 }
 
-                const int trackIndex = createAudioClipTrackForNewClip(juce::String(sourcePath.stem().string()));
-                if (trackIndex < 0)
+                int trackIndex = getSelectedTrackIndex();
+                const bool useSelectedBlankTrack = trackIsBlankForAudioClipTarget(trackIndex);
+
+                if (!useSelectedBlankTrack)
                 {
-                    std::error_code cleanupError;
-                    std::filesystem::remove(result.absolutePath, cleanupError);
-                    return;
+                    trackIndex = createAudioClipTrackForNewClip(juce::String(sourcePath.stem().string()));
+                    if (trackIndex < 0)
+                    {
+                        std::error_code cleanupError;
+                        std::filesystem::remove(result.absolutePath, cleanupError);
+                        return;
+                    }
+                }
+                else
+                {
+                    const int existingSequenceIndex = getSequenceIndexForTrack(trackIndex + 1);
+                    if (existingSequenceIndex >= 0 && existingSequenceIndex < static_cast<int>(importSections.size()))
+                        activeImportSectionIndex = existingSequenceIndex;
+
+                    logMessage(juce::String("Import Audio: using selected blank track #") + juce::String(trackIndex + 1) + ".");
                 }
 
                 if (activeImportSectionIndex < 0 || activeImportSectionIndex >= static_cast<int>(importSections.size()))
@@ -15227,6 +15249,28 @@ void MainComponent::openAudioRecorderWindow()
         stopAudioRecorderTestPlaybackAndCleanup(audioRecorderTestTempWavPath);
     }
 
+    bool MainComponent::trackIsBlankForAudioClipTarget(int trackIndex) const
+    {
+        if (!currentProject)
+            return false;
+
+        const auto& tracks = currentProject->getTracks();
+        if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+            return false;
+
+        const auto& track = tracks[static_cast<std::size_t>(trackIndex)];
+        if (!track.getNotes().empty())
+            return false;
+
+        for (const auto& clip : currentProject->getAudioClips())
+        {
+            if (clip.trackIndex == trackIndex)
+                return false;
+        }
+
+        return true;
+    }
+
     int MainComponent::getAudioRecorderTargetTrackIndex() const
     {
         if (!currentProject)
@@ -15236,7 +15280,7 @@ void MainComponent::openAudioRecorderWindow()
         if (selectedIndex < 0 || selectedIndex >= static_cast<int>(currentProject->getTracks().size()))
             return -1;
 
-        return selectedIndex;
+        return trackIsBlankForAudioClipTarget(selectedIndex) ? selectedIndex : -1;
     }
 
     bool MainComponent::trackHasUsableLiveEffectForAudioRecorder(int trackIndex) const
@@ -15260,6 +15304,10 @@ void MainComponent::openAudioRecorderWindow()
         juce::String status;
         status << "Target: ";
 
+        const int selectedTrackIndex = currentProject ? trackCombo.getSelectedId() - 1 : -1;
+        const bool selectedTrackValid = currentProject
+            && selectedTrackIndex >= 0
+            && selectedTrackIndex < static_cast<int>(currentProject->getTracks().size());
         const int selectedRecordingTargetIndex = getAudioRecorderTargetTrackIndex();
         const bool hasRecordingTarget = selectedRecordingTargetIndex >= 0;
         const bool hasLiveEffectTarget = trackHasUsableLiveEffectForAudioRecorder(selectedRecordingTargetIndex);
@@ -15267,9 +15315,11 @@ void MainComponent::openAudioRecorderWindow()
         if (activeRecordingTrackIndex >= 0)
             status << "Track #" << (activeRecordingTrackIndex + 1) << " | Seq #" << activeRecordingSequenceNumber;
         else if (hasRecordingTarget)
-            status << "Track #" << (selectedRecordingTargetIndex + 1);
+            status << "Track #" << (selectedRecordingTargetIndex + 1) << " (blank)";
+        else if (selectedTrackValid)
+            status << "Track #" << (selectedTrackIndex + 1) << " is not blank; select or add a blank track";
         else
-            status << "—";
+            status << "Select or add a blank track";
 
         status << "\nFormat: " << mw::core::audioClipSavedFormatToString(getSelectedAudioClipFormat()).c_str()
                << " | Quality: " << getSelectedAudioClipQualityKbps() << " kbps for compressed formats";
@@ -15346,6 +15396,13 @@ void MainComponent::openAudioRecorderWindow()
             return;
         }
 
+        if (audioRecordingTakeDirty && audioRecordingTakeStopped)
+        {
+            logMessage("AudioClip Recorder: save/apply, Redo From Top, or Discard Take before starting another recording.");
+            refreshAudioRecorderWindowStatus();
+            return;
+        }
+
         if (!ensureProjectFolderReadyForAudio())
             return;
 
@@ -15353,7 +15410,21 @@ void MainComponent::openAudioRecorderWindow()
         int trackIndex = activeRecordingTrackIndex >= 0 ? activeRecordingTrackIndex : selectedTargetTrackIndex;
         if (trackIndex < 0)
         {
-            logMessage("AudioClip Recorder: select an existing track before recording.");
+            const int selectedTrackIndex = getSelectedTrackIndex();
+            if (selectedTrackIndex >= 0 && currentProject && selectedTrackIndex < static_cast<int>(currentProject->getTracks().size()))
+                logMessage("AudioClip Recorder: selected track is not blank. Add or select a blank track before recording an AudioClip.");
+            else
+                logMessage("AudioClip Recorder: select or add a blank track before recording an AudioClip.");
+            refreshAudioRecorderWindowStatus();
+            return;
+        }
+
+        if (!trackIsBlankForAudioClipTarget(trackIndex))
+        {
+            logMessage("AudioClip Recorder: target track is no longer blank. Add or select a blank track before recording an AudioClip.");
+            activeRecordingTrackIndex = -1;
+            activeRecordingSequenceNumber = 1;
+            activeRecordingStartTick = 0;
             refreshAudioRecorderWindowStatus();
             return;
         }
@@ -15518,6 +15589,12 @@ void MainComponent::openAudioRecorderWindow()
             return;
         }
 
+        if (!trackIsBlankForAudioClipTarget(activeRecordingTrackIndex))
+        {
+            logMessage("AudioClip Recorder: target track is no longer blank. Discard this take, then add or select a blank track before recording again.");
+            return;
+        }
+
         if (!audioRecordingTakeStopped)
         {
             logMessage("AudioClip Recorder: stop the current take before Save / Apply.");
@@ -15566,6 +15643,9 @@ void MainComponent::openAudioRecorderWindow()
         activeRecordingTempWavPath.clear();
         activeRecordingSourceWavPath.clear();
         activeRecordingProjectFolder.reset();
+        activeRecordingTrackIndex = -1;
+        activeRecordingSequenceNumber = 1;
+        activeRecordingStartTick = 0;
         audioRecordingTakeStopped = false;
         audioRecordingTakeDirty = false;
         logMessage("Saved/applied recorded AudioClip to the project as a staged take. Save Project will move it into input/audio/recorded.");
@@ -15616,6 +15696,9 @@ void MainComponent::openAudioRecorderWindow()
         activeRecordingTempWavPath.clear();
         activeRecordingSourceWavPath.clear();
         activeRecordingProjectFolder.reset();
+        activeRecordingTrackIndex = -1;
+        activeRecordingSequenceNumber = 1;
+        activeRecordingStartTick = 0;
         audioRecordingTakeStopped = false;
         audioRecordingTakeDirty = false;
         logMessage("Discarded AudioClip temp take and cleaned up its temp file.");
@@ -15688,6 +15771,9 @@ void MainComponent::openAudioRecorderWindow()
                 }
 
                 audioClipRecorder.reset();
+                activeRecordingTrackIndex = -1;
+                activeRecordingSequenceNumber = 1;
+                activeRecordingStartTick = 0;
                 logMessage("Closed AudioClip Recorder.");
             }
         );
