@@ -17,6 +17,12 @@ namespace mw::audio
         int qualityKbps = 320;
         int channelCount = 2;
         bool imported = true;
+        // External imports can be forced through FFmpeg even when the source
+        // extension already matches the requested saved format.  This keeps
+        // odd WAV/container variants out of the project media path while
+        // preserving the original source file untouched at its original path.
+        bool forceTranscode = false;
+        bool fallbackToReadableWav = true;
         std::string preferredName;
     };
 
@@ -25,6 +31,7 @@ namespace mw::audio
         bool success = false;
         std::filesystem::path relativePath;
         std::filesystem::path absolutePath;
+        mw::core::AudioClipSavedFormat savedFormat = mw::core::AudioClipSavedFormat::Wav;
         long long durationSamples = 0;
         double sampleRate = 48000.0;
         int channelCount = 2;

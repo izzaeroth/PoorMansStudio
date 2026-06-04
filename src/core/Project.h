@@ -20,7 +20,7 @@ namespace mw::core
     {
         std::string projectFileExtension = ".mwproj";
         std::string projectFormatName = "MusicWorkstationProject";
-        int projectFormatVersion = 7;
+        int projectFormatVersion = 8;
     };
 
     struct ProjectSequenceMetadata
@@ -69,8 +69,8 @@ namespace mw::core
         std::string metadataYear;
 
         int backendId = 1;      // 1 = SF2/FluidSynth, 2 = SFZ/sfizz-render, 3 = VST3 Plugin
-        int outputFormatId = 1; // 1 = WAV, 2 = FLAC, 3 = MP3, 4 = OGG
-        int audioClipFormatId = 1; // 1 = WAV, 2 = FLAC, 3 = MP3, 4 = OGG
+        int outputFormatId = 1; // 1 = WAV, 2 = FLAC, 3 = MP3, 4 = OGG, 5 = M4A
+        int audioClipFormatId = 1; // 1 = WAV, 2 = FLAC, 3 = MP3, 4 = OGG, 5 = M4A
         int audioClipQualityKbps = 320;
         int sampleRate = 48000;
         int bitrateKbps = 192;

@@ -1,7 +1,10 @@
 #include "audio/ExternalFfmpegEncoder.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <iomanip>
 #include <sstream>
 #include <string>
 
@@ -38,6 +41,16 @@ namespace
     {
         if (!value.empty())
             command << " -metadata " << key << "=" << quoteArg(value);
+    }
+
+    std::string formatSecondsForFfmpeg(double seconds)
+    {
+        if (!std::isfinite(seconds))
+            seconds = 0.0;
+
+        std::ostringstream text;
+        text << std::fixed << std::setprecision(6) << std::max(0.0, seconds);
+        return text.str();
     }
 
 #ifdef _WIN32
@@ -106,6 +119,10 @@ namespace
                 command << L" -c:a libvorbis -b:a " << request.mp3BitrateKbps << L"k";
                 break;
 
+            case mw::audio::EncodedAudioFormat::M4a:
+                command << L" -c:a aac -b:a " << request.mp3BitrateKbps << L"k -movflags +faststart";
+                break;
+
             case mw::audio::EncodedAudioFormat::Wav:
             default:
                 break;
@@ -167,6 +184,99 @@ namespace
         else
         {
             message = "Failed while waiting for FFmpeg process.";
+            exitCode = 1;
+        }
+
+        CloseHandle(processInfo.hThread);
+        CloseHandle(processInfo.hProcess);
+
+        return static_cast<int>(exitCode);
+    }
+
+    std::wstring buildWindowsTrimCommandLine(const mw::audio::FfmpegTrimRequest& request)
+    {
+        std::wostringstream command;
+
+        command
+            << quotePathW(request.ffmpegExePath)
+            << L" -y"
+            << L" -ss " << toWide(formatSecondsForFfmpeg(request.trimStartSeconds))
+            << L" -t " << toWide(formatSecondsForFfmpeg(request.trimDurationSeconds))
+            << L" -i "
+            << quotePathW(request.inputPath)
+            << L" -map 0:a:0 -vn -sn -dn";
+
+        if (request.outputChannels == 1 || request.outputChannels == 2)
+            command << L" -ac " << request.outputChannels;
+
+        if (request.outputSampleRate > 0)
+            command << L" -ar " << request.outputSampleRate;
+
+        if (request.mciCompatibleWav)
+            command << L" -sample_fmt s16";
+
+        command << L" -c:a pcm_s16le";
+
+        if (request.mciCompatibleWav)
+            command << L" -rf64 never -f wav";
+
+        command << L" " << quotePathW(request.outputWavPath);
+
+        return command.str();
+    }
+
+    int runTrimProcessWithTimeout(const mw::audio::FfmpegTrimRequest& request, std::string& message)
+    {
+        auto commandLine = buildWindowsTrimCommandLine(request);
+
+        STARTUPINFOW startupInfo {};
+        startupInfo.cb = sizeof(startupInfo);
+
+        PROCESS_INFORMATION processInfo {};
+        std::wstring mutableCommandLine = commandLine;
+
+        const BOOL created = CreateProcessW(
+            request.ffmpegExePath.wstring().c_str(),
+            mutableCommandLine.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            CREATE_NO_WINDOW,
+            nullptr,
+            nullptr,
+            &startupInfo,
+            &processInfo
+        );
+
+        if (!created)
+        {
+            const auto error = GetLastError();
+            message = "Failed to start FFmpeg trim process. Windows error code: " + std::to_string(error);
+            return -1;
+        }
+
+        const DWORD timeoutMs =
+            request.timeoutSeconds <= 0
+                ? 300000
+                : static_cast<DWORD>(request.timeoutSeconds) * 1000u;
+
+        const DWORD waitResult = WaitForSingleObject(processInfo.hProcess, timeoutMs);
+
+        DWORD exitCode = 1;
+
+        if (waitResult == WAIT_TIMEOUT)
+        {
+            TerminateProcess(processInfo.hProcess, 1);
+            message = "FFmpeg trim timed out and was terminated.";
+            exitCode = 1;
+        }
+        else if (waitResult == WAIT_OBJECT_0)
+        {
+            GetExitCodeProcess(processInfo.hProcess, &exitCode);
+        }
+        else
+        {
+            message = "Failed while waiting for FFmpeg trim process.";
             exitCode = 1;
         }
 
@@ -249,6 +359,10 @@ namespace mw::audio
                 command << " -c:a libvorbis -b:a " << request.mp3BitrateKbps << "k";
                 break;
 
+            case EncodedAudioFormat::M4a:
+                command << " -c:a aac -b:a " << request.mp3BitrateKbps << "k -movflags +faststart";
+                break;
+
             case EncodedAudioFormat::Wav:
             default:
                 break;
@@ -309,6 +423,115 @@ namespace mw::audio
         result.exitCode = exitCode;
         result.success = (exitCode == 0);
         result.message = result.success ? "FFmpeg conversion completed successfully." : "FFmpeg conversion failed.";
+        return result;
+#endif
+    }
+
+    bool ExternalFfmpegEncoder::validateTrimRequest(const FfmpegTrimRequest& request, std::string& errorMessage)
+    {
+        if (request.ffmpegExePath.empty())
+        {
+            errorMessage = "FFmpeg executable path is empty.";
+            return false;
+        }
+
+        if (!std::filesystem::exists(request.ffmpegExePath))
+        {
+            errorMessage = "FFmpeg executable was not found: " + request.ffmpegExePath.string();
+            return false;
+        }
+
+        if (request.inputPath.empty() || !std::filesystem::exists(request.inputPath))
+        {
+            errorMessage = "Trim input file was not found: " + request.inputPath.string();
+            return false;
+        }
+
+        if (request.outputWavPath.empty())
+        {
+            errorMessage = "Trim output WAV path is empty.";
+            return false;
+        }
+
+        if (!std::isfinite(request.trimStartSeconds) || request.trimStartSeconds < 0.0)
+        {
+            errorMessage = "Trim start time is invalid.";
+            return false;
+        }
+
+        if (!std::isfinite(request.trimDurationSeconds) || request.trimDurationSeconds <= 0.0)
+        {
+            errorMessage = "Trim duration is invalid.";
+            return false;
+        }
+
+        return true;
+    }
+
+    std::string ExternalFfmpegEncoder::buildTrimCommandLine(const FfmpegTrimRequest& request)
+    {
+        std::ostringstream command;
+
+        command
+            << quotePath(request.ffmpegExePath)
+            << " -y"
+            << " -ss " << formatSecondsForFfmpeg(request.trimStartSeconds)
+            << " -t " << formatSecondsForFfmpeg(request.trimDurationSeconds)
+            << " -i "
+            << quotePath(request.inputPath)
+            << " -map 0:a:0 -vn -sn -dn";
+
+        if (request.outputChannels == 1 || request.outputChannels == 2)
+            command << " -ac " << request.outputChannels;
+
+        if (request.outputSampleRate > 0)
+            command << " -ar " << request.outputSampleRate;
+
+        if (request.mciCompatibleWav)
+            command << " -sample_fmt s16";
+
+        command << " -c:a pcm_s16le";
+
+        if (request.mciCompatibleWav)
+            command << " -rf64 never -f wav";
+
+        command << " " << quotePath(request.outputWavPath);
+
+        return command.str();
+    }
+
+    FfmpegTrimResult ExternalFfmpegEncoder::trimToWav(const FfmpegTrimRequest& request)
+    {
+        FfmpegTrimResult result;
+        result.commandLine = buildTrimCommandLine(request);
+
+        std::string errorMessage;
+        if (!validateTrimRequest(request, errorMessage))
+        {
+            result.success = false;
+            result.message = errorMessage;
+            return result;
+        }
+
+#ifdef _WIN32
+        std::string processMessage;
+        const int exitCode = runTrimProcessWithTimeout(request, processMessage);
+        result.exitCode = exitCode;
+        result.success = (exitCode == 0);
+
+        if (result.success)
+            result.message = "FFmpeg trim completed successfully.";
+        else if (!processMessage.empty())
+            result.message = processMessage;
+        else
+            result.message = "FFmpeg trim failed with exit code: " + std::to_string(exitCode);
+
+        return result;
+#else
+        const int exitCode = std::system(result.commandLine.c_str());
+        result.exitCode = exitCode;
+        result.success = (exitCode == 0);
+        result.message = result.success ? "FFmpeg trim completed successfully." : "FFmpeg trim failed.";
         return result;
 #endif
     }

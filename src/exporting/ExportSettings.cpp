@@ -36,6 +36,7 @@ namespace mw::exporting
             case AudioFormat::Flac: return ".flac";
             case AudioFormat::Mp3: return ".mp3";
             case AudioFormat::Ogg: return ".ogg";
+            case AudioFormat::M4a: return ".m4a";
             default: return ".audio";
         }
     }

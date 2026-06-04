@@ -4,7 +4,7 @@
 
 namespace mw::exporting
 {
-    enum class AudioFormat { Wav, Flac, Mp3, Ogg };
+    enum class AudioFormat { Wav, Flac, Mp3, Ogg, M4a };
 
     struct ExportSettings
     {
@@ -17,6 +17,7 @@ namespace mw::exporting
         bool exportFlac = false;
         bool exportMp3 = false;
         bool exportOgg = false;
+        bool exportM4a = false;
 
         int sampleRate = 48000;
         int bitDepth = 24;

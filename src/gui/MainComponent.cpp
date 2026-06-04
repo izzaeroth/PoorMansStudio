@@ -62,6 +62,21 @@ namespace
     constexpr int kMaximumVstEditorHostWidth = 4096;
     constexpr int kMaximumVstEditorHostHeight = 3072;
 
+
+#if JUCE_WINDOWS
+    juce::String formatMciErrorMessage(MCIERROR errorCode)
+    {
+        if (errorCode == 0)
+            return {};
+
+        wchar_t buffer[512] {};
+        if (mciGetErrorStringW(errorCode, buffer, static_cast<UINT>(sizeof(buffer) / sizeof(buffer[0]))))
+            return juce::String(buffer) + " (code " + juce::String(static_cast<int>(errorCode)) + ")";
+
+        return "MCI error code " + juce::String(static_cast<int>(errorCode));
+    }
+#endif
+
     class VstEditorStateProvider
     {
     public:
@@ -121,6 +136,18 @@ namespace
     {
         auto name = juce::String(path.stem().string()).trim();
         return name.isEmpty() ? juce::String("AudioClip") : name;
+    }
+
+    mw::core::AudioClipSavedFormat audioClipSavedFormatForMediaPath(const std::filesystem::path& path)
+    {
+        auto ext = path.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        if (ext == ".flac") return mw::core::AudioClipSavedFormat::Flac;
+        if (ext == ".mp3") return mw::core::AudioClipSavedFormat::Mp3;
+        if (ext == ".ogg") return mw::core::AudioClipSavedFormat::Ogg;
+        if (ext == ".m4a" || ext == ".aac") return mw::core::AudioClipSavedFormat::M4a;
+        return mw::core::AudioClipSavedFormat::Wav;
     }
 
     bool folderContainsAnyRegularFile(const std::filesystem::path& folder)
@@ -1202,7 +1229,8 @@ namespace
             return clip.startTick;
 
         const auto safeTempo = tempoBpm > 0.0 ? tempoBpm : 120.0;
-        const auto durationSeconds = static_cast<double>(clip.durationSamples) / clip.sampleRate;
+        const auto durationSamples = mw::core::audioClipTrimmedDurationSamples(clip);
+        const auto durationSeconds = static_cast<double>(durationSamples > 0 ? durationSamples : clip.durationSamples) / clip.sampleRate;
         const auto durationBeats = durationSeconds * safeTempo / 60.0;
         const auto durationTicks = static_cast<std::int64_t>(std::llround(durationBeats * mw::core::Project::ticksPerQuarterNote));
         return std::max<std::int64_t>(clip.startTick, clip.startTick + std::max<std::int64_t>(1, durationTicks));
@@ -1734,6 +1762,127 @@ namespace
                 g.fillEllipse(area.getRight() - 14.0f, area.getY() + 6.0f, 8.0f, 8.0f);
             }
     
+
+            void drawAudioClipEditorIcon(juce::Graphics& g, juce::Rectangle<float> area)
+            {
+                area = area.reduced(4.0f);
+
+                g.setColour(juce::Colour(0xff101419));
+                g.fillRoundedRectangle(area, 8.0f);
+                g.setColour(juce::Colour(0xff35b7ff));
+                g.drawRoundedRectangle(area, 8.0f, 2.4f);
+
+                const auto blueFill = juce::Colour(0xff18b9ff);
+                const auto blueLight = juce::Colour(0xff8be8ff);
+                const auto blueDark = juce::Colour(0xff065a84);
+                const auto cutGlow = juce::Colour(0xffa7f3ff);
+
+                // A single music note split into two offset halves.  The rough angled
+                // inner edges keep the tiny title-bar/taskbar icon readable as "cut".
+                juce::Path upperNote;
+                upperNote.startNewSubPath(30.0f, 9.5f);
+                upperNote.lineTo(47.5f, 13.0f);
+                upperNote.lineTo(47.5f, 23.0f);
+                upperNote.lineTo(38.5f, 21.2f);
+                upperNote.lineTo(38.0f, 31.0f);
+                upperNote.lineTo(34.5f, 33.0f);
+                upperNote.lineTo(36.5f, 35.5f);
+                upperNote.lineTo(31.0f, 38.0f);
+                upperNote.lineTo(27.4f, 34.0f);
+                upperNote.lineTo(29.0f, 31.5f);
+                upperNote.lineTo(27.4f, 29.4f);
+                upperNote.lineTo(30.0f, 27.6f);
+                upperNote.closeSubPath();
+                upperNote.applyTransform(juce::AffineTransform::scale(0.78f, 0.84f, 34.0f, 30.0f));
+
+                g.setColour(blueFill.withAlpha(0.14f));
+                g.strokePath(upperNote, juce::PathStrokeType(0.75f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                g.setColour(blueFill);
+                g.fillPath(upperNote);
+                g.setColour(blueLight);
+                g.strokePath(upperNote, juce::PathStrokeType(0.42f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                juce::Path lowerNote;
+                lowerNote.startNewSubPath(17.0f, 42.8f);
+                lowerNote.cubicTo(20.8f, 35.8f, 29.6f, 35.0f, 33.4f, 40.0f);
+                lowerNote.lineTo(32.5f, 42.0f);
+                lowerNote.lineTo(35.8f, 44.8f);
+                lowerNote.lineTo(31.0f, 48.5f);
+                lowerNote.lineTo(33.2f, 52.5f);
+                lowerNote.cubicTo(26.0f, 55.8f, 15.2f, 54.0f, 13.2f, 48.0f);
+                lowerNote.cubicTo(12.6f, 46.0f, 14.0f, 44.0f, 17.0f, 42.8f);
+                lowerNote.closeSubPath();
+                lowerNote.applyTransform(juce::AffineTransform::scale(0.74f, 0.78f, 24.0f, 45.0f));
+
+                g.setColour(blueFill.withAlpha(0.14f));
+                g.strokePath(lowerNote, juce::PathStrokeType(0.75f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                g.setColour(juce::Colour(0xff089bd8));
+                g.fillPath(lowerNote);
+                g.setColour(blueLight);
+                g.strokePath(lowerNote, juce::PathStrokeType(0.42f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                // Bright cut faces between the separated pieces.
+                g.setColour(cutGlow.withAlpha(0.95f));
+                g.drawLine(32.4f, 32.2f, 36.2f, 36.0f, 0.7f);
+                g.drawLine(30.8f, 40.0f, 35.4f, 44.2f, 0.7f);
+                g.setColour(blueDark.withAlpha(0.55f));
+                g.drawLine(28.8f, 33.8f, 36.4f, 41.8f, 0.6f);
+
+                auto makeBlade = [](juce::Point<float> pivot,
+                                    juce::Point<float> tip,
+                                    float rootHalfWidth,
+                                    float tipHalfWidth)
+                {
+                    const float dx = tip.x - pivot.x;
+                    const float dy = tip.y - pivot.y;
+                    const float len = std::sqrt(dx * dx + dy * dy);
+                    const float nx = len > 0.0f ? -dy / len : 0.0f;
+                    const float ny = len > 0.0f ? dx / len : 0.0f;
+
+                    juce::Path blade;
+                    blade.startNewSubPath(pivot.x + nx * rootHalfWidth, pivot.y + ny * rootHalfWidth);
+                    blade.lineTo(tip.x + nx * tipHalfWidth, tip.y + ny * tipHalfWidth);
+                    blade.lineTo(tip.x - nx * tipHalfWidth, tip.y - ny * tipHalfWidth);
+                    blade.lineTo(pivot.x - nx * rootHalfWidth, pivot.y - ny * rootHalfWidth);
+                    blade.closeSubPath();
+                    return blade;
+                };
+
+                const auto pivot = juce::Point<float>(34.0f, 36.2f);
+                const auto upperTip = juce::Point<float>(13.0f, 23.0f);
+                const auto lowerTip = juce::Point<float>(16.0f, 49.0f);
+
+                auto upperBlade = makeBlade(pivot, upperTip, 3.0f, 1.2f);
+                auto lowerBlade = makeBlade(pivot, lowerTip, 3.0f, 1.2f);
+
+                g.setColour(juce::Colour(0xff111827));
+                g.strokePath(upperBlade, juce::PathStrokeType(3.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                g.strokePath(lowerBlade, juce::PathStrokeType(3.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                g.setColour(juce::Colour(0xfff8fafc));
+                g.fillPath(upperBlade);
+                g.fillPath(lowerBlade);
+                g.setColour(juce::Colour(0xff9ca3af));
+                g.strokePath(upperBlade, juce::PathStrokeType(1.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                g.strokePath(lowerBlade, juce::PathStrokeType(1.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                // Yellow handles on the right make the scissors distinct from the
+                // AudioClip Recorder microphone and VST plug/window icons.
+                g.setColour(juce::Colour(0xff111827));
+                g.drawLine(36.2f, 37.0f, 50.0f, 27.8f, 5.0f);
+                g.drawLine(36.0f, 38.2f, 49.2f, 49.0f, 5.0f);
+
+                g.setColour(juce::Colour(0xffffc400));
+                g.drawLine(36.2f, 37.0f, 50.0f, 27.8f, 3.0f);
+                g.drawLine(36.0f, 38.2f, 49.2f, 49.0f, 3.0f);
+                g.drawEllipse(48.2f, 20.8f, 11.5f, 11.5f, 3.0f);
+                g.drawEllipse(46.8f, 44.0f, 11.5f, 11.5f, 3.0f);
+
+                g.setColour(juce::Colour(0xffe5e7eb));
+                g.fillEllipse(pivot.x - 3.5f, pivot.y - 3.5f, 7.0f, 7.0f);
+                g.setColour(juce::Colour(0xff111827));
+                g.drawEllipse(pivot.x - 3.5f, pivot.y - 3.5f, 7.0f, 7.0f, 1.2f);
+            }
+
             void drawEditInfoIcon(juce::Graphics& g, juce::Rectangle<float> area)
             {
                 area = area.reduced(5.0f);
@@ -1877,6 +2026,7 @@ namespace
             PianoRoll,
             TrackManager,
             AudioClipRecorder,
+            AudioClipEditor,
             EditInfo,
             PreviewPlayer,
             ColourWheel,
@@ -1929,6 +2079,10 @@ namespace
 
                 case PoorMansStudioWindowIcon::AudioClipRecorder:
                     drawAudioClipRecorderIcon(g, area);
+                    break;
+
+                case PoorMansStudioWindowIcon::AudioClipEditor:
+                    drawAudioClipEditorIcon(g, area);
                     break;
 
                 case PoorMansStudioWindowIcon::EditInfo:
@@ -2714,7 +2868,7 @@ namespace
                     yearLabel.setText("Year", juce::dontSendNotification);
     
                     helpLabel.setText(
-                        "Blank fields are allowed. Non-empty tags are embedded for MP3/FLAC/OGG during render.",
+                        "Blank fields are allowed. Non-empty tags are embedded for MP3/FLAC/OGG/M4A during render.",
                         juce::dontSendNotification
                     );
     
@@ -3767,11 +3921,14 @@ namespace
                     std::function<void()> addCallback,
                     std::function<void()> duplicateCallback,
                     std::function<void()> removeCallback,
+                    std::function<void()> renameTrackCallback,
                     std::function<void()> removeSequenceCallback,
                     std::function<void()> undoCallback,
+                    std::function<void()> redoCallback,
                     std::function<void()> applyStartBeatCallback,
                     std::function<void()> duplicateAtBeatCallback,
                     std::function<void()> openPianoRollCallback,
+                    std::function<void()> openAudioClipEditorCallback,
                     std::function<void()> previewTrackCallback,
                     std::function<void()> previewSequenceCallback,
                     std::function<void()> previewProjectCallback,
@@ -3820,11 +3977,14 @@ namespace
                       onAdd(std::move(addCallback)),
                       onDuplicate(std::move(duplicateCallback)),
                       onRemove(std::move(removeCallback)),
+                      onRenameTrack(std::move(renameTrackCallback)),
                       onRemoveSequence(std::move(removeSequenceCallback)),
                       onUndo(std::move(undoCallback)),
+                      onRedo(std::move(redoCallback)),
                       onApplyStartBeat(std::move(applyStartBeatCallback)),
                       onDuplicateAtBeat(std::move(duplicateAtBeatCallback)),
                       onOpenPianoRoll(std::move(openPianoRollCallback)),
+                      onOpenAudioClipEditor(std::move(openAudioClipEditorCallback)),
                       onPreviewTrack(std::move(previewTrackCallback)),
                       onPreviewSequence(std::move(previewSequenceCallback)),
                       onPreviewProject(std::move(previewProjectCallback)),
@@ -3910,9 +4070,12 @@ namespace
                     duplicateAtBeatButton.setButtonText("Duplicate Beat");
                     applyStartBeatButton.setButtonText("Apply Start Beat");
                     removeButton.setButtonText("Remove Track");
+                    renameTrackButton.setButtonText("Rename Track");
                     removeSequenceButton.setButtonText("Remove Seq");
                     undoButton.setButtonText("Undo");
+                    redoButton.setButtonText("Redo");
                     openPianoRollButton.setButtonText("Open In Piano Roll");
+                    audioClipEditorButton.setButtonText("AudioClip Editor");
                     previewTrackButton.setButtonText("Preview Track");
                     previewSequenceButton.setButtonText("Preview Seq");
                     previewProjectButton.setButtonText("Preview Project");
@@ -3962,9 +4125,12 @@ namespace
                     duplicateAtBeatButton.setTooltip("Duplicate the selected track and place the copy at Track Start.");
                     applyStartBeatButton.setTooltip("Move the selected track so its first note starts at Track Start.");
                     removeButton.setTooltip("Remove the selected track from the project.");
+                    renameTrackButton.setTooltip("Rename the selected track using the same rename action as the main UI.");
                     removeSequenceButton.setTooltip("Remove the selected sequence and its tracks. If any track from that sequence is open in Piano Roll, close Piano Roll first.");
                     undoButton.setTooltip("Undo the most recent Track Manager edit.");
-                    openPianoRollButton.setTooltip("Open the selected track in the editable Piano Roll. Empty tracks are linked to a sequence automatically.");
+                    redoButton.setTooltip("Redo the most recently undone Track Manager edit.");
+                    openPianoRollButton.setTooltip("Open the selected MIDI track in the editable Piano Roll. AudioClip tracks use AudioClip Editor instead.");
+                    audioClipEditorButton.setTooltip("Open the selected AudioClip track in the AudioClip Editor for non-destructive source trim metadata.");
                     previewTrackButton.setTooltip("Render and play a temporary preview of the selected track.");
                     previewSequenceButton.setTooltip("Render and play a temporary preview of the selected sequence.");
                     previewProjectButton.setTooltip("Render and play a temporary preview of the full project from Track Manager using current applied track settings.");
@@ -4018,9 +4184,12 @@ namespace
                     addAndMakeVisible(duplicateAtBeatButton);
                     addAndMakeVisible(applyStartBeatButton);
                     addAndMakeVisible(removeButton);
+                    addAndMakeVisible(renameTrackButton);
                     addAndMakeVisible(removeSequenceButton);
                     addAndMakeVisible(undoButton);
+                    addAndMakeVisible(redoButton);
                     addAndMakeVisible(openPianoRollButton);
+                    addAndMakeVisible(audioClipEditorButton);
                     addAndMakeVisible(previewTrackButton);
                     addAndMakeVisible(previewSequenceButton);
                     addAndMakeVisible(previewProjectButton);
@@ -4054,9 +4223,12 @@ namespace
                     duplicateAtBeatButton.onClick = [this] { if (onDuplicateAtBeat) onDuplicateAtBeat(); };
                     applyStartBeatButton.onClick = [this] { if (onApplyStartBeat) onApplyStartBeat(); };
                     removeButton.onClick = [this] { if (onRemove) onRemove(); };
+                    renameTrackButton.onClick = [this] { if (onRenameTrack) onRenameTrack(); };
                     removeSequenceButton.onClick = [this] { if (onRemoveSequence) onRemoveSequence(); };
                     undoButton.onClick = [this] { if (onUndo) onUndo(); };
+                    redoButton.onClick = [this] { if (onRedo) onRedo(); };
                     openPianoRollButton.onClick = [this] { if (onOpenPianoRoll) onOpenPianoRoll(); };
+                    audioClipEditorButton.onClick = [this] { if (onOpenAudioClipEditor) onOpenAudioClipEditor(); };
                     previewTrackButton.onClick = [this] { if (onPreviewTrack) onPreviewTrack(); };
                     previewSequenceButton.onClick = [this] { if (onPreviewSequence) onPreviewSequence(); };
                     previewProjectButton.onClick = [this] { if (onPreviewProject) onPreviewProject(); };
@@ -4242,9 +4414,11 @@ namespace
     
                     auto top = area.removeFromTop(34);
                     applyChangesButton.setBounds(top.removeFromRight(125).reduced(4, 2));
-                    undoButton.setBounds(top.removeFromRight(80).reduced(4, 2));
-                    openPianoRollButton.setBounds(top.removeFromRight(130).reduced(4, 2));
-                    removeSequenceButton.setBounds(top.removeFromRight(105).reduced(4, 2));
+                    redoButton.setBounds(top.removeFromRight(75).reduced(4, 2));
+                    undoButton.setBounds(top.removeFromRight(75).reduced(4, 2));
+                    audioClipEditorButton.setBounds(top.removeFromRight(130).reduced(4, 2));
+                    openPianoRollButton.setBounds(top.removeFromRight(126).reduced(4, 2));
+                    renameTrackButton.setBounds(top.removeFromRight(110).reduced(4, 2));
                     removeButton.setBounds(top.removeFromRight(115).reduced(4, 2));
                     duplicateAtBeatButton.setBounds(top.removeFromRight(120).reduced(4, 2));
                     applyStartBeatButton.setBounds(top.removeFromRight(125).reduced(4, 2));
@@ -4269,6 +4443,7 @@ namespace
                     sequenceLockButton.setBounds(importRow.removeFromRight(105).reduced(4, 2));
                     sequenceNotesButton.setBounds(importRow.removeFromRight(95).reduced(4, 2));
                     renameSequenceButton.setBounds(importRow.removeFromRight(105).reduced(4, 2));
+                    removeSequenceButton.setBounds(importRow.removeFromRight(105).reduced(4, 2));
                     importSequenceButton.setBounds(importRow.removeFromRight(120).reduced(4, 2));
                     startFromFileButton.setBounds(importRow.removeFromRight(125).reduced(4, 2));
 
@@ -4351,11 +4526,14 @@ namespace
                 juce::TextButton duplicateAtBeatButton;
                 juce::TextButton applyStartBeatButton;
                 juce::TextButton removeButton;
+                juce::TextButton renameTrackButton;
                 juce::TextButton removeSequenceButton;
                 juce::TextButton undoButton;
+                juce::TextButton redoButton;
                 juce::TextButton closeButton;
                 juce::TextButton applyChangesButton;
                 juce::TextButton openPianoRollButton;
+                juce::TextButton audioClipEditorButton;
                 juce::TextButton previewTrackButton;
                 juce::TextButton previewSequenceButton;
                 juce::TextButton previewProjectButton;
@@ -4392,11 +4570,14 @@ namespace
                 std::function<void()> onAdd;
                 std::function<void()> onDuplicate;
                 std::function<void()> onRemove;
+                std::function<void()> onRenameTrack;
                 std::function<void()> onRemoveSequence;
                 std::function<void()> onUndo;
+                std::function<void()> onRedo;
                 std::function<void()> onApplyStartBeat;
                 std::function<void()> onDuplicateAtBeat;
                 std::function<void()> onOpenPianoRoll;
+                std::function<void()> onOpenAudioClipEditor;
                 std::function<void()> onPreviewTrack;
                 std::function<void()> onPreviewSequence;
                 std::function<void()> onPreviewProject;
@@ -4428,6 +4609,962 @@ namespace
                 std::function<void()> onClose;
             };
     
+
+    class AudioClipEditorWindowContent final : public juce::Component,
+                                         public WindowPendingCloseHandler
+    {
+    public:
+        AudioClipEditorWindowContent(
+            const mw::core::Project& project,
+            int selectedTrackIndex,
+            std::vector<mw::core::AudioClip> audioClipsForTrack,
+            std::optional<std::filesystem::path> projectFolder,
+            std::function<bool(int, long long, long long)> applyTrimCallback,
+            std::function<bool(int)> resetTrimCallback,
+            std::function<void(int, long long, long long, bool)> previewClipCallback,
+            std::function<void()> stopPreviewCallback,
+            std::function<void()> closeCallback)
+            : projectSnapshot(project),
+              selectedTrackIndex(selectedTrackIndex),
+              clips(std::move(audioClipsForTrack)),
+              projectFolder(std::move(projectFolder)),
+              onApplyTrim(std::move(applyTrimCallback)),
+              onResetTrim(std::move(resetTrimCallback)),
+              onPreviewClip(std::move(previewClipCallback)),
+              onStopPreview(std::move(stopPreviewCallback)),
+              onClose(std::move(closeCallback))
+        {
+            titleLabel.setText("AudioClip Editor", juce::dontSendNotification);
+            titleLabel.setJustificationType(juce::Justification::centredLeft);
+            titleLabel.setFont(juce::FontOptions(22.0f, juce::Font::bold));
+
+            statusLabel.setText("Phase 4A: drag green/red trim handles, preview the pending range, then Apply Trim. Source files stay untouched.", juce::dontSendNotification);
+            statusLabel.setJustificationType(juce::Justification::centredLeft);
+            statusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+            statusLabel.setFont(juce::FontOptions(13.0f));
+
+            detailsBox.setMultiLine(true);
+            detailsBox.setReadOnly(true);
+            detailsBox.setScrollbarsShown(true);
+            detailsBox.setColour(juce::TextEditor::backgroundColourId, juce::Colours::black);
+            detailsBox.setColour(juce::TextEditor::textColourId, juce::Colours::white);
+            detailsBox.setColour(juce::TextEditor::outlineColourId, juce::Colours::grey);
+
+            trimHelpLabel.setText("Interactive non-destructive source trim. Drag green Start and red End, or type seconds, then Apply Trim.", juce::dontSendNotification);
+            trimHelpLabel.setJustificationType(juce::Justification::centredLeft);
+            trimHelpLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+            trimHelpLabel.setFont(juce::FontOptions(12.5f));
+
+            trimStartLabel.setText("Trim Start", juce::dontSendNotification);
+            trimStartLabel.setJustificationType(juce::Justification::centredLeft);
+            trimStartLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+
+            trimEndLabel.setText("Trim End", juce::dontSendNotification);
+            trimEndLabel.setJustificationType(juce::Justification::centredLeft);
+            trimEndLabel.setColour(juce::Label::textColourId, juce::Colours::red.withAlpha(0.88f));
+
+            trimStartBox.setInputRestrictions(12, "0123456789.");
+            trimEndBox.setInputRestrictions(12, "0123456789.");
+            trimStartBox.setTooltip("Non-destructive source trim start in seconds from the beginning of the source media.");
+            trimEndBox.setTooltip("Non-destructive source trim end in seconds from the beginning of the source media.");
+            trimStartBox.onTextChange = [this] { updatePendingTrimFromTextBoxes(); };
+            trimEndBox.onTextChange = [this] { updatePendingTrimFromTextBoxes(); };
+
+            previewTrimButton.setButtonText("Preview Trim");
+            previewTrimButton.setTooltip("Render/play the pending kept range without changing source files. Scratch files stay in workspace/temp.");
+            previewTrimButton.onClick = [this] { previewPendingTrim(); };
+
+            playFullSourceButton.setButtonText("Play Full Source");
+            playFullSourceButton.setTooltip("Render/play the full original source range without changing trim metadata.");
+            playFullSourceButton.onClick = [this] { previewFullSource(); };
+
+            stopPreviewButton.setButtonText("Stop Preview");
+            stopPreviewButton.setTooltip("Stop AudioClip Editor preview playback.");
+            stopPreviewButton.onClick = [this]
+            {
+                if (onStopPreview)
+                    onStopPreview();
+            };
+
+            applyTrimButton.setButtonText("Apply Trim");
+            applyTrimButton.setTooltip("Save the pending trim start/end metadata for this AudioClip. The source media file is not modified.");
+            applyTrimButton.onClick = [this] { static_cast<void>(applyTrimFromControls()); };
+
+            resetTrimButton.setButtonText("Reset Trim");
+            resetTrimButton.setTooltip("Reset the source trim metadata to the full source range.");
+            resetTrimButton.onClick = [this] { resetTrimForCurrentClip(); };
+
+            trimStatusLabel.setJustificationType(juce::Justification::centredLeft);
+            trimStatusLabel.setColour(juce::Label::textColourId, juce::Colours::yellow);
+            trimStatusLabel.setFont(juce::FontOptions(12.5f));
+
+            closeButton.setButtonText("Close");
+            closeButton.setTooltip("Close the AudioClip Editor window.");
+            closeButton.onClick = [this]
+            {
+                requestCloseWithPendingPrompt(onClose);
+            };
+
+            waveformView.onTrimRangeChanged = [this](long long startSamples, long long endSamples)
+            {
+                pendingTrimStartSamples = startSamples;
+                pendingTrimEndSamples = endSamples;
+                refreshTrimTextBoxesFromPending();
+                updateTrimStatusLabel(false);
+            };
+
+            selectEditableClip();
+            refreshTrimControls();
+            detailsBox.setText(buildDetailsText(), juce::dontSendNotification);
+
+            addAndMakeVisible(titleLabel);
+            addAndMakeVisible(statusLabel);
+            addAndMakeVisible(waveformView);
+            addAndMakeVisible(trimHelpLabel);
+            addAndMakeVisible(trimStartLabel);
+            addAndMakeVisible(trimStartBox);
+            addAndMakeVisible(trimEndLabel);
+            addAndMakeVisible(trimEndBox);
+            addAndMakeVisible(previewTrimButton);
+            addAndMakeVisible(playFullSourceButton);
+            addAndMakeVisible(stopPreviewButton);
+            addAndMakeVisible(applyTrimButton);
+            addAndMakeVisible(resetTrimButton);
+            addAndMakeVisible(trimStatusLabel);
+            addAndMakeVisible(detailsBox);
+            addAndMakeVisible(closeButton);
+        }
+
+        void resized() override
+        {
+            auto area = getLocalBounds().reduced(16);
+            auto top = area.removeFromTop(34);
+            closeButton.setBounds(top.removeFromRight(96).reduced(4, 2));
+            titleLabel.setBounds(top.reduced(4, 2));
+            statusLabel.setBounds(area.removeFromTop(30).reduced(4, 2));
+            area.removeFromTop(8);
+            waveformView.setBounds(area.removeFromTop(180));
+            area.removeFromTop(8);
+
+            trimHelpLabel.setBounds(area.removeFromTop(24).reduced(4, 2));
+            auto trimRow = area.removeFromTop(34);
+            trimStartLabel.setBounds(trimRow.removeFromLeft(78).reduced(4, 2));
+            trimStartBox.setBounds(trimRow.removeFromLeft(92).reduced(4, 4));
+            trimEndLabel.setBounds(trimRow.removeFromLeft(68).reduced(4, 2));
+            trimEndBox.setBounds(trimRow.removeFromLeft(92).reduced(4, 4));
+            applyTrimButton.setBounds(trimRow.removeFromLeft(112).reduced(4, 4));
+            resetTrimButton.setBounds(trimRow.removeFromLeft(112).reduced(4, 4));
+            trimStatusLabel.setBounds(trimRow.reduced(4, 2));
+
+            auto previewRow = area.removeFromTop(34);
+            previewTrimButton.setBounds(previewRow.removeFromLeft(128).reduced(4, 4));
+            playFullSourceButton.setBounds(previewRow.removeFromLeft(140).reduced(4, 4));
+            stopPreviewButton.setBounds(previewRow.removeFromLeft(118).reduced(4, 4));
+            area.removeFromTop(6);
+
+            detailsBox.setBounds(area);
+        }
+
+        bool requestCloseWithPendingPrompt(std::function<void()> closeAction) override
+        {
+            if (! hasPendingTrimChanges())
+            {
+                if (closeAction)
+                    closeAction();
+                return true;
+            }
+
+            auto* alert = new juce::AlertWindow(
+                "AudioClip Editor Has Unapplied Trim",
+                "The AudioClip Editor has pending trim handle/text changes that have not been applied. Apply them, discard them, or keep editing?",
+                juce::AlertWindow::WarningIcon
+            );
+
+            alert->addButton("Apply Trim and Close", 1, juce::KeyPress(juce::KeyPress::returnKey));
+            alert->addButton("Discard Pending and Close", 2);
+            alert->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+
+            alert->enterModalState(
+                true,
+                juce::ModalCallbackFunction::create(
+                    [this, alert, closeAction](int result)
+                    {
+                        std::unique_ptr<juce::AlertWindow> cleanup(alert);
+
+                        if (result == 1)
+                        {
+                            if (! applyTrimFromControls())
+                            {
+                                trimStatusLabel.setText("Pending trim could not be applied; keeping editor open.", juce::dontSendNotification);
+                                return;
+                            }
+
+                            if (closeAction)
+                                closeAction();
+                            return;
+                        }
+
+                        if (result == 2)
+                        {
+                            discardPendingTrimChanges();
+                            if (closeAction)
+                                closeAction();
+                            return;
+                        }
+
+                        trimStatusLabel.setText("Pending trim changes kept. Apply Trim to commit them.", juce::dontSendNotification);
+                    }
+                ),
+                true
+            );
+
+            return false;
+        }
+
+        bool hasPendingTrimChanges() const
+        {
+            const auto* clip = findLocalClip(editableClipId);
+            if (clip == nullptr)
+                return false;
+
+            return pendingTrimStartSamples != mw::core::audioClipTrimStartSamples(*clip)
+                || pendingTrimEndSamples != mw::core::audioClipTrimEndSamples(*clip);
+        }
+
+    private:
+        class WaveformTrimView final : public juce::Component
+        {
+        public:
+            std::function<void(long long, long long)> onTrimRangeChanged;
+
+            void setClip(const mw::core::AudioClip* sourceClip, const std::optional<std::filesystem::path>& projectFolder)
+            {
+                hasClip = sourceClip != nullptr;
+                peaks.clear();
+                activeHandle = Handle::None;
+
+                if (!hasClip)
+                {
+                    clip = {};
+                    pendingStartSamples = 0;
+                    pendingEndSamples = 0;
+                    repaint();
+                    return;
+                }
+
+                clip = *sourceClip;
+                mw::core::normalizeAudioClipTrim(clip);
+                pendingStartSamples = mw::core::audioClipTrimStartSamples(clip);
+                pendingEndSamples = mw::core::audioClipTrimEndSamples(clip);
+                loadWaveformPeaks(projectFolder);
+                repaint();
+            }
+
+            void setPendingTrim(long long startSamples, long long endSamples)
+            {
+                if (!hasClip)
+                    return;
+
+                const auto clamped = clampRange(startSamples, endSamples);
+                pendingStartSamples = clamped.first;
+                pendingEndSamples = clamped.second;
+                repaint();
+            }
+
+            void paint(juce::Graphics& g) override
+            {
+                auto bounds = getLocalBounds().toFloat().reduced(1.0f);
+                g.setColour(juce::Colour(0xff171b21));
+                g.fillRoundedRectangle(bounds, 9.0f);
+                g.setColour(juce::Colour(0xff3b82b6));
+                g.drawRoundedRectangle(bounds, 9.0f, 1.5f);
+
+                g.setColour(juce::Colours::lightgrey);
+                g.setFont(juce::FontOptions(15.0f, juce::Font::bold));
+                g.drawFittedText("AudioClip waveform overview", getLocalBounds().reduced(12), juce::Justification::centredTop, 1);
+
+                const auto wave = waveformBounds();
+                g.setColour(juce::Colour(0xff0d1117));
+                g.fillRoundedRectangle(wave, 6.0f);
+                g.setColour(juce::Colour(0xff263544));
+                g.drawRoundedRectangle(wave, 6.0f, 1.0f);
+
+                if (!hasClip || clip.durationSamples <= 0)
+                {
+                    g.setColour(juce::Colours::lightgrey.withAlpha(0.75f));
+                    g.setFont(juce::FontOptions(13.0f));
+                    g.drawFittedText("No AudioClip source loaded.", wave.toNearestInt(), juce::Justification::centred, 1);
+                    return;
+                }
+
+                drawWaveform(g, wave);
+
+                const float startX = sampleToX(pendingStartSamples, wave);
+                const float endX = sampleToX(pendingEndSamples, wave);
+                const auto kept = juce::Rectangle<float>(startX, wave.getY(), std::max(1.0f, endX - startX), wave.getHeight());
+
+                g.setColour(juce::Colours::black.withAlpha(0.55f));
+                if (startX > wave.getX())
+                    g.fillRect(juce::Rectangle<float>(wave.getX(), wave.getY(), startX - wave.getX(), wave.getHeight()));
+                if (endX < wave.getRight())
+                    g.fillRect(juce::Rectangle<float>(endX, wave.getY(), wave.getRight() - endX, wave.getHeight()));
+
+                g.setColour(juce::Colour(0xffffc400).withAlpha(0.11f));
+                g.fillRoundedRectangle(kept, 4.0f);
+                g.setColour(juce::Colour(0xffffc400).withAlpha(0.65f));
+                g.drawRoundedRectangle(kept, 4.0f, 1.0f);
+
+                drawHandle(g, startX, wave, juce::Colours::limegreen, "START");
+                drawHandle(g, endX, wave, juce::Colours::red.withAlpha(0.95f), "END");
+
+                g.setColour(juce::Colours::lightgrey.withAlpha(0.9f));
+                g.setFont(juce::FontOptions(12.0f));
+                const auto fullSeconds = clip.sampleRate > 0.0 ? static_cast<double>(clip.durationSamples) / clip.sampleRate : 0.0;
+                const auto keptSeconds = clip.sampleRate > 0.0 ? static_cast<double>(std::max<long long>(0, pendingEndSamples - pendingStartSamples)) / clip.sampleRate : 0.0;
+                juce::String footer;
+                footer << "Full source: " << juce::String(fullSeconds, 2) << "s   |   Pending kept range: " << juce::String(keptSeconds, 2) << "s";
+                g.drawFittedText(footer, getLocalBounds().reduced(12), juce::Justification::centredBottom, 1);
+            }
+
+            void mouseDown(const juce::MouseEvent& event) override
+            {
+                if (!hasClip || clip.durationSamples <= 0)
+                    return;
+
+                const auto wave = waveformBounds();
+                const auto x = static_cast<float>(event.x);
+                const auto startX = sampleToX(pendingStartSamples, wave);
+                const auto endX = sampleToX(pendingEndSamples, wave);
+
+                if (std::abs(x - startX) <= std::abs(x - endX))
+                    activeHandle = Handle::Start;
+                else
+                    activeHandle = Handle::End;
+
+                mouseDrag(event);
+            }
+
+            void mouseDrag(const juce::MouseEvent& event) override
+            {
+                if (!hasClip || clip.durationSamples <= 0 || activeHandle == Handle::None)
+                    return;
+
+                const auto wave = waveformBounds();
+                const auto sample = xToSample(static_cast<float>(event.x), wave);
+
+                if (activeHandle == Handle::Start)
+                    pendingStartSamples = std::clamp<long long>(sample, 0, std::max<long long>(0, pendingEndSamples - 1));
+                else
+                    pendingEndSamples = std::clamp<long long>(sample, std::min<long long>(clip.durationSamples, pendingStartSamples + 1), clip.durationSamples);
+
+                const auto clamped = clampRange(pendingStartSamples, pendingEndSamples);
+                pendingStartSamples = clamped.first;
+                pendingEndSamples = clamped.second;
+
+                if (onTrimRangeChanged)
+                    onTrimRangeChanged(pendingStartSamples, pendingEndSamples);
+
+                repaint();
+            }
+
+            void mouseUp(const juce::MouseEvent&) override
+            {
+                activeHandle = Handle::None;
+            }
+
+        private:
+            enum class Handle { None, Start, End };
+
+            juce::Rectangle<float> waveformBounds() const
+            {
+                auto bounds = getLocalBounds().toFloat().reduced(20.0f, 34.0f);
+                bounds.removeFromTop(10.0f);
+                bounds.removeFromBottom(10.0f);
+                return bounds;
+            }
+
+            std::pair<long long, long long> clampRange(long long startSamples, long long endSamples) const
+            {
+                if (clip.durationSamples <= 0)
+                    return { 0, 0 };
+
+                auto start = std::clamp<long long>(startSamples, 0, clip.durationSamples);
+                auto end = std::clamp<long long>(endSamples, 0, clip.durationSamples);
+
+                if (end <= start)
+                    end = std::min<long long>(clip.durationSamples, start + 1);
+
+                if (end <= start)
+                    start = std::max<long long>(0, end - 1);
+
+                return { start, end };
+            }
+
+            float sampleToX(long long sample, juce::Rectangle<float> wave) const
+            {
+                if (clip.durationSamples <= 0)
+                    return wave.getX();
+
+                const auto ratio = std::clamp(static_cast<double>(sample) / static_cast<double>(clip.durationSamples), 0.0, 1.0);
+                return wave.getX() + static_cast<float>(ratio) * wave.getWidth();
+            }
+
+            long long xToSample(float x, juce::Rectangle<float> wave) const
+            {
+                if (clip.durationSamples <= 0 || wave.getWidth() <= 0.0f)
+                    return 0;
+
+                const auto ratio = std::clamp((x - wave.getX()) / wave.getWidth(), 0.0f, 1.0f);
+                return static_cast<long long>(std::llround(static_cast<double>(ratio) * static_cast<double>(clip.durationSamples)));
+            }
+
+            std::filesystem::path resolvedClipPath(const std::optional<std::filesystem::path>& projectFolder) const
+            {
+                if (projectFolder.has_value() && !clip.projectRelativePath.empty())
+                {
+                    const auto absolute = (*projectFolder / clip.projectRelativePath).lexically_normal();
+                    if (std::filesystem::exists(absolute))
+                        return absolute;
+                }
+
+                if (!clip.originalSourcePath.empty() && std::filesystem::exists(clip.originalSourcePath))
+                    return clip.originalSourcePath;
+
+                if (!clip.projectRelativePath.empty() && std::filesystem::exists(clip.projectRelativePath))
+                    return clip.projectRelativePath;
+
+                return {};
+            }
+
+            void loadWaveformPeaks(const std::optional<std::filesystem::path>& projectFolder)
+            {
+                constexpr int bucketCount = 128;
+                peaks.assign(bucketCount, 0.0f);
+
+                const auto path = resolvedClipPath(projectFolder);
+                if (path.empty())
+                {
+                    fillFallbackPeaks();
+                    return;
+                }
+
+                juce::AudioFormatManager formatManager;
+                formatManager.registerBasicFormats();
+                std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(juce::File(path.string())));
+                if (!reader || reader->lengthInSamples <= 0)
+                {
+                    fillFallbackPeaks();
+                    return;
+                }
+
+                const auto sourceLength = static_cast<long long>(reader->lengthInSamples);
+                const int blockSize = 2048;
+                juce::AudioBuffer<float> buffer(static_cast<int>(std::max<unsigned int>(1, reader->numChannels)), blockSize);
+
+                for (int bucket = 0; bucket < bucketCount; ++bucket)
+                {
+                    const auto bucketStart = static_cast<long long>((static_cast<double>(bucket) / bucketCount) * sourceLength);
+                    const auto bucketEnd = static_cast<long long>((static_cast<double>(bucket + 1) / bucketCount) * sourceLength);
+                    auto pos = bucketStart;
+                    float peak = 0.0f;
+
+                    while (pos < bucketEnd)
+                    {
+                        const int toRead = static_cast<int>(std::min<long long>(blockSize, bucketEnd - pos));
+                        buffer.clear();
+                        reader->read(&buffer, 0, toRead, pos, true, true);
+
+                        const int channels = std::min(buffer.getNumChannels(), 2);
+                        for (int ch = 0; ch < channels; ++ch)
+                        {
+                            const auto* data = buffer.getReadPointer(ch);
+                            for (int i = 0; i < toRead; ++i)
+                                peak = std::max(peak, std::abs(data[i]));
+                        }
+
+                        pos += toRead;
+                    }
+
+                    peaks[static_cast<std::size_t>(bucket)] = std::clamp(peak, 0.0f, 1.0f);
+                }
+            }
+
+            void fillFallbackPeaks()
+            {
+                if (peaks.empty())
+                    peaks.assign(128, 0.0f);
+
+                for (std::size_t i = 0; i < peaks.size(); ++i)
+                {
+                    const auto phaseA = static_cast<float>(i) * 0.19f;
+                    const auto phaseB = static_cast<float>(i) * 0.047f;
+                    peaks[i] = std::clamp(0.18f + 0.54f * std::abs(std::sin(phaseA)) + 0.20f * std::abs(std::sin(phaseB)), 0.05f, 1.0f);
+                }
+            }
+
+            void drawWaveform(juce::Graphics& g, juce::Rectangle<float> wave)
+            {
+                if (peaks.empty())
+                    fillFallbackPeaks();
+
+                const auto centreY = wave.getCentreY();
+                const auto usableHeight = wave.getHeight() * 0.86f;
+                const auto bucketWidth = wave.getWidth() / static_cast<float>(peaks.size());
+
+                g.setColour(juce::Colour(0xff4db7ff).withAlpha(0.80f));
+                for (std::size_t i = 0; i < peaks.size(); ++i)
+                {
+                    const auto peak = std::max(0.035f, peaks[i]);
+                    const auto x = wave.getX() + static_cast<float>(i) * bucketWidth + bucketWidth * 0.48f;
+                    const auto h = peak * usableHeight;
+                    g.drawLine(x, centreY - h * 0.5f, x, centreY + h * 0.5f, std::max(1.0f, bucketWidth * 0.55f));
+                }
+
+                g.setColour(juce::Colour(0xff9ee7ff).withAlpha(0.25f));
+                g.drawLine(wave.getX(), centreY, wave.getRight(), centreY, 1.0f);
+            }
+
+            void drawHandle(juce::Graphics& g, float x, juce::Rectangle<float> wave, juce::Colour colour, const juce::String& label)
+            {
+                g.setColour(juce::Colours::black.withAlpha(0.55f));
+                g.drawLine(x + 1.2f, wave.getY() - 10.0f, x + 1.2f, wave.getBottom() + 10.0f, 5.0f);
+                g.setColour(colour);
+                g.drawLine(x, wave.getY() - 10.0f, x, wave.getBottom() + 10.0f, 3.0f);
+
+                juce::Path triangle;
+                triangle.startNewSubPath(x, wave.getY() - 12.0f);
+                triangle.lineTo(x - 6.0f, wave.getY() - 22.0f);
+                triangle.lineTo(x + 6.0f, wave.getY() - 22.0f);
+                triangle.closeSubPath();
+                g.fillPath(triangle);
+
+                g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
+                g.drawFittedText(label, juce::Rectangle<int>(static_cast<int>(x - 28.0f), static_cast<int>(wave.getY() - 34.0f), 56, 12), juce::Justification::centred, 1);
+            }
+
+            mw::core::AudioClip clip;
+            bool hasClip = false;
+            long long pendingStartSamples = 0;
+            long long pendingEndSamples = 0;
+            std::vector<float> peaks;
+            Handle activeHandle = Handle::None;
+        };
+
+        static juce::String secondsTextForSamples(long long samples, double sampleRate)
+        {
+            if (sampleRate <= 0.0 || samples <= 0)
+                return "0.00";
+
+            return juce::String(static_cast<double>(samples) / sampleRate, 2);
+        }
+
+        static long long samplesFromSecondsText(const juce::TextEditor& editor, double sampleRate)
+        {
+            if (sampleRate <= 0.0)
+                return 0;
+
+            const auto seconds = std::max(0.0, editor.getText().trim().getDoubleValue());
+            return static_cast<long long>(std::llround(seconds * sampleRate));
+        }
+
+        static juce::String formatSecondsFromSamplesLocal(long long samples, double sampleRate)
+        {
+            return formatSecondsFromSamples(samples, sampleRate);
+        }
+
+        void selectEditableClip()
+        {
+            editableClipId = 0;
+            for (const auto& clip : clips)
+            {
+                if (clip.id > 0)
+                {
+                    editableClipId = clip.id;
+                    return;
+                }
+            }
+        }
+
+        mw::core::AudioClip* findLocalClip(int clipId)
+        {
+            for (auto& clip : clips)
+            {
+                if (clip.id == clipId)
+                    return &clip;
+            }
+
+            return nullptr;
+        }
+
+        const mw::core::AudioClip* findLocalClip(int clipId) const
+        {
+            for (const auto& clip : clips)
+            {
+                if (clip.id == clipId)
+                    return &clip;
+            }
+
+            return nullptr;
+        }
+
+        void syncProjectSnapshotClip(const mw::core::AudioClip& source)
+        {
+            for (auto& clip : projectSnapshot.getAudioClips())
+            {
+                if (clip.id == source.id)
+                {
+                    clip = source;
+                    return;
+                }
+            }
+        }
+
+        void refreshTrimControls()
+        {
+            const auto* clip = findLocalClip(editableClipId);
+            const bool hasEditableClip = clip != nullptr && clip->durationSamples > 0 && clip->sampleRate > 0.0;
+
+            trimStartBox.setEnabled(hasEditableClip);
+            trimEndBox.setEnabled(hasEditableClip);
+            previewTrimButton.setEnabled(hasEditableClip);
+            playFullSourceButton.setEnabled(hasEditableClip);
+            stopPreviewButton.setEnabled(hasEditableClip);
+            applyTrimButton.setEnabled(hasEditableClip);
+            resetTrimButton.setEnabled(hasEditableClip);
+
+            waveformView.setClip(clip, projectFolder);
+
+            if (!clip)
+            {
+                suppressTrimTextChange = true;
+                trimStartBox.clear();
+                trimEndBox.clear();
+                suppressTrimTextChange = false;
+                pendingTrimStartSamples = 0;
+                pendingTrimEndSamples = 0;
+                trimStatusLabel.setText("No AudioClip selected.", juce::dontSendNotification);
+                return;
+            }
+
+            pendingTrimStartSamples = mw::core::audioClipTrimStartSamples(*clip);
+            pendingTrimEndSamples = mw::core::audioClipTrimEndSamples(*clip);
+            waveformView.setPendingTrim(pendingTrimStartSamples, pendingTrimEndSamples);
+            refreshTrimTextBoxesFromPending();
+            updateTrimStatusLabel(true);
+        }
+
+        void refreshTrimTextBoxesFromPending()
+        {
+            const auto* clip = findLocalClip(editableClipId);
+            if (!clip)
+                return;
+
+            suppressTrimTextChange = true;
+            trimStartBox.setText(secondsTextForSamples(pendingTrimStartSamples, clip->sampleRate), juce::dontSendNotification);
+            trimEndBox.setText(secondsTextForSamples(pendingTrimEndSamples, clip->sampleRate), juce::dontSendNotification);
+            suppressTrimTextChange = false;
+        }
+
+        void updatePendingTrimFromTextBoxes()
+        {
+            if (suppressTrimTextChange)
+                return;
+
+            auto* clip = findLocalClip(editableClipId);
+            if (!clip)
+                return;
+
+            auto requestedStart = samplesFromSecondsText(trimStartBox, clip->sampleRate);
+            auto requestedEnd = samplesFromSecondsText(trimEndBox, clip->sampleRate);
+            requestedStart = std::clamp<long long>(requestedStart, 0, clip->durationSamples);
+            requestedEnd = std::clamp<long long>(requestedEnd, 0, clip->durationSamples);
+
+            if (requestedEnd <= requestedStart)
+                requestedEnd = std::min<long long>(clip->durationSamples, requestedStart + 1);
+
+            if (requestedEnd <= requestedStart)
+                requestedStart = std::max<long long>(0, requestedEnd - 1);
+
+            pendingTrimStartSamples = requestedStart;
+            pendingTrimEndSamples = requestedEnd;
+            waveformView.setPendingTrim(pendingTrimStartSamples, pendingTrimEndSamples);
+            updateTrimStatusLabel(false);
+        }
+
+        void updateTrimStatusLabel(bool committed)
+        {
+            const auto* clip = findLocalClip(editableClipId);
+            if (!clip)
+                return;
+
+            const auto keptSamples = std::max<long long>(0, pendingTrimEndSamples - pendingTrimStartSamples);
+            const bool pendingDiffersFromCommitted = pendingTrimStartSamples != mw::core::audioClipTrimStartSamples(*clip)
+                || pendingTrimEndSamples != mw::core::audioClipTrimEndSamples(*clip);
+
+            juce::String text;
+            text << (committed || !pendingDiffersFromCommitted ? "Kept: " : "Pending kept: ")
+                 << formatSecondsFromSamplesLocal(keptSamples, clip->sampleRate);
+
+            if (pendingDiffersFromCommitted)
+                text << " (not applied yet)";
+            else
+                text << (mw::core::audioClipHasActiveTrim(*clip) ? " (trimmed)" : " (full source)");
+
+            trimStatusLabel.setText(text, juce::dontSendNotification);
+        }
+
+        void previewPendingTrim()
+        {
+            auto* clip = findLocalClip(editableClipId);
+            if (!clip || !onPreviewClip)
+                return;
+
+            updatePendingTrimFromTextBoxes();
+            if (pendingTrimEndSamples <= pendingTrimStartSamples)
+            {
+                trimStatusLabel.setText("Preview range must be longer than zero.", juce::dontSendNotification);
+                return;
+            }
+
+            onPreviewClip(clip->id, pendingTrimStartSamples, pendingTrimEndSamples, false);
+            trimStatusLabel.setText("Previewing pending trim from workspace/temp.", juce::dontSendNotification);
+        }
+
+        void previewFullSource()
+        {
+            auto* clip = findLocalClip(editableClipId);
+            if (!clip || !onPreviewClip)
+                return;
+
+            onPreviewClip(clip->id, 0, clip->durationSamples, true);
+            trimStatusLabel.setText("Previewing full source from workspace/temp.", juce::dontSendNotification);
+        }
+
+        bool applyTrimFromControls()
+        {
+            auto* clip = findLocalClip(editableClipId);
+            if (!clip || !onApplyTrim)
+                return false;
+
+            updatePendingTrimFromTextBoxes();
+            const auto requestedStart = pendingTrimStartSamples;
+            const auto requestedEnd = pendingTrimEndSamples;
+
+            if (requestedEnd <= requestedStart)
+            {
+                trimStatusLabel.setText("Trim End must be after Trim Start.", juce::dontSendNotification);
+                return false;
+            }
+
+            if (!onApplyTrim(clip->id, requestedStart, requestedEnd))
+            {
+                trimStatusLabel.setText("Trim was not applied.", juce::dontSendNotification);
+                return false;
+            }
+
+            clip->sourceTrimStartSamples = requestedStart;
+            clip->sourceTrimEndSamples = requestedEnd;
+            mw::core::normalizeAudioClipTrim(*clip);
+            pendingTrimStartSamples = mw::core::audioClipTrimStartSamples(*clip);
+            pendingTrimEndSamples = mw::core::audioClipTrimEndSamples(*clip);
+            syncProjectSnapshotClip(*clip);
+            waveformView.setClip(clip, projectFolder);
+            waveformView.setPendingTrim(pendingTrimStartSamples, pendingTrimEndSamples);
+            refreshTrimTextBoxesFromPending();
+            updateTrimStatusLabel(true);
+            detailsBox.setText(buildDetailsText(), juce::dontSendNotification);
+            return true;
+        }
+
+        void discardPendingTrimChanges()
+        {
+            auto* clip = findLocalClip(editableClipId);
+            if (!clip)
+                return;
+
+            pendingTrimStartSamples = mw::core::audioClipTrimStartSamples(*clip);
+            pendingTrimEndSamples = mw::core::audioClipTrimEndSamples(*clip);
+            waveformView.setPendingTrim(pendingTrimStartSamples, pendingTrimEndSamples);
+            refreshTrimTextBoxesFromPending();
+            updateTrimStatusLabel(true);
+            trimStatusLabel.setText("Pending trim changes discarded.", juce::dontSendNotification);
+        }
+
+        void resetTrimForCurrentClip()
+        {
+            auto* clip = findLocalClip(editableClipId);
+            if (!clip || !onResetTrim)
+                return;
+
+            if (!onResetTrim(clip->id))
+            {
+                trimStatusLabel.setText("Trim reset was not applied.", juce::dontSendNotification);
+                return;
+            }
+
+            clip->sourceTrimStartSamples = 0;
+            clip->sourceTrimEndSamples = clip->durationSamples;
+            mw::core::normalizeAudioClipTrim(*clip);
+            pendingTrimStartSamples = mw::core::audioClipTrimStartSamples(*clip);
+            pendingTrimEndSamples = mw::core::audioClipTrimEndSamples(*clip);
+            syncProjectSnapshotClip(*clip);
+            waveformView.setClip(clip, projectFolder);
+            waveformView.setPendingTrim(pendingTrimStartSamples, pendingTrimEndSamples);
+            refreshTrimTextBoxesFromPending();
+            updateTrimStatusLabel(true);
+            detailsBox.setText(buildDetailsText(), juce::dontSendNotification);
+        }
+
+        juce::String buildDetailsText() const
+        {
+            juce::String text;
+            text << "AudioClip Editor\n";
+            text << "================\n\n";
+
+            if (selectedTrackIndex >= 0 && selectedTrackIndex < static_cast<int>(projectSnapshot.getTracks().size()))
+            {
+                const auto& track = projectSnapshot.getTracks()[static_cast<std::size_t>(selectedTrackIndex)];
+                text << "Track #" << (selectedTrackIndex + 1) << ": " << track.getName() << "\n";
+                text << "Track Type: " << mw::core::trackTypeToString(track.getTrackType()).c_str() << "\n";
+                text << "Muted: " << (track.getMuted() ? "yes" : "no")
+                     << "    Solo: " << (track.getSolo() ? "yes" : "no")
+                     << "    Volume: " << juce::String(track.getMixerSettings().volume, 2) << "\n\n";
+            }
+
+            if (clips.empty())
+            {
+                text << "No AudioClip media is attached to this selected track.\n";
+                return text;
+            }
+
+            text << "Attached AudioClip media: " << static_cast<int>(clips.size()) << "\n";
+            text << "Editing State: interactive non-destructive trim metadata. Preview/export honors the kept range; original media files are untouched.\n\n";
+
+            for (std::size_t i = 0; i < clips.size(); ++i)
+            {
+                const auto& clip = clips[i];
+                const auto startBeat = static_cast<double>(clip.startTick) / static_cast<double>(mw::core::Project::ticksPerQuarterNote);
+                const auto fullDurationSeconds = clip.sampleRate > 0.0
+                    ? static_cast<double>(std::max<long long>(0, clip.durationSamples)) / clip.sampleRate
+                    : 0.0;
+                const auto trimStartSamples = mw::core::audioClipTrimStartSamples(clip);
+                const auto trimEndSamples = mw::core::audioClipTrimEndSamples(clip);
+                const auto trimmedDurationSamples = mw::core::audioClipTrimmedDurationSamples(clip);
+                const auto keptDurationSeconds = clip.sampleRate > 0.0
+                    ? static_cast<double>(std::max<long long>(0, trimmedDurationSamples)) / clip.sampleRate
+                    : 0.0;
+                const auto approximateFullDurationBeats = fullDurationSeconds * static_cast<double>(std::max(1, projectSnapshot.getTempoBpm())) / 60.0;
+                const auto approximateKeptDurationBeats = keptDurationSeconds * static_cast<double>(std::max(1, projectSnapshot.getTempoBpm())) / 60.0;
+                const auto approximateEndBeat = startBeat + approximateKeptDurationBeats;
+
+                long long sequenceStartTick = 0;
+                juce::String sequenceName;
+                for (const auto& sequence : projectSnapshot.getSequences())
+                {
+                    if (sequence.number == clip.sequenceNumber)
+                    {
+                        sequenceStartTick = sequence.startTick;
+                        sequenceName = juce::String(sequence.name).trim();
+                        break;
+                    }
+                }
+                const auto sequenceStartBeat = static_cast<double>(sequenceStartTick) / static_cast<double>(mw::core::Project::ticksPerQuarterNote);
+                const auto localStartBeat = startBeat - sequenceStartBeat;
+
+                text << "AudioClip media #" << clip.id << "\n";
+                text << "------------------\n";
+                text << "Name: " << (clip.name.empty() ? juce::String("AudioClip") : juce::String(clip.name)) << "\n";
+                text << "Track #: " << (clip.trackIndex + 1) << "\n";
+                text << "Sequence #: " << clip.sequenceNumber;
+                if (sequenceName.isNotEmpty())
+                    text << " - " << sequenceName;
+                text << "\n";
+                text << "Source Type: " << mw::core::audioClipSourceTypeToString(clip.sourceType).c_str() << "\n";
+                text << "Saved Format: " << mw::core::audioClipSavedFormatToString(clip.savedFormat).c_str() << "\n";
+                text << "Project Start Beat: " << juce::String(startBeat, 2) << "\n";
+                text << "Sequence-Local Start Beat: " << juce::String(localStartBeat, 2) << "\n";
+                text << "Approx End Beat (trim-aware): " << juce::String(approximateEndBeat, 2) << "\n";
+                text << "Full Source Duration: " << formatSecondsFromSamples(clip.durationSamples, clip.sampleRate)
+                     << " / approx " << juce::String(approximateFullDurationBeats, 2) << " beats at project tempo\n";
+                text << "Source Trim Start: " << formatSecondsFromSamples(trimStartSamples, clip.sampleRate)
+                     << " / sample " << juce::String(trimStartSamples) << "\n";
+                text << "Source Trim End: " << formatSecondsFromSamples(trimEndSamples, clip.sampleRate)
+                     << " / sample " << juce::String(trimEndSamples) << "\n";
+                text << "Kept Trim Duration: " << formatSecondsFromSamples(trimmedDurationSamples, clip.sampleRate)
+                     << " / approx " << juce::String(approximateKeptDurationBeats, 2) << " beats at project tempo"
+                     << " / samples " << juce::String(trimmedDurationSamples)
+                     << (mw::core::audioClipHasActiveTrim(clip) ? " (trimmed)" : " (full source)") << "\n";
+                text << "Samples: " << juce::String(clip.durationSamples) << "\n";
+                text << "Sample Rate: " << juce::String(clip.sampleRate, 0) << " Hz\n";
+                text << "Channels: " << clip.channelCount << "\n";
+                text << "Bit Depth: " << clip.bitDepth << "\n";
+                text << "Gain: " << juce::String(clip.gain, 2) << "\n";
+                text << "Pan: " << juce::String(clip.pan, 2) << "\n";
+                text << "Size: " << formatBytes(clip.sizeBytes) << "\n";
+                text << "Missing Media: " << (clip.missingMedia ? "YES" : "no") << "\n";
+
+                if (!clip.projectRelativePath.empty())
+                {
+                    text << "Project Media Path: " << clip.projectRelativePath.string() << "\n";
+                    if (projectFolder.has_value())
+                    {
+                        const auto absolutePath = (*projectFolder / clip.projectRelativePath).lexically_normal();
+                        text << "Resolved Media Path: " << absolutePath.string() << "\n";
+                    }
+                }
+
+                if (!clip.originalSourcePath.empty())
+                    text << "Original Source Path: " << clip.originalSourcePath.string() << "\n";
+
+                if (!clip.notes.empty())
+                    text << "Notes: " << clip.notes << "\n";
+
+                if (i + 1 < clips.size())
+                    text << "\n";
+            }
+
+            text << "\nPhase reminders:\n";
+            text << "- AudioClip startTick still controls placement on the project/sequence timeline.\n";
+            text << "- Source trim start/end only choose which source samples are kept.\n";
+            text << "- Phase 4A lets handles preview pending trim before Apply.\n";
+            text << "- Preview/export honors the kept source trim range.\n";
+            text << "- Original recorded/imported media files are never modified by this editor.\n";
+
+            return text;
+        }
+
+        mw::core::Project projectSnapshot;
+        int selectedTrackIndex = -1;
+        std::vector<mw::core::AudioClip> clips;
+        std::optional<std::filesystem::path> projectFolder;
+        int editableClipId = 0;
+        long long pendingTrimStartSamples = 0;
+        long long pendingTrimEndSamples = 0;
+        bool suppressTrimTextChange = false;
+
+        juce::Label titleLabel;
+        juce::Label statusLabel;
+        WaveformTrimView waveformView;
+        juce::Label trimHelpLabel;
+        juce::Label trimStartLabel;
+        juce::TextEditor trimStartBox;
+        juce::Label trimEndLabel;
+        juce::TextEditor trimEndBox;
+        juce::TextButton previewTrimButton;
+        juce::TextButton playFullSourceButton;
+        juce::TextButton stopPreviewButton;
+        juce::TextButton applyTrimButton;
+        juce::TextButton resetTrimButton;
+        juce::Label trimStatusLabel;
+        juce::TextEditor detailsBox;
+        juce::TextButton closeButton;
+        std::function<bool(int, long long, long long)> onApplyTrim;
+        std::function<bool(int)> onResetTrim;
+        std::function<void(int, long long, long long, bool)> onPreviewClip;
+        std::function<void()> onStopPreview;
+        std::function<void()> onClose;
+    };
+
             class RawNotesWindowContent final : public juce::Component
             {
             public:
@@ -5104,6 +6241,8 @@ juce::Label helpLabel;
             std::function<void()> stopCallback,
             std::function<void()> closeCallback,
             std::function<std::vector<mw::core::NoteEvent>()> previewNotesCallback,
+            std::function<std::vector<mw::core::AudioClip>()> previewAudioClipsCallback,
+            std::function<std::optional<std::filesystem::path>()> projectFolderCallback,
             std::function<bool()> hasPreviewCallback,
             std::function<bool()> isRenderingCallback,
             std::function<double()> currentSecondsCallback,
@@ -5117,6 +6256,8 @@ juce::Label helpLabel;
               onStop(std::move(stopCallback)),
               onClose(std::move(closeCallback)),
               getPreviewNotes(std::move(previewNotesCallback)),
+              getPreviewAudioClips(std::move(previewAudioClipsCallback)),
+              getProjectFolder(std::move(projectFolderCallback)),
               hasPreview(std::move(hasPreviewCallback)),
               isRendering(std::move(isRenderingCallback)),
               getCurrentSeconds(std::move(currentSecondsCallback)),
@@ -5282,6 +6423,8 @@ juce::Label helpLabel;
             if (notes.empty() && !hasRenderedPreviewScope)
                 notes = roll.getNotes();
 
+            auto audioClips = getPreviewAudioClips ? getPreviewAudioClips() : std::vector<mw::core::AudioClip>{};
+
             int maxBeat = hasRenderedPreviewScope
                 ? static_cast<int>(std::ceil(previewTotalBeats))
                 : roll.getStartBeat() + roll.getBeatsVisible();
@@ -5299,12 +6442,14 @@ juce::Label helpLabel;
 
                     maxBeat = std::max(maxBeat, endBeat);
                 }
+
+                for (const auto& clip : audioClips)
+                    maxBeat = std::max(maxBeat, static_cast<int>(std::ceil(audioClipEndBeatForMap(clip))));
             }
 
-            // The preview player can render a full track, sequence, or project.
-            // When a rendered preview exists, make that preview duration the map
-            // scope instead of letting the currently visible Piano Roll window
-            // keep the note map stretched too wide or too narrow.
+            // The preview player can render a full track, sequence, project, or AudioClip Editor preview.
+            // When a rendered preview exists, make that preview duration the map scope instead of letting
+            // the currently visible Piano Roll window keep the map stretched too wide or too narrow.
             maxBeat = std::max(maxBeat, 1);
 
             auto beatToX = [inner, maxBeat](double beat)
@@ -5314,10 +6459,13 @@ juce::Label helpLabel;
                     * inner.getWidth();
             };
 
-            auto pitchToY = [inner](int pitch)
+            auto noteArea = inner;
+            const bool hasAudioOverlay = !audioClips.empty();
+
+            auto pitchToY = [noteArea](int pitch)
             {
                 const double normalised = static_cast<double>(std::clamp(pitch, 0, 127)) / 127.0;
-                return inner.getBottom() - static_cast<float>(normalised) * inner.getHeight();
+                return noteArea.getBottom() - static_cast<float>(normalised) * noteArea.getHeight();
             };
 
             const int markerStep = maxBeat <= 32 ? 4 : (maxBeat <= 128 ? 16 : 32);
@@ -5329,15 +6477,18 @@ juce::Label helpLabel;
                 g.drawVerticalLine(static_cast<int>(x), inner.getY(), inner.getBottom());
             }
 
+            if (hasAudioOverlay)
+                drawAudioClipOverlay(g, noteArea, audioClips, beatToX);
+
             const auto previewTotalBeatsForBar = getSafeTotalBeats();
             if (previewTotalBeatsForBar > 0.0)
             {
                 const float right = beatToX(previewTotalBeatsForBar);
                 auto previewBar = juce::Rectangle<float>(
                     inner.getX(),
-                    inner.getBottom() - 12.0f,
+                    inner.getBottom() - 10.0f,
                     std::max(3.0f, right - inner.getX()),
-                    7.0f
+                    5.0f
                 );
 
                 g.setColour(juce::Colour(0xff9fd0ff).withAlpha(0.32f));
@@ -5403,13 +6554,251 @@ juce::Label helpLabel;
             }
 
             g.setColour(juce::Colour(0xffbdbdbd));
-            auto mapTitle = juce::String("Preview Note Map");
+            auto mapTitle = juce::String(hasAudioOverlay ? "Preview Map: MIDI notes + green AudioClip overlay" : "Preview Note Map");
             if (hasRenderedPreviewScope)
                 mapTitle << "  |  " << juce::String(maxBeat) << " beats";
             g.drawText(mapTitle, inner.toNearestInt().reduced(6), juce::Justification::topLeft, false);
         }
 
     private:
+        double getMapBeatsPerSecond() const
+        {
+            const auto totalSeconds = getSafeTotalSeconds();
+            const auto totalBeats = getSafeTotalBeats();
+
+            if (totalSeconds > 0.0 && totalBeats > 0.0)
+                return totalBeats / totalSeconds;
+
+            return 2.0; // 120 BPM fallback for maps drawn before a render duration is known.
+        }
+
+        double audioClipStartBeatForMap(const mw::core::AudioClip& clip) const
+        {
+            return static_cast<double>(std::max<std::int64_t>(0, clip.startTick))
+                / static_cast<double>(mw::core::Project::ticksPerQuarterNote);
+        }
+
+        double audioClipDurationBeatsForMap(const mw::core::AudioClip& clip) const
+        {
+            if (clip.sampleRate <= 0.0)
+                return 0.0;
+
+            const auto trimmedSamples = mw::core::audioClipTrimmedDurationSamples(clip);
+            const auto seconds = static_cast<double>(std::max<long long>(0, trimmedSamples)) / clip.sampleRate;
+            return std::max(0.01, seconds * getMapBeatsPerSecond());
+        }
+
+        double audioClipEndBeatForMap(const mw::core::AudioClip& clip) const
+        {
+            return audioClipStartBeatForMap(clip) + audioClipDurationBeatsForMap(clip);
+        }
+
+        std::filesystem::path resolvedAudioClipPathForMap(const mw::core::AudioClip& clip) const
+        {
+            const auto projectFolder = getProjectFolder ? getProjectFolder() : std::optional<std::filesystem::path>{};
+
+            if (projectFolder.has_value() && !clip.projectRelativePath.empty())
+            {
+                const auto absolute = (*projectFolder / clip.projectRelativePath).lexically_normal();
+                if (std::filesystem::exists(absolute))
+                    return absolute;
+            }
+
+            if (!clip.originalSourcePath.empty() && std::filesystem::exists(clip.originalSourcePath))
+                return clip.originalSourcePath;
+
+            if (!clip.projectRelativePath.empty() && std::filesystem::exists(clip.projectRelativePath))
+                return clip.projectRelativePath;
+
+            return {};
+        }
+
+        std::vector<float> makeFallbackAudioClipPeaks(int bucketCount, int seed) const
+        {
+            std::vector<float> fallback(static_cast<std::size_t>(std::max(8, bucketCount)), 0.0f);
+
+            for (std::size_t i = 0; i < fallback.size(); ++i)
+            {
+                const auto phaseA = static_cast<float>(i + static_cast<std::size_t>(std::abs(seed))) * 0.21f;
+                const auto phaseB = static_cast<float>(i) * 0.061f;
+                fallback[i] = std::clamp(0.14f + 0.48f * std::abs(std::sin(phaseA)) + 0.22f * std::abs(std::sin(phaseB)), 0.04f, 1.0f);
+            }
+
+            return fallback;
+        }
+
+        const std::vector<float>& getAudioClipPeaksForMap(const mw::core::AudioClip& clip)
+        {
+            constexpr int bucketCount = 80;
+
+            auto path = resolvedAudioClipPathForMap(clip);
+            auto cacheKey = path.string()
+                + "#" + std::to_string(clip.id)
+                + "#" + std::to_string(mw::core::audioClipTrimStartSamples(clip))
+                + "#" + std::to_string(mw::core::audioClipTrimEndSamples(clip))
+                + "#" + std::to_string(clip.durationSamples);
+
+            auto found = audioClipPeakCache.find(cacheKey);
+            if (found != audioClipPeakCache.end())
+                return found->second;
+
+            auto& peaks = audioClipPeakCache[cacheKey];
+            peaks.assign(bucketCount, 0.0f);
+
+            if (path.empty())
+            {
+                peaks = makeFallbackAudioClipPeaks(bucketCount, clip.id);
+                return peaks;
+            }
+
+            juce::AudioFormatManager formatManager;
+            formatManager.registerBasicFormats();
+            std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(juce::File(path.string())));
+            if (!reader || reader->lengthInSamples <= 0)
+            {
+                peaks = makeFallbackAudioClipPeaks(bucketCount, clip.id);
+                return peaks;
+            }
+
+            const auto sourceLength = static_cast<long long>(reader->lengthInSamples);
+            const auto trimStart = std::clamp<long long>(mw::core::audioClipTrimStartSamples(clip), 0, sourceLength);
+            const auto trimEnd = std::clamp<long long>(mw::core::audioClipTrimEndSamples(clip), trimStart, sourceLength);
+
+            if (trimEnd <= trimStart)
+            {
+                peaks = makeFallbackAudioClipPeaks(bucketCount, clip.id);
+                return peaks;
+            }
+
+            const int blockSize = 1024;
+            juce::AudioBuffer<float> buffer(static_cast<int>(std::max<unsigned int>(1, reader->numChannels)), blockSize);
+
+            for (int bucket = 0; bucket < bucketCount; ++bucket)
+            {
+                const auto bucketStart = trimStart + static_cast<long long>((static_cast<double>(bucket) / bucketCount) * static_cast<double>(trimEnd - trimStart));
+                const auto bucketEnd = trimStart + static_cast<long long>((static_cast<double>(bucket + 1) / bucketCount) * static_cast<double>(trimEnd - trimStart));
+                auto pos = bucketStart;
+                float peak = 0.0f;
+
+                while (pos < bucketEnd)
+                {
+                    const int toRead = static_cast<int>(std::min<long long>(blockSize, bucketEnd - pos));
+                    buffer.clear();
+                    reader->read(&buffer, 0, toRead, pos, true, true);
+
+                    const int channels = std::min(buffer.getNumChannels(), 2);
+                    for (int ch = 0; ch < channels; ++ch)
+                    {
+                        const auto* data = buffer.getReadPointer(ch);
+                        for (int i = 0; i < toRead; ++i)
+                            peak = std::max(peak, std::abs(data[i]));
+                    }
+
+                    pos += toRead;
+                }
+
+                peaks[static_cast<std::size_t>(bucket)] = std::clamp(peak, 0.0f, 1.0f);
+            }
+
+            return peaks;
+        }
+
+        template <typename BeatToX>
+        void drawAudioClipOverlay(juce::Graphics& g,
+                                  juce::Rectangle<float> mapArea,
+                                  const std::vector<mw::core::AudioClip>& audioClips,
+                                  BeatToX beatToX)
+        {
+            if (mapArea.getWidth() <= 8.0f || mapArea.getHeight() <= 20.0f || audioClips.empty())
+                return;
+
+            // Draw AudioClip waveforms as a soft overlay inside the same map used by MIDI notes.
+            // This keeps audio and MIDI visually aligned to the same beat grid instead of creating
+            // a separate lower lane that can make the preview map feel disconnected or cramped.
+            auto overlayArea = mapArea.reduced(4.0f, 18.0f);
+            if (overlayArea.getHeight() < 24.0f)
+                overlayArea = mapArea.reduced(4.0f, 8.0f);
+
+            const int visibleClips = std::min<int>(static_cast<int>(audioClips.size()), 6);
+            const auto ribbonHeight = std::clamp(overlayArea.getHeight() * 0.52f, 28.0f, std::max(28.0f, overlayArea.getHeight() - 10.0f));
+            const auto baseCentreY = overlayArea.getCentreY();
+
+            for (int i = 0; i < visibleClips; ++i)
+            {
+                const auto& clip = audioClips[static_cast<std::size_t>(i)];
+                const auto startBeat = audioClipStartBeatForMap(clip);
+                const auto endBeat = audioClipEndBeatForMap(clip);
+                const float x = std::clamp(beatToX(startBeat), overlayArea.getX(), overlayArea.getRight());
+                const float right = std::clamp(beatToX(endBeat), overlayArea.getX(), overlayArea.getRight());
+
+                if (right <= x + 1.0f)
+                    continue;
+
+                const auto offsetStep = visibleClips > 1
+                    ? std::min(9.0f, overlayArea.getHeight() * 0.055f)
+                    : 0.0f;
+                const auto clipOffset = (static_cast<float>(i) - static_cast<float>(visibleClips - 1) * 0.5f) * offsetStep;
+                const auto centreY = std::clamp(baseCentreY + clipOffset,
+                                                overlayArea.getY() + ribbonHeight * 0.5f,
+                                                overlayArea.getBottom() - ribbonHeight * 0.5f);
+
+                auto block = juce::Rectangle<float>(x,
+                                                    centreY - ribbonHeight * 0.5f,
+                                                    std::max(3.0f, right - x),
+                                                    ribbonHeight);
+
+                const auto& peaks = getAudioClipPeaksForMap(clip);
+                const auto bucketWidth = block.getWidth() / static_cast<float>(std::max<std::size_t>(1, peaks.size()));
+                const auto usableHeight = block.getHeight() * 0.78f;
+
+                const auto fillAlpha = mw::core::audioClipHasActiveTrim(clip) ? 0.19f : 0.14f;
+                const auto lineAlpha = mw::core::audioClipHasActiveTrim(clip) ? 0.72f : 0.58f;
+                const auto edgeAlpha = mw::core::audioClipHasActiveTrim(clip) ? 0.62f : 0.42f;
+
+                g.setColour(juce::Colour(0xff28d96b).withAlpha(fillAlpha));
+                g.fillRoundedRectangle(block, 4.0f);
+
+                g.setColour(juce::Colour(0xff36f078).withAlpha(edgeAlpha));
+                g.drawRoundedRectangle(block, 4.0f, 1.0f);
+
+                g.setColour(juce::Colour(0xff38f57a).withAlpha(lineAlpha));
+                for (std::size_t bucket = 0; bucket < peaks.size(); ++bucket)
+                {
+                    const auto peak = std::max(0.035f, peaks[bucket]);
+                    const auto drawX = block.getX() + static_cast<float>(bucket) * bucketWidth + bucketWidth * 0.5f;
+                    const auto drawH = peak * usableHeight;
+                    g.drawLine(drawX,
+                               block.getCentreY() - drawH * 0.5f,
+                               drawX,
+                               block.getCentreY() + drawH * 0.5f,
+                               std::max(1.0f, bucketWidth * 0.58f));
+                }
+
+                // Label only the first few clips very lightly so labels do not hide MIDI notes.
+                if (block.getWidth() >= 70.0f && i < 3)
+                {
+                    juce::String label;
+                    label << "A#" << (clip.trackIndex + 1);
+                    if (mw::core::audioClipHasActiveTrim(clip))
+                        label << " trim";
+
+                    g.setColour(juce::Colour(0xffd8ffe4).withAlpha(0.72f));
+                    g.setFont(juce::FontOptions(10.0f));
+                    g.drawFittedText(label, block.toNearestInt().reduced(5, 2), juce::Justification::topLeft, 1);
+                }
+            }
+
+            if (static_cast<int>(audioClips.size()) > visibleClips)
+            {
+                g.setColour(juce::Colour(0xffd8ffe4).withAlpha(0.68f));
+                g.setFont(juce::FontOptions(10.5f));
+                g.drawText(juce::String("+") + juce::String(static_cast<int>(audioClips.size()) - visibleClips) + " more AudioClip(s)",
+                           mapArea.toNearestInt().reduced(8, 4),
+                           juce::Justification::topRight,
+                           false);
+            }
+        }
+
         double getSafeTotalBeats() const
         {
             if (getTotalBeats)
@@ -5570,12 +6959,15 @@ juce::Label helpLabel;
         std::function<void()> onStop;
         std::function<void()> onClose;
         std::function<std::vector<mw::core::NoteEvent>()> getPreviewNotes;
+        std::function<std::vector<mw::core::AudioClip>()> getPreviewAudioClips;
+        std::function<std::optional<std::filesystem::path>()> getProjectFolder;
         std::function<bool()> hasPreview;
         std::function<bool()> isRendering;
         std::function<double()> getCurrentSeconds;
         std::function<double()> getTotalSeconds;
         std::function<double()> getTotalBeats;
         std::function<bool(double)> seekSeconds;
+        std::map<std::string, std::vector<float>> audioClipPeakCache;
     };
 
 
@@ -5883,19 +7275,48 @@ juce::Label helpLabel;
     }
 
 
-    double getAudioFileDurationSeconds(const std::filesystem::path& path)
+    struct AudioFileBasicInfo
     {
+        bool valid = false;
+        long long durationSamples = 0;
+        double sampleRate = 48000.0;
+        int channelCount = 2;
+        int bitDepth = 24;
+        std::uintmax_t sizeBytes = 0;
+    };
+
+    AudioFileBasicInfo readAudioFileBasicInfo(const std::filesystem::path& path)
+    {
+        AudioFileBasicInfo info;
+
         if (path.empty() || !std::filesystem::exists(path))
-            return 0.0;
+            return info;
 
         juce::AudioFormatManager formatManager;
         formatManager.registerBasicFormats();
 
         std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(juce::File(path.string())));
         if (reader == nullptr || reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
+            return info;
+
+        info.valid = true;
+        info.durationSamples = static_cast<long long>(reader->lengthInSamples);
+        info.sampleRate = reader->sampleRate;
+        info.channelCount = std::max(1, static_cast<int>(reader->numChannels));
+        info.bitDepth = reader->bitsPerSample > 0 ? static_cast<int>(reader->bitsPerSample) : info.bitDepth;
+
+        std::error_code ec;
+        info.sizeBytes = std::filesystem::exists(path, ec) ? std::filesystem::file_size(path, ec) : 0;
+        return info;
+    }
+
+    double getAudioFileDurationSeconds(const std::filesystem::path& path)
+    {
+        const auto info = readAudioFileBasicInfo(path);
+        if (!info.valid || info.sampleRate <= 0.0 || info.durationSamples <= 0)
             return 0.0;
 
-        return static_cast<double>(reader->lengthInSamples) / reader->sampleRate;
+        return static_cast<double>(info.durationSamples) / info.sampleRate;
     }
 
     juce::String formatPreviewClockTime(double seconds)
@@ -6286,6 +7707,47 @@ namespace mw::gui
                 && a.vst3.uid == b.vst3.uid
                 && a.vst3.bypassed == b.vst3.bypassed
                 && std::abs(a.matchConfidence - b.matchConfidence) < 0.0001f;
+        }
+
+        bool vstPluginAssignmentsEqual(const mw::core::VstPluginAssignment& a, const mw::core::VstPluginAssignment& b)
+        {
+            return a.bundlePath == b.bundlePath
+                && a.name == b.name
+                && a.vendor == b.vendor
+                && a.version == b.version
+                && a.category == b.category
+                && a.uid == b.uid
+                && a.stateBase64 == b.stateBase64
+                && a.bypassed == b.bypassed
+                && a.compatibilityWarningSeen == b.compatibilityWarningSeen
+                && a.compatibilitySummary == b.compatibilitySummary;
+        }
+
+        bool vstEffectSlotsEqual(const mw::core::VstEffectSlotAssignment& a, const mw::core::VstEffectSlotAssignment& b)
+        {
+            return a.enabled == b.enabled
+                && vstPluginAssignmentsEqual(a.plugin, b.plugin);
+        }
+
+        bool vstEffectsAssignmentsEqual(const mw::core::VstEffectsAssignment& a, const mw::core::VstEffectsAssignment& b)
+        {
+            if (a.enabled != b.enabled)
+                return false;
+
+            for (std::size_t i = 0; i < mw::core::maxVstEffectSlots; ++i)
+            {
+                const auto* aSlot = a.slot(i);
+                const auto* bSlot = b.slot(i);
+                const bool aEnabled = a.slotEnabled(i);
+                const bool bEnabled = b.slotEnabled(i);
+                const auto aPlugin = aSlot != nullptr ? aSlot->plugin : mw::core::VstPluginAssignment{};
+                const auto bPlugin = bSlot != nullptr ? bSlot->plugin : mw::core::VstPluginAssignment{};
+
+                if (aEnabled != bEnabled || !vstPluginAssignmentsEqual(aPlugin, bPlugin))
+                    return false;
+            }
+
+            return true;
         }
 
         bool isGenericInstrumentDisplayName(const juce::String& name)
@@ -6958,6 +8420,7 @@ namespace mw::gui
 
             menuTrackManager = 1401,
             menuPianoRoll,
+            menuAudioClipEditor,
             menuPreviewPlayer,
             menuToggleHelperBubbles,
 
@@ -6976,6 +8439,7 @@ namespace mw::gui
             menuWindowPreviewPlayer,
             menuWindowRawNotes,
             menuWindowAudioRecorder,
+            menuWindowAudioClipEditor,
             menuWindowProjectInfo,
             menuWindowSequencePicker,
             menuWindowSequenceThoughts,
@@ -7051,6 +8515,7 @@ namespace mw::gui
             case 4:
                 menu.addItem(menuTrackManager, "Open Track / Sequence Manager");
                 menu.addItem(menuPianoRoll, "Open Selected Track Piano Roll");
+                menu.addItem(menuAudioClipEditor, "AudioClip Editor");
                 break;
 
             case 5:
@@ -7062,6 +8527,7 @@ namespace mw::gui
                     || rawNotesWindow != nullptr
                     || pianoRollPreviewPlayerWindow != nullptr
                     || audioRecorderWindow != nullptr
+                    || audioClipEditorWindow != nullptr
                     || projectInfoWindow != nullptr
                     || sequencePickerWindow != nullptr
                     || sequenceThoughtsWindow != nullptr
@@ -7089,6 +8555,9 @@ namespace mw::gui
 
                 if (audioRecorderWindow != nullptr)
                     menu.addItem(menuWindowAudioRecorder, "Audio Recorder");
+
+                if (audioClipEditorWindow != nullptr)
+                    menu.addItem(menuWindowAudioClipEditor, "AudioClip Editor");
 
                 if (projectInfoWindow != nullptr)
                     menu.addItem(menuWindowProjectInfo, "Project Info");
@@ -7255,6 +8724,7 @@ namespace mw::gui
                     && rawNotesWindow == nullptr
                     && pianoRollPreviewPlayerWindow == nullptr
                     && audioRecorderWindow == nullptr
+                    && audioClipEditorWindow == nullptr
                     && projectInfoWindow == nullptr
                     && sequencePickerWindow == nullptr
                     && sequenceThoughtsWindow == nullptr
@@ -7346,6 +8816,7 @@ namespace mw::gui
         if (menuItemID == menuWindowPreviewPlayer) { focusWindow(pianoRollPreviewPlayerWindow); return; }
         if (menuItemID == menuWindowRawNotes) { focusWindow(rawNotesWindow); return; }
         if (menuItemID == menuWindowAudioRecorder) { focusWindow(audioRecorderWindow); return; }
+        if (menuItemID == menuWindowAudioClipEditor) { focusWindow(audioClipEditorWindow); return; }
         if (menuItemID == menuWindowProjectInfo) { focusWindow(projectInfoWindow); return; }
         if (menuItemID == menuWindowSequencePicker) { focusWindow(sequencePickerWindow); return; }
         if (menuItemID == menuWindowSequenceThoughts) { focusWindow(sequenceThoughtsWindow); return; }
@@ -7396,6 +8867,7 @@ namespace mw::gui
             || menuItemID == menuWindowPreviewPlayer
             || menuItemID == menuWindowRawNotes
             || menuItemID == menuWindowAudioRecorder
+            || menuItemID == menuWindowAudioClipEditor
             || menuItemID == menuWindowProjectInfo
             || menuItemID == menuWindowSequencePicker
             || menuItemID == menuWindowSequenceThoughts
@@ -7477,6 +8949,7 @@ namespace mw::gui
 
             case menuTrackManager: openTrackManagerWindow(); break;
             case menuPianoRoll: openPianoRollWindow(); break;
+            case menuAudioClipEditor: openAudioClipEditorWindow(); break;
             case menuToggleHelperBubbles: setHelperBubblesEnabled(!helperBubblesEnabled); break;
 
             case menuUserGuide:
@@ -7694,12 +9167,14 @@ namespace mw::gui
         outputFormatCombo.addItem("FLAC", 2);
         outputFormatCombo.addItem("MP3", 3);
         outputFormatCombo.addItem("OGG", 4);
+        outputFormatCombo.addItem("M4A", 5);
         outputFormatCombo.setSelectedId(1);
 
         audioClipFormatCombo.addItem("WAV lossless", 1);
         audioClipFormatCombo.addItem("FLAC lossless", 2);
         audioClipFormatCombo.addItem("MP3 high quality", 3);
         audioClipFormatCombo.addItem("OGG high quality", 4);
+        audioClipFormatCombo.addItem("M4A high quality", 5);
         audioClipFormatCombo.setSelectedId(1);
 
         audioClipQualityCombo.addItem("High / lossless default", 320);
@@ -8097,6 +9572,7 @@ namespace mw::gui
         deletePianoRollNoteButton.onClick = [this] { pianoRoll.deleteSelectedNote(); };
         syncPianoRollButton.onClick = [this] { applyNoteEditorToTrack(); refreshNoteEditor(); };
         openPianoRollButton.onClick = [this] { openPianoRollWindow(); };
+        audioClipEditorButton.onClick = [this] { openAudioClipEditorWindow(); };
 
         setBeatWindow4Button.onClick = [this] { pianoRollBeatWindowBox.setText("4"); applyPianoRollSettings(); };
         setBeatWindow8Button.onClick = [this] { pianoRollBeatWindowBox.setText("8"); applyPianoRollSettings(); };
@@ -8295,6 +9771,7 @@ namespace mw::gui
         addAndMakeVisible(trackSummaryBox);
         addAndMakeVisible(logBox);
         addAndMakeVisible(openPianoRollButton);
+        addAndMakeVisible(audioClipEditorButton);
         addAndMakeVisible(previousPianoRollWindowButton);
         addAndMakeVisible(nextPianoRollWindowButton);
         addAndMakeVisible(jumpPianoRollPageButton);
@@ -8336,6 +9813,14 @@ namespace mw::gui
 
         pianoRollContent.reset();
 
+        if (audioClipEditorWindow != nullptr)
+        {
+            audioClipEditorWindow->setContentOwned(nullptr, false);
+            audioClipEditorWindow.reset();
+        }
+
+        audioClipEditorContent.reset();
+
 
         cancelRenderRequested = true;
         renderingInProgress = false;
@@ -8356,7 +9841,7 @@ namespace mw::gui
         };
 
         chooseMusicXmlButton.setTooltip("Import a MusicXML or MIDI file and start a new project from it.");
-        importAudioButton.setTooltip("Import WAV, MP3, FLAC, or OGG audio onto the selected blank track, or create a new blank AudioClip track when no blank target is selected.");
+        importAudioButton.setTooltip("Import WAV, MP3, FLAC, OGG, or M4A audio onto the selected blank track, or create a new blank AudioClip track when no blank target is selected.");
         recordAudioButton.setTooltip("Open the AudioClip recorder. Recording requires a selected blank track; kept takes turn that blank track into an AudioClip track in the active sequence.");
         newProjectButton.setTooltip("Create a fresh empty project. You will be asked before discarding unsaved work.");
         openProjectButton.setTooltip("Open a saved Poor Man's Studio .mwproj project file.");
@@ -8389,6 +9874,7 @@ namespace mw::gui
         deletePianoRollNoteButton.setTooltip("Delete the currently selected Piano Roll note.");
         syncPianoRollButton.setTooltip("Sync note-editor changes into the Piano Roll view.");
         openPianoRollButton.setTooltip("Open the editable Piano Roll for the selected track. Empty tracks are linked to a sequence automatically.");
+        audioClipEditorButton.setTooltip("Open the selected AudioClip track in the AudioClip Editor for non-destructive source trim metadata. MIDI tracks still use Piano Roll.");
         previousPianoRollWindowButton.setTooltip("Move the Piano Roll to the previous beat window.");
         nextPianoRollWindowButton.setTooltip("Move the Piano Roll to the next beat window.");
         jumpPianoRollPageButton.setTooltip("Jump the Piano Roll to the window number typed beside it.");
@@ -8424,8 +9910,8 @@ namespace mw::gui
         labelAndControl(sfzCc1Label, sfzCc1Box, "Optional SFZ CC1 modulation value.");
         labelAndControl(sfzCc11Label, sfzCc11Box, "Optional SFZ CC11 expression value.");
         labelAndControl(baseNameLabel, baseNameBox, "Base filename used for rendered output files.");
-        labelAndControl(outputFormatLabel, outputFormatCombo, "Choose WAV, MP3, FLAC, or another available render format.");
-        labelAndControl(audioClipFormatLabel, audioClipFormatCombo, "Choose the saved media format for imported/recorded AudioClips. WAV and FLAC are lossless; MP3 and OGG use the Clip Quality setting.");
+        labelAndControl(outputFormatLabel, outputFormatCombo, "Choose WAV, MP3, FLAC, OGG, M4A, or another available render format.");
+        labelAndControl(audioClipFormatLabel, audioClipFormatCombo, "Choose the saved media format for imported/recorded AudioClips. WAV and FLAC are lossless; MP3, OGG, and M4A use the Clip Quality setting. External imports are normalized to project-safe WAV for reliable waveform editing.");
         labelAndControl(audioClipQualityLabel, audioClipQualityCombo, "Choose high-quality bitrate for compressed AudioClip files. Lossless formats ignore bitrate.");
         labelAndControl(sampleRateLabel, sampleRateCombo, "Choose the sample rate for audio renders.");
         labelAndControl(bitrateLabel, bitrateCombo, "Choose compressed-audio bitrate when the selected format uses one.");
@@ -12159,6 +13645,16 @@ namespace mw::gui
                 return;
             }
 
+            if (audioClipEditorWindow != nullptr)
+            {
+                requestCloseAudioClipEditorWindow(
+                    [continueClose]
+                    {
+                        juce::MessageManager::callAsync([continueClose] { (*continueClose)(); });
+                    });
+                return;
+            }
+
             if (sequenceThoughtsWindow != nullptr)
             {
                 if (auto* pendingClose = dynamic_cast<WindowPendingCloseHandler*>(sequenceThoughtsWindow->getContentComponent()))
@@ -12256,6 +13752,12 @@ namespace mw::gui
         if (audioRecorderWindow != nullptr)
         {
             closeAudioRecorderWindowNow();
+            ++closedCount;
+        }
+
+        if (audioClipEditorWindow != nullptr)
+        {
+            closeAudioClipEditorWindow();
             ++closedCount;
         }
 
@@ -12423,6 +13925,7 @@ namespace mw::gui
         auto noteHeader = area.removeFromTop(rowHeight);
         noteEditorLabel.setBounds(noteHeader.removeFromLeft(labelWidth));
         openPianoRollButton.setBounds(noteHeader.removeFromLeft(140).reduced(4, 2));
+        audioClipEditorButton.setBounds(noteHeader.removeFromLeft(145).reduced(4, 2));
         trackManagerButton.setBounds(noteHeader.removeFromLeft(130).reduced(4, 2));
         importAudioButton.setBounds(noteHeader.removeFromLeft(120).reduced(4, 2));
         recordAudioButton.setBounds(noteHeader.removeFromLeft(125).reduced(4, 2));
@@ -12705,6 +14208,7 @@ namespace mw::gui
         suppressDirtyTracking = true;
 
         finishClosingPianoRollWindow();
+        closeAudioClipEditorWindow();
         clearAudioRecordingSessionStaging(true);
 
         currentProject.reset();
@@ -12719,6 +14223,7 @@ namespace mw::gui
         audioRecordingTakeStopped = false;
         audioRecordingTakeDirty = false;
         trackManagerUndoStack.clear();
+        trackManagerRedoStack.clear();
         importSections.clear();
         activeImportSectionIndex = -1;
         sequenceColourOverrides.clear();
@@ -12952,6 +14457,7 @@ namespace mw::gui
                         logMessage(juce::String("WARNING: Missing AudioClip media: ") + absoluteMediaPath.string());
                 }
                 trackManagerUndoStack.clear();
+                trackManagerRedoStack.clear();
                 restoreSequencesFromProjectMetadata();
 
                 applyProjectUserSettingsToGui();
@@ -13474,6 +14980,8 @@ namespace mw::gui
         constexpr std::size_t maxUndoSteps = 10;
         if (trackManagerUndoStack.size() > maxUndoSteps)
             trackManagerUndoStack.erase(trackManagerUndoStack.begin());
+
+        trackManagerRedoStack.clear();
     }
 
     void MainComponent::undoTrackManagerEdit()
@@ -13484,8 +14992,27 @@ namespace mw::gui
             return;
         }
 
+        if (!currentProject)
+            return;
+
         auto state = std::move(trackManagerUndoStack.back());
         trackManagerUndoStack.pop_back();
+
+        TrackManagerUndoState redoState;
+        redoState.project = *currentProject;
+        sanitizeProjectForUndoStack(redoState.project);
+        redoState.importSections = importSections;
+        redoState.sequenceColourOverrides = sequenceColourOverrides;
+        redoState.activeImportSectionIndex = activeImportSectionIndex;
+        redoState.sequenceMapFirstIndex = sequenceMapFirstIndex;
+        redoState.sequenceMapStartBeat = sequenceMapStartBeat;
+        redoState.sequenceMapBeatWindow = sequenceMapBeatWindow;
+        redoState.label = state.label;
+
+        trackManagerRedoStack.push_back(std::move(redoState));
+        constexpr std::size_t maxRedoSteps = 10;
+        if (trackManagerRedoStack.size() > maxRedoSteps)
+            trackManagerRedoStack.erase(trackManagerRedoStack.begin());
 
         preserveCurrentVstAppliedStates(state.project, *currentProject);
         currentProject = state.project;
@@ -13524,6 +15051,75 @@ namespace mw::gui
 
         setProjectDirty();
         logMessage("Track Manager Undo restored: " + state.label);
+    }
+
+    void MainComponent::redoTrackManagerEdit()
+    {
+        if (trackManagerRedoStack.empty())
+        {
+            logMessage("Track Manager Redo: nothing to redo.");
+            return;
+        }
+
+        if (!currentProject)
+            return;
+
+        auto state = std::move(trackManagerRedoStack.back());
+        trackManagerRedoStack.pop_back();
+
+        TrackManagerUndoState undoState;
+        undoState.project = *currentProject;
+        sanitizeProjectForUndoStack(undoState.project);
+        undoState.importSections = importSections;
+        undoState.sequenceColourOverrides = sequenceColourOverrides;
+        undoState.activeImportSectionIndex = activeImportSectionIndex;
+        undoState.sequenceMapFirstIndex = sequenceMapFirstIndex;
+        undoState.sequenceMapStartBeat = sequenceMapStartBeat;
+        undoState.sequenceMapBeatWindow = sequenceMapBeatWindow;
+        undoState.label = state.label;
+
+        trackManagerUndoStack.push_back(std::move(undoState));
+        constexpr std::size_t maxUndoSteps = 10;
+        if (trackManagerUndoStack.size() > maxUndoSteps)
+            trackManagerUndoStack.erase(trackManagerUndoStack.begin());
+
+        preserveCurrentVstAppliedStates(state.project, *currentProject);
+        currentProject = state.project;
+        importSections = std::move(state.importSections);
+        sequenceColourOverrides = std::move(state.sequenceColourOverrides);
+        activeImportSectionIndex = state.activeImportSectionIndex;
+        sequenceMapFirstIndex = state.sequenceMapFirstIndex;
+        sequenceMapStartBeat = state.sequenceMapStartBeat;
+        sequenceMapBeatWindow = state.sequenceMapBeatWindow;
+        trackManagerMapStartBeatBox.setText(juce::String(sequenceMapStartBeat), juce::dontSendNotification);
+        trackManagerMapBeatWindowBox.setText(sequenceMapBeatWindow <= 0 ? juce::String("Full") : juce::String(sequenceMapBeatWindow), juce::dontSendNotification);
+
+        refreshTrackSelector();
+
+        if (currentProject && !currentProject->getTracks().empty())
+        {
+            const auto selectedId = std::clamp(trackCombo.getSelectedId(), 1, static_cast<int>(currentProject->getTracks().size()));
+            trackCombo.setSelectedId(selectedId, juce::sendNotification);
+        }
+
+        syncTrackInspectorFromSelection();
+        refreshNoteEditor();
+        syncPianoRollFromSelectedTrack();
+        updateTrackSummary(*currentProject);
+        refreshTrackManagerText();
+        refreshMainSequenceSelector();
+        refreshActiveSequenceThoughtsEditor();
+        updateRenderTargetLabel();
+        if (trackManagerContent != nullptr)
+        {
+            if (auto* content = dynamic_cast<TrackManagerWindowContent*>(trackManagerContent.get()))
+                content->refreshSequenceMap();
+            else
+                trackManagerContent->repaint();
+        }
+
+        setProjectDirty();
+        logMessage("Track Manager Redo restored: " + state.label);
     }
 
     void MainComponent::startTrackManagerEditSession()
@@ -13922,6 +15518,7 @@ namespace mw::gui
                     clip.id = currentProject->allocateNextAudioClipId();
                     clip.trackIndex = duplicatedTrackNumber - 1;
                     clip.name += " Copy";
+                    mw::core::normalizeAudioClipTrim(clip);
                     currentProject->getAudioClips().push_back(std::move(clip));
                 }
             }
@@ -14080,7 +15677,7 @@ namespace mw::gui
         logMessage("Removed track: " + removedName + (removedAudioClipTrack ? " (AudioClip metadata removed; media file left in project folder)." : ""));
     }
 
-    void MainComponent::renameSelectedTrack()
+    void MainComponent::renameSelectedTrack(std::function<void()> onApplied)
     {
         if (!currentProject)
         {
@@ -14111,7 +15708,7 @@ namespace mw::gui
         alert->enterModalState(
             true,
             juce::ModalCallbackFunction::create(
-                [this, alert, index](int result)
+                [this, alert, index, onApplied = std::move(onApplied)](int result) mutable
                 {
                     std::unique_ptr<juce::AlertWindow> cleanup(alert);
 
@@ -14129,7 +15726,7 @@ namespace mw::gui
                         return;
                     }
 
-                    const auto applyRename = [this, index, newName]
+                    const auto applyRename = [this, index, newName, onApplied]
                     {
                         if (!currentProject)
                             return;
@@ -14153,6 +15750,9 @@ namespace mw::gui
                         updateTrackSummary(*currentProject);
                         setProjectDirty();
                         logMessage("Renamed track to: " + newName);
+
+                        if (onApplied)
+                            onApplied();
                     };
 
                     bool duplicateName = false;
@@ -14574,11 +16174,23 @@ void MainComponent::importMusicXmlOnly()
                 logMessage(juce::String("ERROR: Could not commit staged AudioClip media during project save: ") + result.message);
                 return false;
             }
+            if (result.savedFormat != request.savedFormat)
+            {
+                logMessage(
+                    juce::String("AudioClip media requested ")
+                    + mw::core::audioClipSavedFormatToString(request.savedFormat).c_str()
+                    + " but was saved as readable "
+                    + mw::core::audioClipSavedFormatToString(result.savedFormat).c_str()
+                    + " for waveform/trim compatibility."
+                );
+            }
 
             const auto stagedPath = clip.projectRelativePath;
             const auto previousOriginalSourcePath = clip.originalSourcePath;
+            const bool hadActiveTrimBeforeCommit = mw::core::audioClipHasActiveTrim(clip);
             clip.name = safeClipDisplayName(result.absolutePath).toStdString();
             clip.projectRelativePath = result.relativePath;
+            clip.savedFormat = result.savedFormat;
             clip.originalSourcePath = isImportedClip && !previousOriginalSourcePath.empty() ? previousOriginalSourcePath : result.absolutePath;
             clip.sizeBytes = result.sizeBytes;
             if (result.durationSamples > 0)
@@ -14589,6 +16201,12 @@ void MainComponent::importMusicXmlOnly()
                 clip.channelCount = result.channelCount;
             if (result.bitDepth > 0)
                 clip.bitDepth = result.bitDepth;
+            if (!hadActiveTrimBeforeCommit)
+            {
+                clip.sourceTrimStartSamples = 0;
+                clip.sourceTrimEndSamples = clip.durationSamples;
+            }
+            mw::core::normalizeAudioClipTrim(clip);
             clip.missingMedia = false;
 
             std::error_code removeError;
@@ -14762,6 +16380,7 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
                 track.setName(clip.name);
         }
 
+        mw::core::normalizeAudioClipTrim(clip);
         currentProject->getAudioClips().push_back(std::move(clip));
         normalizeEmptySequencesAfterMembershipChange();
         syncSequencesToProjectMetadata();
@@ -14790,6 +16409,9 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
                     << " | Seq #" << clip.sequenceNumber
                     << " | " << mw::core::audioClipSavedFormatToString(clip.savedFormat).c_str()
                     << " | " << formatSecondsFromSamples(clip.durationSamples, clip.sampleRate)
+                    << (mw::core::audioClipHasActiveTrim(clip)
+                        ? (juce::String(" | Trim ") + formatSecondsFromSamples(mw::core::audioClipTrimmedDurationSamples(clip), clip.sampleRate))
+                        : juce::String(" | Trim full"))
                     << " | " << formatBytes(clip.sizeBytes)
                     << (clip.missingMedia ? " | MISSING MEDIA" : "")
                     << "\n";
@@ -14819,6 +16441,9 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
                     << " AudioClip media #" << clip.id << ": " << clip.name
                     << " | " << mw::core::audioClipSourceTypeToString(clip.sourceType).c_str()
                     << " | " << formatSecondsFromSamples(clip.durationSamples, clip.sampleRate)
+                    << (mw::core::audioClipHasActiveTrim(clip)
+                        ? (juce::String(" | Trim ") + formatSecondsFromSamples(mw::core::audioClipTrimmedDurationSamples(clip), clip.sampleRate))
+                        : juce::String(" | Trim full"))
                     << " | " << formatBytes(clip.sizeBytes)
                     << (clip.missingMedia ? " | MISSING MEDIA" : "")
                     << "\n";
@@ -14852,7 +16477,7 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
         activeFileChooser = std::make_unique<juce::FileChooser>(
             "Import Audio",
             juce::File(mw::app::AppPaths::inputFolder().string()),
-            "*.wav;*.mp3;*.flac;*.ogg"
+            "*.wav;*.mp3;*.flac;*.ogg;*.m4a"
         );
 
         activeFileChooser->launchAsync(
@@ -14864,37 +16489,87 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
                     return;
 
                 const auto sourcePath = std::filesystem::path(file.getFullPathName().toStdString());
-                // New imports stage first for both saved and unsaved projects.
+                const auto currentProjectFolder = currentProjectFilePath && !currentProjectFilePath->empty()
+                    ? getCurrentProjectFolder()
+                    : std::filesystem::path{};
+                const auto projectImportedFolder = currentProjectFolder.empty()
+                    ? std::filesystem::path{}
+                    : currentProjectFolder / "input" / "audio" / "imported";
+                const bool sourceAlreadyInProjectImportedFolder = !projectImportedFolder.empty()
+                    && pathIsInsideFolder(sourcePath, projectImportedFolder);
+
+                // New external imports stage first for both saved and unsaved projects.
                 // Save Project is the only point that commits newly attached
-                // imported AudioClip media into input/audio/imported. This keeps
-                // Discard from leaving unreferenced files inside saved project
-                // folders and prevents a later project from reusing old staged
-                // media by accident.
+                // imported AudioClip media into input/audio/imported. If the user
+                // deliberately selects media that is already inside the current
+                // project's imported-audio folder, reuse that project media instead
+                // of staging and recommitting a duplicate copy.
                 const auto mediaBaseFolder = getAudioRecordingSessionFolder();
 
-                mw::audio::AudioClipImportRequest request;
-                request.sourcePath = sourcePath;
-                request.projectFolder = mediaBaseFolder;
-                request.ffmpegExePath = std::filesystem::path(ffmpegPathBox.getText().toStdString());
-                request.savedFormat = getSelectedAudioClipFormat();
-                request.qualityKbps = getSelectedAudioClipQualityKbps();
-                request.channelCount = channelsCombo.getSelectedId() == 1 ? 1 : 2;
-                request.imported = true;
-                request.preferredName = sourcePath.stem().string();
+                mw::audio::AudioClipImportResult result;
+                bool usingExistingProjectMedia = false;
 
-                const auto result = mw::audio::AudioClipImporter::importToProject(request);
-                if (!result.success)
+                bool shouldNormalizeToNewStagedMedia = !sourceAlreadyInProjectImportedFolder;
+
+                if (sourceAlreadyInProjectImportedFolder)
                 {
-                    logMessage(juce::String("ERROR: ") + result.message);
-                    return;
+                    const auto info = readAudioFileBasicInfo(sourcePath);
+                    if (!info.valid)
+                    {
+                        logMessage("Import Audio: selected project media has no readable waveform/duration metadata, so a normalized staged copy will be created instead of reusing it.");
+                        shouldNormalizeToNewStagedMedia = true;
+                    }
+                    else
+                    {
+                        std::error_code relativeError;
+                        result.success = true;
+                        result.absolutePath = sourcePath;
+                        result.relativePath = std::filesystem::relative(sourcePath, currentProjectFolder, relativeError);
+                        if (relativeError)
+                            result.relativePath = sourcePath;
+                        result.durationSamples = info.durationSamples;
+                        result.sampleRate = info.sampleRate;
+                        result.channelCount = info.channelCount;
+                        result.bitDepth = info.bitDepth;
+                        result.sizeBytes = info.sizeBytes;
+                        result.savedFormat = audioClipSavedFormatForMediaPath(sourcePath);
+                        result.message = "Reused existing project AudioClip media: " + result.relativePath.string();
+                        usingExistingProjectMedia = true;
+                    }
                 }
 
-                if (!pathIsInsideFolder(result.absolutePath, mediaBaseFolder))
+                if (shouldNormalizeToNewStagedMedia)
                 {
-                    std::error_code cleanupError;
-                    std::filesystem::remove(result.absolutePath, cleanupError);
-                    logMessage("ERROR: Audio import refused to attach because the staged file was not created in the current AudioClip staging session.");
-                    return;
+                    mw::audio::AudioClipImportRequest request;
+                    request.sourcePath = sourcePath;
+                    request.projectFolder = mediaBaseFolder;
+                    request.ffmpegExePath = std::filesystem::path(ffmpegPathBox.getText().toStdString());
+                    request.savedFormat = mw::core::AudioClipSavedFormat::Wav;
+                    request.qualityKbps = getSelectedAudioClipQualityKbps();
+                    request.channelCount = channelsCombo.getSelectedId() == 1 ? 1 : 2;
+                    request.imported = true;
+                    // External imports are normalized into a fresh staged WAV
+                    // project-media file no matter what container/codec the user
+                    // selected.  The original selected file stays exactly where
+                    // it was and is only remembered as originalSourcePath.
+                    request.forceTranscode = true;
+                    request.fallbackToReadableWav = true;
+                    request.preferredName = sourcePath.stem().string();
+
+                    result = mw::audio::AudioClipImporter::importToProject(request);
+                    if (!result.success)
+                    {
+                        logMessage(juce::String("ERROR: ") + result.message);
+                        return;
+                    }
+
+                    if (!pathIsInsideFolder(result.absolutePath, mediaBaseFolder))
+                    {
+                        std::error_code cleanupError;
+                        std::filesystem::remove(result.absolutePath, cleanupError);
+                        logMessage("ERROR: Audio import refused to attach because the staged file was not created in the current AudioClip staging session.");
+                        return;
+                    }
                 }
 
                 int trackIndex = getSelectedTrackIndex();
@@ -14905,8 +16580,11 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
                     trackIndex = createAudioClipTrackForNewClip(juce::String(sourcePath.stem().string()));
                     if (trackIndex < 0)
                     {
-                        std::error_code cleanupError;
-                        std::filesystem::remove(result.absolutePath, cleanupError);
+                        if (!usingExistingProjectMedia)
+                        {
+                            std::error_code cleanupError;
+                            std::filesystem::remove(result.absolutePath, cleanupError);
+                        }
                         return;
                     }
                 }
@@ -14955,12 +16633,14 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
                 clip.trackIndex = trackIndex;
                 clip.sequenceNumber = sequenceNumber;
                 clip.sourceType = mw::core::AudioClipSourceType::Imported;
-                clip.savedFormat = getSelectedAudioClipFormat();
-                // Newly imported AudioClip media stays in the active staging
+                clip.savedFormat = result.savedFormat;
+                // Newly imported external media stays in the active staging
                 // session until Save Project commits it into input/audio/imported.
                 // The absolute staged path keeps preview/render working before
-                // the project is saved again.
-                clip.projectRelativePath = result.absolutePath;
+                // the project is saved again. Existing current-project imported
+                // media is stored as a project-relative path immediately so Save
+                // Project does not create a duplicate copy of the same file.
+                clip.projectRelativePath = usingExistingProjectMedia ? result.relativePath : result.absolutePath;
                 clip.originalSourcePath = sourcePath;
                 clip.startTick = section.startTick;
                 clip.durationSamples = result.durationSamples;
@@ -14980,7 +16660,10 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
                 updateOpenVstPluginButtonState();
 
                 logMessage(juce::String("Imported AudioClip to track #") + juce::String(trackIndex + 1) + " / seq #" + juce::String(sequenceNumber) + ": " + result.absolutePath.string());
-                logMessage("Imported AudioClip media was staged in the current AudioClip session. Save Project will move it into input/audio/imported; Discard will remove the staged copy.");
+                if (usingExistingProjectMedia)
+                    logMessage("Imported AudioClip media already lives in this project's input/audio/imported folder, so the project reused it without creating another copy.");
+                else
+                    logMessage("Imported AudioClip media was staged in the current AudioClip session. Save Project will move it into input/audio/imported; Discard will remove the staged copy.");
                 logMessage("Imported AudioClip track selected. Assign a Supported Effect in VST Effect, then use Enable VST Effects to process it during preview/export.");
             }
         );
@@ -15934,6 +17617,10 @@ void MainComponent::openAudioRecorderWindow()
                 formatText = "OGG";
                 bitrateText = juce::String(bitrate) + " kbps";
                 break;
+            case 5:
+                formatText = "M4A";
+                bitrateText = juce::String(bitrate) + " kbps";
+                break;
             case 1:
             default:
             {
@@ -16491,6 +18178,7 @@ void MainComponent::openAudioRecorderWindow()
         }
 
         setPianoRollPreviewNoteMapFromTracks(job.project.getTracks());
+        setPianoRollPreviewAudioClipMapFromClips(job.project.getAudioClips());
         std::filesystem::create_directories(mw::app::AppPaths::previewFolder());
         job.exportFolder = mw::app::AppPaths::previewFolder();
         job.baseFileName = "preview_track_" + std::to_string(index + 1);
@@ -16605,6 +18293,7 @@ void MainComponent::openAudioRecorderWindow()
         job.project.setAudioClips(std::move(sequenceAudioClips));
         job.project.setSequences({});
         setPianoRollPreviewNoteMapFromTracks(job.project.getTracks());
+        setPianoRollPreviewAudioClipMapFromClips(job.project.getAudioClips());
         std::filesystem::create_directories(mw::app::AppPaths::previewFolder());
         job.exportFolder = mw::app::AppPaths::previewFolder();
         job.baseFileName = "preview_seq_" + std::to_string(sequenceNumber);
@@ -16650,6 +18339,7 @@ void MainComponent::openAudioRecorderWindow()
 
         auto job = createRenderJobSnapshot();
         setPianoRollPreviewNoteMapFromTracks(job.project.getTracks());
+        setPianoRollPreviewAudioClipMapFromClips(job.project.getAudioClips());
         std::filesystem::create_directories(mw::app::AppPaths::previewFolder());
         job.exportFolder = mw::app::AppPaths::previewFolder();
         job.baseFileName = "preview_project";
@@ -16746,6 +18436,7 @@ mw::audio::RenderJob MainComponent::createRenderJobSnapshot() const
             case 2: job.outputFormat = mw::audio::RenderOutputFormat::Flac; break;
             case 3: job.outputFormat = mw::audio::RenderOutputFormat::Mp3; break;
             case 4: job.outputFormat = mw::audio::RenderOutputFormat::Ogg; break;
+            case 5: job.outputFormat = mw::audio::RenderOutputFormat::M4a; break;
             case 1:
             default: job.outputFormat = mw::audio::RenderOutputFormat::Wav; break;
         }
@@ -16800,6 +18491,14 @@ mw::audio::RenderJob MainComponent::createRenderJobSnapshot() const
             const auto& notes = track.getNotes();
             lastPianoRollPreviewNotes.insert(lastPianoRollPreviewNotes.end(), notes.begin(), notes.end());
         }
+    }
+
+    void MainComponent::setPianoRollPreviewAudioClipMapFromClips(const std::vector<mw::core::AudioClip>& clips)
+    {
+        lastPianoRollPreviewAudioClips = clips;
+
+        for (auto& clip : lastPianoRollPreviewAudioClips)
+            mw::core::normalizeAudioClipTrim(clip);
     }
 
 void MainComponent::refreshSoundFontList()
@@ -19097,6 +20796,12 @@ void MainComponent::refreshTrackSelector()
 
         if (track.isAudioClipTrack())
         {
+            const auto instrumentBeforeApply = track.getInstrument();
+            const auto effectsBeforeApply = track.getVstEffects();
+            const bool mutedBeforeApply = track.getMuted();
+            const bool soloBeforeApply = track.getSolo();
+            const auto volumeBeforeApply = track.getMixerSettings().volume;
+
             track.setInstrumentAssignment(mw::core::makeCustomAudioInstrumentAssignment());
             track.setMuted(muteToggle.getToggleState());
             track.setSolo(soloToggle.getToggleState());
@@ -19113,8 +20818,18 @@ void MainComponent::refreshTrackSelector()
             // plugin parameter state only.
             applySelectedTrackVstEffectSlot();
 
-            setProjectDirty();
-            logMessage("Applied AudioClip track settings. Custom Audio is fixed for AudioClip tracks. VST Effect assignment, Enable, and Bypass state were applied for offline preview/export.");
+            const bool trackSettingsChanged = !instrumentAssignmentsEqual(instrumentBeforeApply, track.getInstrument())
+                || !vstEffectsAssignmentsEqual(effectsBeforeApply, track.getVstEffects())
+                || mutedBeforeApply != track.getMuted()
+                || soloBeforeApply != track.getSolo()
+                || std::abs(volumeBeforeApply - track.getMixerSettings().volume) > 0.0001f;
+
+            if (trackSettingsChanged)
+            {
+                setProjectDirty();
+                logMessage("Applied AudioClip track settings. Custom Audio is fixed for AudioClip tracks. VST Effect assignment, Enable, and Bypass state were applied for offline preview/export.");
+            }
+
             return;
         }
 
@@ -22857,6 +24572,521 @@ void MainComponent::selectTrackFromManagerPage()
         logMessage(message);
     }
 
+
+    bool MainComponent::applyAudioClipEditorTrimMetadata(int clipId, long long requestedStartSamples, long long requestedEndSamples)
+    {
+        if (!currentProject || clipId <= 0)
+            return false;
+
+        if (requestedEndSamples <= requestedStartSamples)
+        {
+            logMessage("AudioClip Editor: Trim End must be after Trim Start.");
+            return false;
+        }
+
+        for (auto& clip : currentProject->getAudioClips())
+        {
+            if (clip.id != clipId)
+                continue;
+
+            if (clip.durationSamples <= 0 || clip.sampleRate <= 0.0)
+            {
+                logMessage("AudioClip Editor: selected AudioClip has no valid source duration to trim.");
+                return false;
+            }
+
+            const auto beforeStart = mw::core::audioClipTrimStartSamples(clip);
+            const auto beforeEnd = mw::core::audioClipTrimEndSamples(clip);
+
+            clip.sourceTrimStartSamples = requestedStartSamples;
+            clip.sourceTrimEndSamples = requestedEndSamples;
+            mw::core::normalizeAudioClipTrim(clip);
+
+            const auto afterStart = mw::core::audioClipTrimStartSamples(clip);
+            const auto afterEnd = mw::core::audioClipTrimEndSamples(clip);
+
+            if (afterEnd <= afterStart)
+            {
+                clip.sourceTrimStartSamples = beforeStart;
+                clip.sourceTrimEndSamples = beforeEnd;
+                logMessage("AudioClip Editor: trim range collapsed to zero length and was not applied.");
+                return false;
+            }
+
+            updateTrackSummary(*currentProject);
+            refreshTrackManagerText(false);
+            setProjectDirty();
+
+            juce::String message;
+            message << "AudioClip Editor: updated non-destructive trim metadata for AudioClip media #"
+                    << clip.id
+                    << " from " << formatSecondsFromSamples(beforeStart, clip.sampleRate)
+                    << "-" << formatSecondsFromSamples(beforeEnd, clip.sampleRate)
+                    << " to " << formatSecondsFromSamples(afterStart, clip.sampleRate)
+                    << "-" << formatSecondsFromSamples(afterEnd, clip.sampleRate)
+                    << ".";
+            logMessage(message);
+            return true;
+        }
+
+        logMessage("AudioClip Editor: could not find the selected AudioClip media to trim.");
+        return false;
+    }
+
+    bool MainComponent::resetAudioClipEditorTrimMetadata(int clipId)
+    {
+        if (!currentProject || clipId <= 0)
+            return false;
+
+        for (auto& clip : currentProject->getAudioClips())
+        {
+            if (clip.id != clipId)
+                continue;
+
+            if (clip.durationSamples <= 0)
+            {
+                logMessage("AudioClip Editor: selected AudioClip has no valid source duration to reset.");
+                return false;
+            }
+
+            clip.sourceTrimStartSamples = 0;
+            clip.sourceTrimEndSamples = clip.durationSamples;
+            mw::core::normalizeAudioClipTrim(clip);
+
+            updateTrackSummary(*currentProject);
+            refreshTrackManagerText(false);
+            setProjectDirty();
+
+            logMessage(juce::String("AudioClip Editor: reset non-destructive trim metadata for AudioClip media #") + juce::String(clip.id) + " to full source.");
+            return true;
+        }
+
+        logMessage("AudioClip Editor: could not find the selected AudioClip media to reset trim.");
+        return false;
+    }
+
+    void MainComponent::previewAudioClipEditorClip(int clipId, long long requestedStartSamples, long long requestedEndSamples, bool playFullSource)
+    {
+        if (renderingInProgress)
+        {
+            logMessage("AudioClip Editor Preview: render/preview already in progress.");
+            return;
+        }
+
+        if (!currentProject || clipId <= 0)
+        {
+            logMessage("AudioClip Editor Preview: no AudioClip selected.");
+            return;
+        }
+
+        const mw::core::AudioClip* sourceClip = nullptr;
+        for (const auto& clip : currentProject->getAudioClips())
+        {
+            if (clip.id == clipId)
+            {
+                sourceClip = &clip;
+                break;
+            }
+        }
+
+        if (sourceClip == nullptr)
+        {
+            logMessage("AudioClip Editor Preview: selected AudioClip media could not be found.");
+            return;
+        }
+
+        if (sourceClip->durationSamples <= 0 || sourceClip->sampleRate <= 0.0)
+        {
+            logMessage("AudioClip Editor Preview: selected AudioClip has no valid source duration.");
+            return;
+        }
+
+        auto resolvePreviewSourcePath = [this](const mw::core::AudioClip& clip) -> std::filesystem::path
+        {
+            if (!clip.projectRelativePath.empty())
+            {
+                if (clip.projectRelativePath.is_absolute())
+                {
+                    if (std::filesystem::exists(clip.projectRelativePath))
+                        return clip.projectRelativePath;
+                }
+                else
+                {
+                    const auto projectFolder = getCurrentProjectFolder();
+                    if (!projectFolder.empty())
+                    {
+                        const auto absolute = (projectFolder / clip.projectRelativePath).lexically_normal();
+                        if (std::filesystem::exists(absolute))
+                            return absolute;
+                    }
+
+                    if (std::filesystem::exists(clip.projectRelativePath))
+                        return clip.projectRelativePath;
+                }
+            }
+
+            // Last-resort fallback only.  Normal imported AudioClip preview should use
+            // the normalized project/staged media, not the external original source.
+            if (!clip.originalSourcePath.empty() && std::filesystem::exists(clip.originalSourcePath))
+                return clip.originalSourcePath;
+
+            return {};
+        };
+
+        const auto sourcePath = resolvePreviewSourcePath(*sourceClip);
+        if (sourcePath.empty())
+        {
+            logMessage("AudioClip Editor Preview: selected AudioClip media file could not be resolved.");
+            return;
+        }
+
+        auto clipCopy = *sourceClip;
+        if (playFullSource)
+        {
+            clipCopy.sourceTrimStartSamples = 0;
+            clipCopy.sourceTrimEndSamples = clipCopy.durationSamples;
+        }
+        else
+        {
+            clipCopy.sourceTrimStartSamples = requestedStartSamples;
+            clipCopy.sourceTrimEndSamples = requestedEndSamples;
+        }
+        mw::core::normalizeAudioClipTrim(clipCopy);
+
+        const auto trimStartSamples = mw::core::audioClipTrimStartSamples(clipCopy);
+        const auto trimDurationSamples = mw::core::audioClipTrimmedDurationSamples(clipCopy);
+        if (trimDurationSamples <= 0)
+        {
+            logMessage("AudioClip Editor Preview: requested trim range is empty.");
+            return;
+        }
+
+        cleanupPianoRollPreviewFiles();
+        lastPianoRollPreviewScope = 4;
+        lastAudioClipEditorPreviewClipId = clipId;
+        lastAudioClipEditorPreviewStartSamples = trimStartSamples;
+        lastAudioClipEditorPreviewEndSamples = mw::core::audioClipTrimEndSamples(clipCopy);
+        lastAudioClipEditorPreviewFullSource = playFullSource;
+        lastPianoRollPreviewNotes.clear();
+        lastPianoRollPreviewAudioClips.clear();
+
+        const auto previewFolder = mw::app::AppPaths::previewFolder();
+        std::error_code folderError;
+        std::filesystem::create_directories(previewFolder, folderError);
+        if (folderError)
+        {
+            logMessage("AudioClip Editor Preview: could not create preview temp folder: " + juce::String(folderError.message()));
+            return;
+        }
+
+        // Keep the AudioClip Editor preview WAV basename intentionally short.
+        // The Preview Player currently uses Windows MCI for WAV playback, and MCI can
+        // reject otherwise-valid WAV files when the generated filename/path is too long.
+        // Track Manager previews already use short preview filenames and open reliably.
+        const auto outputPath = previewFolder / (playFullSource ? "acef.wav" : "acet.wav");
+
+        mw::audio::FfmpegTrimRequest trimRequest;
+        trimRequest.ffmpegExePath = std::filesystem::path(ffmpegPathBox.getText().toStdString());
+        trimRequest.inputPath = sourcePath;
+        trimRequest.outputWavPath = outputPath;
+        trimRequest.trimStartSeconds = static_cast<double>(trimStartSamples) / clipCopy.sampleRate;
+        trimRequest.trimDurationSeconds = static_cast<double>(trimDurationSamples) / clipCopy.sampleRate;
+        trimRequest.outputChannels = channelsCombo.getSelectedId() == 1 ? 1 : 2;
+        trimRequest.outputSampleRate = 44100;
+        trimRequest.mciCompatibleWav = true;
+
+        const auto tempo = pianoRollBpmBox.getText().getDoubleValue() > 0.0
+            ? pianoRollBpmBox.getText().getDoubleValue()
+            : static_cast<double>(std::max(1, currentProject->getTempoBpm()));
+        const auto fallbackPreviewBeats = std::max(0.01, (static_cast<double>(trimDurationSamples) / clipCopy.sampleRate) * tempo / 60.0);
+
+        juce::String label;
+        label << "AudioClip Editor " << (playFullSource ? "full-source" : "trim")
+              << " preview for media #" << clipId;
+
+        if (renderThread.joinable())
+            renderThread.join();
+
+        cancelRenderRequested = false;
+        setRenderingState(true);
+        logMessage(juce::String("AudioClip Editor Preview started: ") + label);
+
+        renderThread = std::thread(
+            [this, trimRequest, outputPath, clipCopy, label, tempo, fallbackPreviewBeats]
+            {
+                const auto trimResult = mw::audio::ExternalFfmpegEncoder::trimToWav(trimRequest);
+
+                juce::MessageManager::callAsync(
+                    [this, trimResult, outputPath, clipCopy, label, tempo, fallbackPreviewBeats]
+                    {
+                        logMessage("FFmpeg AudioClip Editor preview trim command: " + trimResult.commandLine);
+                        logMessage(trimResult.message);
+
+                        if (!trimResult.success || !std::filesystem::exists(outputPath))
+                        {
+                            logMessage(juce::String("AudioClip Editor Preview failed (") + label + "): could not create preview WAV in workspace/temp.");
+                            setRenderingState(false);
+                            return;
+                        }
+
+                        generatedPreviewFiles.clear();
+                        generatedPreviewFiles.push_back(outputPath);
+
+                        lastPianoRollPreviewWavPath = outputPath;
+                        lastPianoRollPreviewTempoBpm = tempo;
+                        const auto renderedPreviewSeconds = getAudioFileDurationSeconds(outputPath);
+                        lastPianoRollPreviewDurationBeats = renderedPreviewSeconds > 0.0
+                            ? std::max(0.01, renderedPreviewSeconds * tempo / 60.0)
+                            : fallbackPreviewBeats;
+                        pianoRollPreviewPaused = false;
+                        pendingPianoRollPreviewStartSeconds = 0.0;
+
+                        auto previewMapClip = clipCopy;
+                        previewMapClip.projectRelativePath = outputPath;
+                        previewMapClip.originalSourcePath.clear();
+                        const auto info = readAudioFileBasicInfo(outputPath);
+                        if (info.valid)
+                        {
+                            previewMapClip.durationSamples = info.durationSamples;
+                            previewMapClip.sampleRate = info.sampleRate;
+                            previewMapClip.channelCount = info.channelCount;
+                            previewMapClip.bitDepth = info.bitDepth;
+                            previewMapClip.sizeBytes = info.sizeBytes;
+                        }
+                        previewMapClip.startTick = 0;
+                        previewMapClip.sourceTrimStartSamples = 0;
+                        previewMapClip.sourceTrimEndSamples = previewMapClip.durationSamples;
+                        mw::core::normalizeAudioClipTrim(previewMapClip);
+                        lastPianoRollPreviewAudioClips = { previewMapClip };
+
+                        openPianoRollPreviewPlayerWindow();
+                        playPianoRollPreviewFile(lastPianoRollPreviewWavPath);
+                        logMessage("Opened AudioClip Editor Preview Player for: " + outputPath.string());
+                        setRenderingState(false);
+                    }
+                );
+            }
+        );
+    }
+
+    void MainComponent::stopAudioClipEditorPreview()
+    {
+#if JUCE_WINDOWS
+        mciSendStringW(L"stop PoorMansStudioPianoRollPreview", nullptr, 0, nullptr);
+        mciSendStringW(L"close PoorMansStudioPianoRollPreview", nullptr, 0, nullptr);
+        pianoRollPreviewPaused = false;
+        pendingPianoRollPreviewStartSeconds = 0.0;
+        pianoRoll.stopPreviewPlayhead();
+        logMessage("Stopped AudioClip Editor preview playback.");
+#else
+        pianoRollPreviewPaused = false;
+        pendingPianoRollPreviewStartSeconds = 0.0;
+        pianoRoll.stopPreviewPlayhead();
+        logMessage("Embedded AudioClip Editor preview playback is currently only available on Windows.");
+#endif
+    }
+
+    void MainComponent::requestCloseAudioClipEditorWindow(std::function<void()> afterClosed)
+    {
+        auto closeAction = [this, afterClosed = std::move(afterClosed)]() mutable
+        {
+            if (lastPianoRollPreviewScope == 4)
+                stopAudioClipEditorPreview();
+
+            if (audioClipEditorWindow != nullptr)
+            {
+                audioClipEditorWindow->setVisible(false);
+                audioClipEditorWindow->setContentOwned(nullptr, false);
+
+                juce::MessageManager::callAsync(
+                    [this, afterClosed = std::move(afterClosed)]() mutable
+                    {
+                        audioClipEditorWindow.reset();
+                        audioClipEditorContent.reset();
+                        audioClipEditorOpenTrackIndex = -1;
+
+                        if (afterClosed)
+                            afterClosed();
+                    }
+                );
+                return;
+            }
+
+            audioClipEditorContent.reset();
+            audioClipEditorOpenTrackIndex = -1;
+            if (afterClosed)
+                afterClosed();
+        };
+
+        if (auto* pendingClose = dynamic_cast<WindowPendingCloseHandler*>(audioClipEditorContent.get()))
+        {
+            static_cast<void>(pendingClose->requestCloseWithPendingPrompt(std::move(closeAction)));
+            return;
+        }
+
+        closeAction();
+    }
+
+    void MainComponent::closeAudioClipEditorWindow()
+    {
+        if (lastPianoRollPreviewScope == 4)
+            stopAudioClipEditorPreview();
+
+        if (audioClipEditorWindow != nullptr)
+        {
+            audioClipEditorWindow->setVisible(false);
+            audioClipEditorWindow->setContentOwned(nullptr, false);
+            audioClipEditorWindow.reset();
+        }
+
+        audioClipEditorContent.reset();
+        audioClipEditorOpenTrackIndex = -1;
+    }
+
+    void MainComponent::openAudioClipEditorWindow()
+    {
+        if (!currentProject)
+        {
+            logMessage("AudioClip Editor: no project loaded.");
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::InfoIcon,
+                "AudioClip Editor",
+                "Open or create a project, then select an AudioClip track."
+            );
+            return;
+        }
+
+        const auto trackIndex = getSelectedTrackIndex();
+        if (trackIndex < 0 || trackIndex >= static_cast<int>(currentProject->getTracks().size()))
+        {
+            logMessage("AudioClip Editor: no valid track selected.");
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::InfoIcon,
+                "AudioClip Editor",
+                "Select an AudioClip track before opening the AudioClip Editor."
+            );
+            return;
+        }
+
+        const auto& track = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)];
+        if (!track.isAudioClipTrack())
+        {
+            logMessage("AudioClip Editor: selected track is MIDI. Use Piano Roll for MIDI tracks.");
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::InfoIcon,
+                "AudioClip Editor",
+                "AudioClip Editor is for AudioClip tracks. Use Piano Roll for MIDI tracks."
+            );
+            return;
+        }
+
+        std::vector<mw::core::AudioClip> clipsForTrack;
+        for (const auto& clip : currentProject->getAudioClips())
+        {
+            if (clip.trackIndex == trackIndex)
+                clipsForTrack.push_back(clip);
+        }
+
+        if (clipsForTrack.empty())
+        {
+            logMessage("AudioClip Editor: selected AudioClip track has no attached media.");
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::InfoIcon,
+                "AudioClip Editor",
+                "The selected AudioClip track has no attached AudioClip media yet."
+            );
+            return;
+        }
+
+        if (audioClipEditorWindow != nullptr && audioClipEditorOpenTrackIndex == trackIndex)
+        {
+            audioClipEditorWindow->toFront(true);
+            return;
+        }
+
+        if (audioClipEditorWindow != nullptr)
+        {
+            requestCloseAudioClipEditorWindow([this] { openAudioClipEditorWindow(); });
+            return;
+        }
+
+        auto closeWindow = [this]
+        {
+            requestCloseAudioClipEditorWindow();
+        };
+
+        auto applyTrim = [this](int clipId, long long requestedStartSamples, long long requestedEndSamples)
+        {
+            return applyAudioClipEditorTrimMetadata(clipId, requestedStartSamples, requestedEndSamples);
+        };
+
+        auto resetTrim = [this](int clipId)
+        {
+            return resetAudioClipEditorTrimMetadata(clipId);
+        };
+
+        auto previewClip = [this](int clipId, long long requestedStartSamples, long long requestedEndSamples, bool playFullSource)
+        {
+            previewAudioClipEditorClip(clipId, requestedStartSamples, requestedEndSamples, playFullSource);
+        };
+
+        auto stopPreview = [this]
+        {
+            stopAudioClipEditorPreview();
+        };
+
+        audioClipEditorContent = std::make_unique<AudioClipEditorWindowContent>(
+            *currentProject,
+            trackIndex,
+            clipsForTrack,
+            currentProjectFolderPath,
+            applyTrim,
+            resetTrim,
+            previewClip,
+            stopPreview,
+            closeWindow
+        );
+
+        auto* window = new PianoRollDocumentWindow("AudioClip Editor", closeWindow);
+        applyPoorMansStudioCustomTitleBar(*window);
+        window->setResizable(true, true);
+        window->setResizeLimits(760, 620, 1800, 1200);
+        window->setContentNonOwned(audioClipEditorContent.get(), true);
+        window->centreWithSize(980, 780);
+        window->setVisible(true);
+        applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::AudioClipEditor);
+
+        audioClipEditorWindow.reset(window);
+        audioClipEditorOpenTrackIndex = trackIndex;
+        logMessage("Opened AudioClip Editor for " + getTrackDisplayName(trackIndex) + ".");
+    }
+
+    void MainComponent::openSelectedTrackInAudioClipEditorFromManager()
+    {
+        if (!currentProject)
+        {
+            logMessage("Track Manager: no project loaded.");
+            return;
+        }
+
+        auto trackNumber = trackManagerSelectBox.getText().getIntValue();
+
+        if (trackNumber <= 0)
+            trackNumber = trackCombo.getSelectedId();
+
+        const auto maxTrack = static_cast<int>(currentProject->getTracks().size());
+
+        if (trackNumber <= 0 || trackNumber > maxTrack)
+        {
+            logMessage("Track Manager: select a valid track before opening AudioClip Editor.");
+            return;
+        }
+
+        trackManagerSelectBox.setText(juce::String(trackNumber), juce::dontSendNotification);
+        selectTrackFromManagerPage();
+        openAudioClipEditorWindow();
+    }
+
     void MainComponent::openSelectedTrackInPianoRollFromManager()
     {
         if (!currentProject)
@@ -23600,6 +25830,26 @@ void MainComponent::openTrackManagerWindow()
             markTrackManagerEditorDirty("Remove Track");
         };
 
+        auto renameTrack = [this]
+        {
+            selectTrackFromManagerPage();
+            renameSelectedTrack(
+                [this]
+                {
+                    refreshTrackManagerText();
+                    markTrackManagerEditorDirty("Rename Track");
+
+                    if (trackManagerContent != nullptr)
+                    {
+                        if (auto* content = dynamic_cast<TrackManagerWindowContent*>(trackManagerContent.get()))
+                            content->refreshSequenceMap();
+                        else
+                            trackManagerContent->repaint();
+                    }
+                }
+            );
+        };
+
         auto removeSequence = [this]
         {
             removeSelectedSequenceFromManager();
@@ -23610,6 +25860,21 @@ void MainComponent::openTrackManagerWindow()
             undoTrackManagerEdit();
             refreshTrackManagerText();
             markTrackManagerEditorDirty("Undo Track Manager Edit");
+
+            if (trackManagerContent != nullptr)
+            {
+                if (auto* content = dynamic_cast<TrackManagerWindowContent*>(trackManagerContent.get()))
+                    content->refreshSequenceMap();
+                else
+                    trackManagerContent->repaint();
+            }
+        };
+
+        auto redoTrackManager = [this]
+        {
+            redoTrackManagerEdit();
+            refreshTrackManagerText();
+            markTrackManagerEditorDirty("Redo Track Manager Edit");
 
             if (trackManagerContent != nullptr)
             {
@@ -23635,6 +25900,11 @@ void MainComponent::openTrackManagerWindow()
         auto openInPianoRoll = [this]
         {
             openSelectedTrackInPianoRollFromManager();
+        };
+
+        auto openAudioClipEditorFromManager = [this]
+        {
+            openSelectedTrackInAudioClipEditorFromManager();
         };
 
         auto previewTrackFromManager = [this]
@@ -23772,18 +26042,58 @@ void MainComponent::openTrackManagerWindow()
             }
         };
 
-        auto getSequenceMapMaxTick = [this]() -> std::int64_t
+        auto getSequenceContentEndTickForMap = [this](int sequenceIndex, std::int64_t fallbackEndTick) -> std::int64_t
+        {
+            if (!currentProject || sequenceIndex < 0 || sequenceIndex >= static_cast<int>(importSections.size()))
+                return fallbackEndTick;
+
+            const auto& section = importSections[static_cast<std::size_t>(sequenceIndex)];
+            const auto& tracks = currentProject->getTracks();
+            auto endTick = section.startTick;
+            bool foundTimelineContent = false;
+
+            for (const auto trackNumber : section.trackNumbers)
+            {
+                const auto trackIndex = trackNumber - 1;
+
+                if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size()))
+                    continue;
+
+                for (const auto& note : tracks[static_cast<std::size_t>(trackIndex)].getNotes())
+                {
+                    endTick = std::max<std::int64_t>(endTick, note.startTick + note.durationTicks);
+                    foundTimelineContent = true;
+                }
+            }
+
+            const auto sequenceNumber = sequenceIndex + 1;
+            const auto tempo = static_cast<double>(currentProject->getTempoBpm());
+
+            for (const auto& clip : currentProject->getAudioClips())
+            {
+                if (clip.sequenceNumber == sequenceNumber)
+                {
+                    endTick = std::max(endTick, audioClipEndTickForTempo(clip, tempo));
+                    foundTimelineContent = true;
+                }
+            }
+
+            // Blank/manual sequences can still use their stored span, but once a
+            // sequence has real MIDI notes or AudioClip media, the map should scale
+            // against the effective content length.  That keeps trimmed AudioClip
+            // bars from staying stretched to a stale full-source section end while
+            // still letting longer MIDI content win when it extends farther.
+            return foundTimelineContent ? std::max(endTick, section.startTick) : fallbackEndTick;
+        };
+
+        auto getSequenceMapMaxTick = [this, getSequenceContentEndTickForMap]() -> std::int64_t
         {
             std::int64_t maxTick = getProjectEndTick();
 
-            for (const auto& section : importSections)
-                maxTick = std::max(maxTick, section.endTick);
-
-            if (currentProject.has_value())
+            for (int i = 0; i < static_cast<int>(importSections.size()); ++i)
             {
-                const auto tempo = static_cast<double>(currentProject->getTempoBpm());
-                for (const auto& clip : currentProject->getAudioClips())
-                    maxTick = std::max(maxTick, audioClipEndTickForTempo(clip, tempo));
+                const auto& section = importSections[static_cast<std::size_t>(i)];
+                maxTick = std::max(maxTick, getSequenceContentEndTickForMap(i, section.endTick));
             }
 
             return std::max<std::int64_t>(maxTick, mw::core::Project::ticksPerQuarterNote);
@@ -23960,7 +26270,7 @@ void MainComponent::openTrackManagerWindow()
             selectSequenceFromMap(sequenceIndex, true);
         };
 
-        auto paintSequenceMap = [this, getSequenceMapMaxTick](juce::Graphics& g, juce::Rectangle<int> bounds)
+        auto paintSequenceMap = [this, getSequenceMapMaxTick, getSequenceContentEndTickForMap](juce::Graphics& g, juce::Rectangle<int> bounds)
         {
             g.fillAll(juce::Colour(0xff101216));
 
@@ -23987,22 +26297,9 @@ void MainComponent::openTrackManagerWindow()
                 return defaultSequenceColourFor(index, name);
             };
 
-            auto sequenceEndTickForMap = [this](int sequenceIndex, std::int64_t fallbackEndTick)
+            auto sequenceEndTickForMap = [getSequenceContentEndTickForMap](int sequenceIndex, std::int64_t fallbackEndTick)
             {
-                if (!currentProject)
-                    return fallbackEndTick;
-
-                const auto sequenceNumber = sequenceIndex + 1;
-                auto endTick = fallbackEndTick;
-                const auto tempo = static_cast<double>(currentProject->getTempoBpm());
-
-                for (const auto& clip : currentProject->getAudioClips())
-                {
-                    if (clip.sequenceNumber == sequenceNumber)
-                        endTick = std::max(endTick, audioClipEndTickForTempo(clip, tempo));
-                }
-
-                return endTick;
+                return getSequenceContentEndTickForMap(sequenceIndex, fallbackEndTick);
             };
 
             auto sequenceHasTimelineContent = [this](int sequenceIndex)
@@ -24218,11 +26515,14 @@ void MainComponent::openTrackManagerWindow()
             add,
             duplicate,
             remove,
+            renameTrack,
             removeSequence,
             undoTrackManager,
+            redoTrackManager,
             applyStartBeat,
             duplicateAtBeat,
             openInPianoRoll,
+            openAudioClipEditorFromManager,
             previewTrackFromManager,
             previewSequenceFromManager,
             previewProjectFromManager,
@@ -24358,6 +26658,13 @@ void MainComponent::openTrackManagerWindow()
                 case 1: previewSelectedTrackOnBackgroundThread(); break;
                 case 2: previewSelectedSequenceOnBackgroundThread(); break;
                 case 3: previewCurrentProjectOnBackgroundThread(); break;
+                case 4:
+                    previewAudioClipEditorClip(
+                        lastAudioClipEditorPreviewClipId,
+                        lastAudioClipEditorPreviewStartSamples,
+                        lastAudioClipEditorPreviewEndSamples,
+                        lastAudioClipEditorPreviewFullSource);
+                    break;
                 case 0:
                 default: renderPianoRollPreview(); break;
             }
@@ -24379,6 +26686,16 @@ void MainComponent::openTrackManagerWindow()
         auto previewNotes = [this]
         {
             return lastPianoRollPreviewNotes;
+        };
+
+        auto previewAudioClips = [this]
+        {
+            return lastPianoRollPreviewAudioClips;
+        };
+
+        auto projectFolder = [this]
+        {
+            return currentProjectFolderPath;
         };
 
         auto hasPreview = [this]
@@ -24420,6 +26737,8 @@ void MainComponent::openTrackManagerWindow()
                 stop,
                 closeWindow,
                 previewNotes,
+                previewAudioClips,
+                projectFolder,
                 hasPreview,
                 isRenderingPreview,
                 currentPreviewSeconds,
@@ -24431,9 +26750,9 @@ void MainComponent::openTrackManagerWindow()
         auto* window = new PianoRollDocumentWindow("Piano Roll Preview Player", closeWindow);
         applyPoorMansStudioCustomTitleBar(*window);
         window->setResizable(true, true);
-        window->setResizeLimits(520, 260, 1600, 900);
+        window->setResizeLimits(560, 340, 1600, 1000);
         window->setContentNonOwned(pianoRollPreviewPlayerContent.get(), true);
-        window->centreWithSize(760, 420);
+        window->centreWithSize(820, 500);
         window->setVisible(true);
         applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::PreviewPlayer);
 
@@ -24807,17 +27126,86 @@ void MainComponent::openPianoRollWindow()
         mciSendStringW(L"close PoorMansStudioPianoRollPreview", nullptr, 0, nullptr);
 
         const auto nativePath = previewPath.wstring();
-        const auto openCommand =
-            std::wstring(L"open \"")
-            + nativePath
-            + L"\" type waveaudio alias PoorMansStudioPianoRollPreview";
+        const auto openPreviewPath = [](const std::wstring& pathToOpen, bool typedWaveAudio) -> MCIERROR
+        {
+            const auto openCommand =
+                std::wstring(L"open \"")
+                + pathToOpen
+                + (typedWaveAudio
+                    ? L"\" type waveaudio alias PoorMansStudioPianoRollPreview"
+                    : L"\" alias PoorMansStudioPianoRollPreview");
 
-        const auto openResult = mciSendStringW(openCommand.c_str(), nullptr, 0, nullptr);
+            return mciSendStringW(openCommand.c_str(), nullptr, 0, nullptr);
+        };
+
+        auto openResult = openPreviewPath(nativePath, true);
 
         if (openResult != 0)
         {
-            logMessage("ERROR: Windows could not open the Piano Roll preview WAV: " + previewPath.string());
-            return;
+            const auto typedOpenError = formatMciErrorMessage(openResult);
+            openResult = openPreviewPath(nativePath, false);
+            const auto fallbackOpenError = formatMciErrorMessage(openResult);
+
+            if (openResult != 0)
+            {
+                std::wstring shortPath;
+                const auto shortPathLength = GetShortPathNameW(nativePath.c_str(), nullptr, 0);
+                if (shortPathLength > 0)
+                {
+                    std::wstring shortPathBuffer(shortPathLength, L'\0');
+                    const auto written = GetShortPathNameW(nativePath.c_str(), shortPathBuffer.data(), shortPathLength);
+                    if (written > 0 && written < shortPathLength)
+                    {
+                        shortPathBuffer.resize(written);
+                        shortPath = shortPathBuffer;
+                    }
+                }
+
+                juce::String shortTypedOpenError;
+                juce::String shortFallbackOpenError;
+
+                if (!shortPath.empty() && shortPath != nativePath)
+                {
+                    openResult = openPreviewPath(shortPath, true);
+                    shortTypedOpenError = formatMciErrorMessage(openResult);
+
+                    if (openResult != 0)
+                    {
+                        openResult = openPreviewPath(shortPath, false);
+                        shortFallbackOpenError = formatMciErrorMessage(openResult);
+                    }
+
+                    if (openResult == 0)
+                    {
+                        logMessage("Piano Roll preview WAV opened using Windows short-path MCI fallback.");
+                    }
+                }
+
+                if (openResult != 0)
+                {
+                    auto message =
+                        juce::String("ERROR: Windows could not open the Piano Roll preview WAV: ")
+                        + juce::String(previewPath.string())
+                        + ". typed open: "
+                        + typedOpenError
+                        + "; fallback open: "
+                        + fallbackOpenError;
+
+                    if (!shortTypedOpenError.isEmpty())
+                    {
+                        message << "; short typed open: " << shortTypedOpenError;
+                        if (!shortFallbackOpenError.isEmpty())
+                            message << "; short fallback open: " << shortFallbackOpenError;
+                    }
+
+                    logMessage(message);
+                    return;
+                }
+            }
+            else
+            {
+                logMessage(juce::String("Piano Roll preview WAV opened with automatic MCI type fallback after typed waveaudio open failed: ") + typedOpenError);
+            }
         }
 
         mciSendStringW(L"set PoorMansStudioPianoRollPreview time format milliseconds", nullptr, 0, nullptr);
@@ -25115,6 +27503,7 @@ void MainComponent::openPianoRollWindow()
         lastPianoRollPreviewMidiPath.clear();
         lastPianoRollPreviewWavPath.clear();
         lastPianoRollPreviewNotes.clear();
+        lastPianoRollPreviewAudioClips.clear();
         lastPianoRollPreviewDurationBeats = 0.0;
         pendingPianoRollPreviewStartSeconds = 0.0;
     }
@@ -25308,6 +27697,7 @@ void MainComponent::renderPianoRollPreview()
         lastPianoRollPreviewMidiPath = previewMidiPath;
         lastPianoRollPreviewWavPath = previewWavPath;
         setPianoRollPreviewNoteMapFromTracks(previewProject.getTracks());
+        setPianoRollPreviewAudioClipMapFromClips({});
 
         std::int64_t previewEndTick = 0;
 
@@ -25893,7 +28283,7 @@ void MainComponent::renderPianoRollPreview()
             &duplicateTrackButton, &removeTrackButton, &renameTrackButton, &trackManagerButton,
             &applyTimingButton, &applyNotesButton, &showRawNotesButton,
             &addNoteButton, &removeNoteButton, &deletePianoRollNoteButton, &syncPianoRollButton,
-            &openPianoRollButton, &previousPianoRollWindowButton,
+            &openPianoRollButton, &audioClipEditorButton, &previousPianoRollWindowButton,
             &nextPianoRollWindowButton, &jumpPianoRollPageButton, &jumpPianoRollKeyButton,
             &copyPianoRollNoteButton, &pastePianoRollNoteButton, &undoPianoRollButton,
             &redoPianoRollButton, &clearPianoRollSelectionButton, &openPianoRollPreviewPlayerButton,

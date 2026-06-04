@@ -535,6 +535,8 @@ namespace mw::serialization
             file << "      \"originalSourcePath\": \"" << escapeJsonString(clip.originalSourcePath.string()) << "\",\n";
             file << "      \"startTick\": " << clip.startTick << ",\n";
             file << "      \"durationSamples\": " << clip.durationSamples << ",\n";
+            file << "      \"sourceTrimStartSamples\": " << mw::core::audioClipTrimStartSamples(clip) << ",\n";
+            file << "      \"sourceTrimEndSamples\": " << mw::core::audioClipTrimEndSamples(clip) << ",\n";
             file << "      \"sampleRate\": " << clip.sampleRate << ",\n";
             file << "      \"channelCount\": " << clip.channelCount << ",\n";
             file << "      \"bitDepth\": " << clip.bitDepth << ",\n";
@@ -763,6 +765,9 @@ namespace mw::serialization
                 clip.originalSourcePath = getString(clipObject, "originalSourcePath");
                 clip.startTick = getLongLong(clipObject, "startTick", 0);
                 clip.durationSamples = getLongLong(clipObject, "durationSamples", 0);
+                clip.sourceTrimStartSamples = getLongLong(clipObject, "sourceTrimStartSamples", 0);
+                clip.sourceTrimEndSamples = getLongLong(clipObject, "sourceTrimEndSamples", clip.durationSamples);
+                mw::core::normalizeAudioClipTrim(clip);
                 clip.sampleRate = getFloat(clipObject, "sampleRate", 48000.0f);
                 clip.channelCount = getInt(clipObject, "channelCount", 2);
                 clip.bitDepth = getInt(clipObject, "bitDepth", 24);

@@ -46,6 +46,13 @@ namespace mw::app
             ++result.removedItems;
         }
 
+        const auto audioClipRender = AppPaths::tempFolder() / "audioclip_render";
+        if (std::filesystem::exists(audioClipRender, ignored))
+        {
+            std::filesystem::remove_all(audioClipRender, ignored);
+            ++result.removedItems;
+        }
+
         const auto projects = AppPaths::projectsFolder();
         if (std::filesystem::exists(projects, ignored))
         {
@@ -67,6 +74,7 @@ namespace mw::app
                 const auto name = entry.path().filename().string();
                 if (name.rfind("mxl_extract_", 0) == 0
                     || name.rfind("pms_preview_", 0) == 0
+                    || name == "audioclip_render"
                     || name.rfind("preview_", 0) == 0)
                 {
                     std::filesystem::remove_all(entry.path(), ignored);
@@ -88,6 +96,9 @@ namespace mw::app
 
         const auto previews = mw::app::AppPaths::previewFolder();
         std::filesystem::remove_all(previews, ignored);
+
+        const auto audioClipRender = mw::app::AppPaths::tempFolder() / "audioclip_render";
+        std::filesystem::remove_all(audioClipRender, ignored);
 
         if (!std::filesystem::exists(temp))
             return;

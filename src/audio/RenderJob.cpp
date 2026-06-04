@@ -1,5 +1,6 @@
 #include "audio/RenderJob.h"
 
+#include "app/AppPaths.h"
 #include "audio/ExternalFfmpegEncoder.h"
 #include "audio/ExternalFfmpegMixer.h"
 #include "audio/ExternalFluidSynthRenderer.h"
@@ -12,6 +13,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <filesystem>
 #include <mutex>
 #include <optional>
@@ -40,6 +42,7 @@ namespace
             case mw::audio::RenderOutputFormat::Flac: return mw::exporting::AudioFormat::Flac;
             case mw::audio::RenderOutputFormat::Mp3: return mw::exporting::AudioFormat::Mp3;
             case mw::audio::RenderOutputFormat::Ogg: return mw::exporting::AudioFormat::Ogg;
+            case mw::audio::RenderOutputFormat::M4a: return mw::exporting::AudioFormat::M4a;
             case mw::audio::RenderOutputFormat::Wav:
             default: return mw::exporting::AudioFormat::Wav;
         }
@@ -52,6 +55,7 @@ namespace
             case mw::audio::RenderOutputFormat::Flac: return mw::audio::EncodedAudioFormat::Flac;
             case mw::audio::RenderOutputFormat::Mp3: return mw::audio::EncodedAudioFormat::Mp3;
             case mw::audio::RenderOutputFormat::Ogg: return mw::audio::EncodedAudioFormat::Ogg;
+            case mw::audio::RenderOutputFormat::M4a: return mw::audio::EncodedAudioFormat::M4a;
             case mw::audio::RenderOutputFormat::Wav:
             default: return mw::audio::EncodedAudioFormat::Wav;
         }
@@ -114,9 +118,32 @@ namespace
         return clip.projectRelativePath;
     }
 
+    std::string sanitizeAudioClipTempName(std::string value)
+    {
+        std::string cleaned;
+        for (char c : value)
+        {
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_')
+                cleaned.push_back(c);
+            else
+                cleaned.push_back('_');
+        }
+
+        return cleaned.empty() ? std::string("clip") : cleaned;
+    }
+
+    double samplesToSeconds(long long samples, double sampleRate)
+    {
+        if (samples <= 0 || sampleRate <= 0.0)
+            return 0.0;
+
+        return static_cast<double>(samples) / sampleRate;
+    }
+
     std::filesystem::path audioClipEffectTempFolderFor(const mw::audio::RenderJob& job)
     {
-        return job.exportFolder / (job.baseFileName + "_audioclip_effects");
+        const auto safeBaseName = sanitizeAudioClipTempName(job.baseFileName.empty() ? std::string("render") : job.baseFileName);
+        return mw::app::AppPaths::tempFolder() / "audioclip_render" / safeBaseName;
     }
 
     void cleanupAudioClipEffectTempFolderAfterSuccessfulRender(
@@ -131,7 +158,7 @@ namespace
         if (std::filesystem::exists(folder, ignored))
         {
             std::filesystem::remove_all(folder, ignored);
-            log(callbacks, "AudioClip VST3 effect cleanup: removed temporary processed clip files.");
+            log(callbacks, "AudioClip render temp cleanup: removed temporary prepared/processed clip files.");
         }
     }
 
@@ -142,19 +169,6 @@ namespace
         std::string& errorMessage)
     {
         std::vector<AudioClipRenderInput> inputs;
-
-        auto cleanName = [](std::string value)
-        {
-            std::string cleaned;
-            for (char c : value)
-            {
-                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_')
-                    cleaned.push_back(c);
-                else
-                    cleaned.push_back('_');
-            }
-            return cleaned.empty() ? std::string("clip") : cleaned;
-        };
 
         auto lowerExtension = [](std::filesystem::path path)
         {
@@ -195,9 +209,62 @@ namespace
                 ? std::string("AudioClip")
                 : std::string(1, static_cast<char>(std::toupper(static_cast<unsigned char>(sourceKind.front())))) + sourceKind.substr(1);
 
+            const auto clipStem = sanitizeAudioClipTempName(!clip.name.empty() ? clip.name : path.stem().string());
+            const auto effectFolder = audioClipEffectTempFolderFor(job);
+            const auto startOffsetSeconds = ticksToSeconds(clip.startTick, job.project.getTempoBpm());
+            std::filesystem::path preparedSource = path;
+
+            const bool hasActiveTrim = mw::core::audioClipHasActiveTrim(clip);
+            if (hasActiveTrim)
+            {
+                if (clip.sampleRate <= 0.0)
+                {
+                    errorMessage = "Cannot apply AudioClip trim during render because sample rate is invalid for clip: " + clip.name;
+                    return {};
+                }
+
+                const auto trimStartSamples = mw::core::audioClipTrimStartSamples(clip);
+                const auto trimDurationSamples = mw::core::audioClipTrimmedDurationSamples(clip);
+                if (trimDurationSamples <= 0)
+                {
+                    log(callbacks, "WARNING: AudioClip trim produced an empty kept range and was skipped: " + clip.name);
+                    ++clipIndex;
+                    continue;
+                }
+
+                std::error_code ec;
+                std::filesystem::create_directories(effectFolder, ec);
+                if (ec)
+                {
+                    errorMessage = "Failed to create AudioClip render temp folder: " + ec.message();
+                    return {};
+                }
+
+                const auto trimmedWav = effectFolder / ("clip_" + std::to_string(clipIndex + 1) + "_" + clipStem + "_trim.wav");
+                mw::audio::FfmpegTrimRequest trimRequest;
+                trimRequest.ffmpegExePath = job.ffmpegPath;
+                trimRequest.inputPath = path;
+                trimRequest.outputWavPath = trimmedWav;
+                trimRequest.trimStartSeconds = samplesToSeconds(trimStartSamples, clip.sampleRate);
+                trimRequest.trimDurationSeconds = samplesToSeconds(trimDurationSamples, clip.sampleRate);
+                trimRequest.outputChannels = job.channelCount;
+
+                const auto trimResult = mw::audio::ExternalFfmpegEncoder::trimToWav(trimRequest);
+                log(callbacks, "FFmpeg " + sourceKind + " AudioClip trim command: " + trimResult.commandLine);
+                log(callbacks, trimResult.message);
+                if (!trimResult.success || !std::filesystem::exists(trimmedWav))
+                {
+                    errorMessage = "Failed to prepare trimmed " + sourceKind + " AudioClip media for playback/render.";
+                    return {};
+                }
+
+                preparedSource = trimmedWav;
+                log(callbacks, sourceKindTitle + " AudioClip trim honored non-destructively. Source media unchanged: " + path.string());
+            }
+
             if (track == nullptr || !mw::vst::VstInstrumentHost::trackHasEnabledVstEffect(*track))
             {
-                inputs.push_back({ path, ticksToSeconds(clip.startTick, job.project.getTempoBpm()) });
+                inputs.push_back({ preparedSource, startOffsetSeconds });
                 ++clipIndex;
                 continue;
             }
@@ -205,24 +272,22 @@ namespace
             status(callbacks, "Processing " + sourceKind + " AudioClip track VST3 effect: " + track->getName());
             log(callbacks, sourceKindTitle + " AudioClip VST3 effect source stays dry/unchanged: " + path.string());
 
-            const auto clipStem = cleanName(!clip.name.empty() ? clip.name : path.stem().string());
-            const auto effectFolder = audioClipEffectTempFolderFor(job);
             std::error_code ec;
             std::filesystem::create_directories(effectFolder, ec);
             if (ec)
             {
-                errorMessage = "Failed to create AudioClip effect temp folder: " + ec.message();
+                errorMessage = "Failed to create AudioClip render temp folder: " + ec.message();
                 return {};
             }
 
-            std::filesystem::path sourceWav = path;
+            std::filesystem::path sourceWav = preparedSource;
             std::filesystem::path convertedWav = effectFolder / ("clip_" + std::to_string(clipIndex + 1) + "_" + clipStem + "_source.wav");
-            const auto ext = lowerExtension(path);
+            const auto ext = lowerExtension(preparedSource);
             if (ext != ".wav")
             {
                 mw::audio::FfmpegEncodeRequest convertRequest;
                 convertRequest.ffmpegExePath = job.ffmpegPath;
-                convertRequest.inputWavPath = path;
+                convertRequest.inputWavPath = preparedSource;
                 convertRequest.outputPath = convertedWav;
                 convertRequest.format = mw::audio::EncodedAudioFormat::Wav;
                 convertRequest.outputChannels = job.channelCount;
@@ -260,7 +325,7 @@ namespace
                 return {};
             }
 
-            inputs.push_back({ processedWav, ticksToSeconds(clip.startTick, job.project.getTempoBpm()) });
+            inputs.push_back({ processedWav, startOffsetSeconds });
             log(callbacks, sourceKindTitle + " AudioClip VST3 effect processed for track: " + track->getName() + " -> " + processedWav.string());
             ++clipIndex;
         }
@@ -338,8 +403,16 @@ namespace
         if (audioInputs.empty())
             return true;
 
-        auto mixedPath = renderedWav;
-        mixedPath.replace_filename(renderedWav.stem().string() + "_with_audioclips.wav");
+        const auto tempFolder = audioClipEffectTempFolderFor(job);
+        std::error_code tempEc;
+        std::filesystem::create_directories(tempFolder, tempEc);
+        if (tempEc)
+        {
+            errorMessage = "Failed to create AudioClip render temp folder: " + tempEc.message();
+            return false;
+        }
+
+        auto mixedPath = tempFolder / (renderedWav.stem().string() + "_with_audioclips.wav");
 
         mw::audio::FfmpegMixRequest mixRequest;
         mixRequest.ffmpegExePath = job.ffmpegPath;
@@ -362,12 +435,10 @@ namespace
         }
 
         std::error_code ec;
-        std::filesystem::remove(renderedWav, ec);
-        ec.clear();
-        std::filesystem::rename(mixedPath, renderedWav, ec);
+        std::filesystem::copy_file(mixedPath, renderedWav, std::filesystem::copy_options::overwrite_existing, ec);
         if (ec)
         {
-            errorMessage = "Failed to replace rendered WAV with AudioClip mix: " + ec.message();
+            errorMessage = "Failed to replace rendered WAV with AudioClip mix from temp: " + ec.message();
             return false;
         }
 

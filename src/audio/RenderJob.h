@@ -20,7 +20,8 @@ namespace mw::audio
         Wav,
         Flac,
         Mp3,
-        Ogg
+        Ogg,
+        M4a
     };
 
     struct RenderJob

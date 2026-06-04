@@ -10,7 +10,8 @@ namespace mw::audio
         Wav,
         Flac,
         Mp3,
-        Ogg
+        Ogg,
+        M4a
     };
 
     inline std::string encodedAudioFormatToExtension(EncodedAudioFormat format)
@@ -20,6 +21,7 @@ namespace mw::audio
             case EncodedAudioFormat::Flac: return ".flac";
             case EncodedAudioFormat::Mp3: return ".mp3";
             case EncodedAudioFormat::Ogg: return ".ogg";
+            case EncodedAudioFormat::M4a: return ".m4a";
             case EncodedAudioFormat::Wav:
             default: return ".wav";
         }
@@ -51,11 +53,36 @@ namespace mw::audio
         std::string message;
     };
 
+    struct FfmpegTrimRequest
+    {
+        std::filesystem::path ffmpegExePath;
+        std::filesystem::path inputPath;
+        std::filesystem::path outputWavPath;
+        double trimStartSeconds = 0.0;
+        double trimDurationSeconds = 0.0;
+        int outputChannels = 2;
+        int outputSampleRate = 0;
+        bool mciCompatibleWav = false;
+        int timeoutSeconds = 300;
+    };
+
+    struct FfmpegTrimResult
+    {
+        bool success = false;
+        int exitCode = -1;
+        std::string commandLine;
+        std::string message;
+    };
+
     class ExternalFfmpegEncoder
     {
     public:
         static FfmpegEncodeResult encodeFromWav(const FfmpegEncodeRequest& request);
         static std::string buildCommandLine(const FfmpegEncodeRequest& request);
         static bool validateRequest(const FfmpegEncodeRequest& request, std::string& errorMessage);
+
+        static FfmpegTrimResult trimToWav(const FfmpegTrimRequest& request);
+        static std::string buildTrimCommandLine(const FfmpegTrimRequest& request);
+        static bool validateTrimRequest(const FfmpegTrimRequest& request, std::string& errorMessage);
     };
 }

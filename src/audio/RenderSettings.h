@@ -12,7 +12,8 @@ namespace mw::audio
         Wav,
         Flac,
         Mp3,
-        Ogg
+        Ogg,
+        M4a
     };
 
     inline std::string audioExportFormatToString(AudioExportFormat format)
@@ -23,6 +24,7 @@ namespace mw::audio
             case AudioExportFormat::Flac: return "FLAC";
             case AudioExportFormat::Mp3: return "MP3";
             case AudioExportFormat::Ogg: return "OGG";
+            case AudioExportFormat::M4a: return "M4A";
             default: return "Unknown";
         }
     }

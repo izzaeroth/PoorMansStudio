@@ -591,6 +591,13 @@ namespace mw::gui
         void importMusicXmlOnly();
         void importAudioFile();
         void openAudioRecorderWindow();
+        void openAudioClipEditorWindow();
+        void requestCloseAudioClipEditorWindow(std::function<void()> afterClosed = {});
+        void closeAudioClipEditorWindow();
+        bool applyAudioClipEditorTrimMetadata(int clipId, long long requestedStartSamples, long long requestedEndSamples);
+        bool resetAudioClipEditorTrimMetadata(int clipId);
+        void previewAudioClipEditorClip(int clipId, long long requestedStartSamples, long long requestedEndSamples, bool playFullSource);
+        void stopAudioClipEditorPreview();
         void closeAudioRecorderWindowWithPrompt();
         void closeAudioRecorderWindowNow();
         void startAudioRecordingTake();
@@ -642,6 +649,7 @@ namespace mw::gui
         void previewSelectedSequenceOnBackgroundThread();
         void previewCurrentProjectOnBackgroundThread();
         void setPianoRollPreviewNoteMapFromTracks(const std::vector<mw::core::Track>& tracks);
+        void setPianoRollPreviewAudioClipMapFromClips(const std::vector<mw::core::AudioClip>& clips);
         void startRenderJobOnBackgroundThread(mw::audio::RenderJob job, const juce::String& label, bool playWhenDone = false, double previewDurationBeats = 0.0);
         void continueRenderAfterSfzWarning();
         void showSfzRenderWarning();
@@ -710,6 +718,7 @@ namespace mw::gui
         void selectSequenceFromManagerPage();
         void selectSequenceFromMap(int sequenceIndex, bool focusFirstTrack);
         void openSelectedTrackInPianoRollFromManager();
+        void openSelectedTrackInAudioClipEditorFromManager();
         void importFilesAsSequence();
         std::optional<mw::core::Project> importProjectFromPath(const std::filesystem::path& path);
         std::int64_t getProjectEndTick() const;
@@ -735,6 +744,7 @@ namespace mw::gui
         void removeSelectedSequenceFromManager();
         void captureTrackManagerUndoState(const juce::String& actionLabel);
         void undoTrackManagerEdit();
+        void redoTrackManagerEdit();
         void linkTrackToSectionFromManager();
         void unlinkTrackFromSectionFromManager();
         void moveTrackToSequenceFromManager();
@@ -754,7 +764,7 @@ namespace mw::gui
         void addManualTrack();
         void duplicateSelectedTrack();
         void removeSelectedTrack();
-        void renameSelectedTrack();
+        void renameSelectedTrack(std::function<void()> onApplied = {});
         void refreshNoteEditor();
         void applyProjectTimingSettings();
         void applyNoteEditorToTrack();
@@ -921,6 +931,7 @@ namespace mw::gui
         juce::TextButton deletePianoRollNoteButton {"Delete Selected"};
         juce::TextButton syncPianoRollButton {"Sync Roll"};
         juce::TextButton openPianoRollButton {"Open Piano Roll"};
+        juce::TextButton audioClipEditorButton {"AudioClip Editor"};
         juce::TextButton setBeatWindow4Button {"4"};
         juce::TextButton setBeatWindow8Button {"8"};
         juce::TextButton setBeatWindow16Button {"16"};
@@ -1139,6 +1150,7 @@ namespace mw::gui
         std::unique_ptr<juce::DocumentWindow> sequenceThoughtsWindow;
         std::unique_ptr<juce::DocumentWindow> renderSettingsWindow;
         std::unique_ptr<juce::DocumentWindow> audioRecorderWindow;
+        std::unique_ptr<juce::DocumentWindow> audioClipEditorWindow;
         std::unique_ptr<juce::DocumentWindow> vstPluginManagerWindow;
         std::unique_ptr<juce::DocumentWindow> vstSettingsWindow;
         std::unique_ptr<juce::DocumentWindow> vstHostHelperStatusWindow;
@@ -1150,9 +1162,11 @@ namespace mw::gui
         std::unique_ptr<juce::Component> rawNotesContent;
         std::unique_ptr<juce::Component> trackManagerContent;
         std::unique_ptr<juce::Component> audioRecorderContent;
+        std::unique_ptr<juce::Component> audioClipEditorContent;
         std::unique_ptr<juce::Component> renderSettingsContent;
         std::unique_ptr<juce::Component> projectInfoContent;
         int pianoRollOpenTrackIndex = -1;
+        int audioClipEditorOpenTrackIndex = -1;
         bool pianoRollEditorDirty = false;
         bool suppressPianoRollEditorDirty = false;
         bool suppressTrackComboSwitchPrompt = false;
@@ -1160,6 +1174,7 @@ namespace mw::gui
         std::filesystem::path lastPianoRollPreviewMidiPath;
         std::filesystem::path lastPianoRollPreviewWavPath;
         std::vector<mw::core::NoteEvent> lastPianoRollPreviewNotes;
+        std::vector<mw::core::AudioClip> lastPianoRollPreviewAudioClips;
         std::vector<std::filesystem::path> generatedPreviewFiles;
         std::unique_ptr<mw::audio::AudioClipRecorder> audioClipRecorder;
         juce::AudioFormatManager audioRecorderTestFormatManager;
@@ -1187,7 +1202,11 @@ namespace mw::gui
         double lastPianoRollPreviewDurationBeats = 0.0;
         double lastPianoRollPreviewTempoBpm = 120.0;
         bool pianoRollPreviewPaused = false;
-        int lastPianoRollPreviewScope = 0; // 0 Piano Roll, 1 selected track, 2 active sequence, 3 project
+        int lastPianoRollPreviewScope = 0; // 0 Piano Roll, 1 selected track, 2 active sequence, 3 project, 4 AudioClip Editor
+        int lastAudioClipEditorPreviewClipId = 0;
+        long long lastAudioClipEditorPreviewStartSamples = 0;
+        long long lastAudioClipEditorPreviewEndSamples = 0;
+        bool lastAudioClipEditorPreviewFullSource = false;
         double pendingPianoRollPreviewStartSeconds = 0.0;
         std::unique_ptr<juce::Component> pianoRollContent;
         std::unique_ptr<juce::Component> pianoRollPreviewPlayerContent;
@@ -1231,6 +1250,7 @@ namespace mw::gui
         };
 
         std::vector<TrackManagerUndoState> trackManagerUndoStack;
+        std::vector<TrackManagerUndoState> trackManagerRedoStack;
 
         bool trackManagerEditorDirty = false;
         juce::String trackManagerDirtyReason;
