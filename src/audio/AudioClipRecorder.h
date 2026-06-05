@@ -30,6 +30,7 @@ namespace mw::audio
         bool enabled = false;
         mw::core::VstPluginAssignment effect;
         std::string trackName;
+        std::string unavailableMessage;
     };
 
     class AudioClipRecorder final : private juce::AudioIODeviceCallback

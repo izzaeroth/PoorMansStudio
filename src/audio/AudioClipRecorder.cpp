@@ -76,7 +76,12 @@ namespace mw::audio
                 ? liveEffectOptions.effect.bundlePath.filename().string()
                 : liveEffectOptions.effect.name;
 
-            if (!liveEffectOptions.effect.hasPluginIdentity() || liveEffectOptions.effect.bundlePath.empty())
+            if (!liveEffectOptions.unavailableMessage.empty())
+            {
+                result.liveEffectMessage = liveEffectOptions.unavailableMessage;
+                liveEffectMonitorSummary = result.liveEffectMessage;
+            }
+            else if (!liveEffectOptions.effect.hasPluginIdentity() || liveEffectOptions.effect.bundlePath.empty())
             {
                 result.liveEffectMessage = "Track Live Effect requested, but the target track does not have a VST3 effect assignment.";
                 liveEffectMonitorSummary = result.liveEffectMessage;
