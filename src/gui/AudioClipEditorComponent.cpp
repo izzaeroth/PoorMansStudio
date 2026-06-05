@@ -35,7 +35,8 @@ namespace
     }
 
     class AudioClipEditorComponentImpl final : public juce::Component,
-                                         public WindowPendingCloseHandler
+                                         public WindowPendingCloseHandler,
+                                         private juce::ScrollBar::Listener
     {
     public:
         AudioClipEditorComponentImpl(
@@ -119,11 +120,11 @@ namespace
             resetTrimButton.setTooltip("Reset the source trim metadata to the full source range.");
             resetTrimButton.onClick = [this] { resetTrimForCurrentClip(); };
 
-            arrangementHelpLabel.setText("Local arrangement: Freeze the kept trim, click the lane to place/repeat it, Preview Arrangement, or Render To Track. Wider lane = finer placement.", juce::dontSendNotification);
+            arrangementHelpLabel.setText("Local arrangement: Freeze the kept trim, click the lane to place/repeat it, use the horizontal scroll bar for longer arrangements, Preview Arrangement, or Render To Track.", juce::dontSendNotification);
             arrangementHelpLabel.setJustificationType(juce::Justification::centredLeft);
             arrangementHelpLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
             arrangementHelpLabel.setFont(juce::FontOptions(12.5f));
-            arrangementHelpLabel.setTooltip("The local arrangement lane places repeated/overlapping copies of the frozen trim. It does not edit the original media file.");
+            arrangementHelpLabel.setTooltip("The local arrangement lane places repeated/overlapping copies of the frozen trim. Extend +10s and the horizontal scroll bar expose longer arrangements without changing the final render length.");
             arrangementView.setTooltip("Arrangement lane. After Freeze Trim, click in the lane to place the frozen section; click again to repeat it. Drag placed clips to move them.");
 
             freezeClipButton.setButtonText("Freeze Trim");
@@ -165,17 +166,10 @@ namespace
             renderArrangementButton.setTooltip("Render the placed arrangement clips to project input audio and create a new imported-style AudioClip track.");
             renderArrangementButton.onClick = [this] { renderArrangementToNewTrack(); };
 
-            arrangementScrollSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-            arrangementScrollSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
-            arrangementScrollSlider.setTooltip("Free-form horizontal arrangement scroll. This is not paginated.");
-            arrangementScrollSlider.onValueChange = [this]
-            {
-                if (suppressArrangementScrollChange)
-                    return;
-
-                arrangementViewStartSeconds = arrangementScrollSlider.getValue();
-                refreshArrangementView();
-            };
+            arrangementScrollBar.setColour(juce::ScrollBar::trackColourId, juce::Colour(0xff24303d));
+            arrangementScrollBar.setColour(juce::ScrollBar::thumbColourId, juce::Colour(0xff9fc6ff));
+            arrangementScrollBar.setColour(juce::ScrollBar::backgroundColourId, juce::Colour(0xff111820));
+            arrangementScrollBar.addListener(this);
 
             arrangementStatusLabel.setJustificationType(juce::Justification::centredLeft);
             arrangementStatusLabel.setColour(juce::Label::textColourId, juce::Colours::yellow.withAlpha(0.92f));
@@ -243,7 +237,7 @@ namespace
             addAndMakeVisible(extendArrangementButton);
             addAndMakeVisible(previewArrangementButton);
             addAndMakeVisible(renderArrangementButton);
-            addAndMakeVisible(arrangementScrollSlider);
+            addAndMakeVisible(arrangementScrollBar);
             addAndMakeVisible(arrangementStatusLabel);
             addAndMakeVisible(detailsBox);
             addAndMakeVisible(closeButton);
@@ -254,6 +248,8 @@ namespace
 
         ~AudioClipEditorComponentImpl() override
         {
+            arrangementScrollBar.removeListener(this);
+
             if (helperTooltipWindow != nullptr)
                 helperTooltipWindow->setLookAndFeel(nullptr);
 
@@ -288,6 +284,8 @@ namespace
 
             arrangementHelpLabel.setBounds(area.removeFromTop(24).reduced(4, 2));
             arrangementView.setBounds(area.removeFromTop(218));
+            auto scrollRow = area.removeFromTop(22);
+            arrangementScrollBar.setBounds(scrollRow.reduced(8, 3));
             area.removeFromTop(4);
 
             auto arrangementRow = area.removeFromTop(34);
@@ -303,11 +301,19 @@ namespace
             renderArrangementButton.setBounds(arrangementActionRow.removeFromLeft(146).reduced(4, 4));
             arrangementStatusLabel.setBounds(arrangementActionRow.reduced(4, 2));
 
-            auto scrollRow = area.removeFromTop(26);
-            arrangementScrollSlider.setBounds(scrollRow.reduced(4, 3));
             area.removeFromTop(6);
 
             detailsBox.setBounds(area);
+        }
+
+        void scrollBarMoved(juce::ScrollBar* scrollBarThatHasMoved, double newRangeStart) override
+        {
+            if (scrollBarThatHasMoved != &arrangementScrollBar || suppressArrangementScrollChange)
+                return;
+
+            const double maxScroll = std::max(0.0, arrangementLengthSeconds - arrangementVisibleSeconds);
+            arrangementViewStartSeconds = std::clamp(newRangeStart, 0.0, maxScroll);
+            refreshArrangementView();
         }
 
         bool requestCloseWithPendingPrompt(std::function<void()> closeAction) override
@@ -1504,6 +1510,35 @@ namespace
             refreshArrangementControls();
         }
 
+        double arrangementMaxScroll() const
+        {
+            return std::max(0.0, arrangementLengthSeconds - arrangementVisibleSeconds);
+        }
+
+        void ensureArrangementLengthIncludes(double requiredEndSeconds)
+        {
+            if (requiredEndSeconds <= arrangementLengthSeconds + 0.0005)
+                return;
+
+            arrangementLengthSeconds = std::min(600.0, std::max(arrangementLengthSeconds, requiredEndSeconds + 0.25));
+        }
+
+        void revealArrangementRange(double startSeconds, double endSeconds)
+        {
+            const double maxScroll = arrangementMaxScroll();
+            if (maxScroll <= 0.0)
+            {
+                arrangementViewStartSeconds = 0.0;
+                return;
+            }
+
+            if (endSeconds > arrangementViewStartSeconds + arrangementVisibleSeconds)
+                arrangementViewStartSeconds = std::clamp(endSeconds - arrangementVisibleSeconds, 0.0, maxScroll);
+
+            if (startSeconds < arrangementViewStartSeconds)
+                arrangementViewStartSeconds = std::clamp(startSeconds, 0.0, maxScroll);
+        }
+
         void addFrozenClipToArrangement(double requestedStartSeconds)
         {
             auto* sourceClip = findLocalClip(editableClipId);
@@ -1533,10 +1568,16 @@ namespace
             instance.sourceEndSamples = frozenTrimEndSamples;
             instance.sourceSampleRate = frozenTrimSampleRate;
             instance.durationSeconds = durationSeconds;
-            instance.startSeconds = snapArrangementStart(requestedStartSeconds, durationSeconds, 0);
+
+            const double requestedStart = std::max(0.0, requestedStartSeconds);
+            ensureArrangementLengthIncludes(requestedStart + durationSeconds);
+            instance.startSeconds = snapArrangementStart(requestedStart, durationSeconds, 0);
+            ensureArrangementLengthIncludes(instance.startSeconds + durationSeconds);
+
             instance.colour = arrangementColourForIndex(instance.number - 1);
             arrangementClips.push_back(instance);
             selectedArrangementClipNumber = instance.number;
+            revealArrangementRange(instance.startSeconds, instance.startSeconds + instance.durationSeconds);
             refreshArrangementControls();
         }
 
@@ -1546,8 +1587,12 @@ namespace
             if (!clip)
                 return;
 
-            clip->startSeconds = snapArrangementStart(requestedStartSeconds, clip->durationSeconds, clipNumber);
+            const double requestedStart = std::max(0.0, requestedStartSeconds);
+            ensureArrangementLengthIncludes(requestedStart + clip->durationSeconds);
+            clip->startSeconds = snapArrangementStart(requestedStart, clip->durationSeconds, clipNumber);
+            ensureArrangementLengthIncludes(clip->startSeconds + clip->durationSeconds);
             selectedArrangementClipNumber = clipNumber;
+            revealArrangementRange(clip->startSeconds, clip->startSeconds + clip->durationSeconds);
             refreshArrangementControls();
         }
 
@@ -1573,7 +1618,15 @@ namespace
 
         void extendArrangementLength(double secondsToAdd)
         {
+            const double previousLength = arrangementLengthSeconds;
             arrangementLengthSeconds = std::min(600.0, arrangementLengthSeconds + std::max(1.0, secondsToAdd));
+
+            if (arrangementLengthSeconds > previousLength + 0.0005)
+            {
+                const double contextSeconds = std::min(1.0, arrangementVisibleSeconds * 0.25);
+                arrangementViewStartSeconds = std::clamp(previousLength - contextSeconds, 0.0, arrangementMaxScroll());
+            }
+
             refreshArrangementControls();
         }
 
@@ -1642,22 +1695,16 @@ namespace
 
         void updateArrangementScrollRange()
         {
-            const double maxScroll = std::max(0.0, arrangementLengthSeconds - arrangementVisibleSeconds);
+            const double totalLength = std::max(arrangementVisibleSeconds, arrangementLengthSeconds);
+            const double visibleLength = std::min(arrangementVisibleSeconds, totalLength);
+            const double maxScroll = std::max(0.0, totalLength - visibleLength);
             arrangementViewStartSeconds = std::clamp(arrangementViewStartSeconds, 0.0, maxScroll);
 
             suppressArrangementScrollChange = true;
-            if (maxScroll > 0.0)
-            {
-                arrangementScrollSlider.setRange(0.0, maxScroll, 0.001);
-                arrangementScrollSlider.setValue(arrangementViewStartSeconds, juce::dontSendNotification);
-                arrangementScrollSlider.setEnabled(true);
-            }
-            else
-            {
-                arrangementScrollSlider.setRange(0.0, 1.0, 0.001);
-                arrangementScrollSlider.setValue(0.0, juce::dontSendNotification);
-                arrangementScrollSlider.setEnabled(false);
-            }
+            arrangementScrollBar.setRangeLimits(0.0, totalLength);
+            arrangementScrollBar.setCurrentRange(arrangementViewStartSeconds, visibleLength, juce::dontSendNotification);
+            arrangementScrollBar.setSingleStepSize(0.01);
+            arrangementScrollBar.setEnabled(maxScroll > 0.0);
             suppressArrangementScrollChange = false;
         }
 
@@ -1714,6 +1761,8 @@ namespace
             status << static_cast<int>(arrangementClips.size()) << "/" << static_cast<int>(maxArrangementClips) << " clips";
             status << " | audible end " << juce::String(actualArrangementEndSeconds(), 2) << "s";
             status << " | window " << juce::String(arrangementLengthSeconds, 2) << "s";
+            status << " | view " << juce::String(arrangementViewStartSeconds, 2) << "-"
+                   << juce::String(arrangementViewStartSeconds + arrangementVisibleSeconds, 2) << "s";
             if (trimFrozenForArrangement)
                 status << " | frozen " << juce::String(currentFrozenDurationSeconds(), 2) << "s";
             arrangementStatusLabel.setText(status, juce::dontSendNotification);
@@ -1888,7 +1937,7 @@ namespace
         juce::TextButton extendArrangementButton;
         juce::TextButton previewArrangementButton;
         juce::TextButton renderArrangementButton;
-        juce::Slider arrangementScrollSlider;
+        juce::ScrollBar arrangementScrollBar { false };
         juce::Label arrangementStatusLabel;
         juce::TextEditor detailsBox;
         juce::TextButton closeButton;
