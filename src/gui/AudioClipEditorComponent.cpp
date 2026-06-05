@@ -111,14 +111,6 @@ namespace
             playFullSourceButton.setTooltip("Render/play the full original source range without changing trim metadata.");
             playFullSourceButton.onClick = [this] { previewFullSource(); };
 
-            stopPreviewButton.setButtonText("Stop Preview");
-            stopPreviewButton.setTooltip("Stop AudioClip Editor preview playback.");
-            stopPreviewButton.onClick = [this]
-            {
-                if (onStopPreview)
-                    onStopPreview();
-            };
-
             applyTrimButton.setButtonText("Apply Trim");
             applyTrimButton.setTooltip("Save the pending trim start/end metadata for this AudioClip. The source media file is not modified.");
             applyTrimButton.onClick = [this] { static_cast<void>(applyTrimFromControls()); };
@@ -238,7 +230,6 @@ namespace
             addAndMakeVisible(trimEndBox);
             addAndMakeVisible(previewTrimButton);
             addAndMakeVisible(playFullSourceButton);
-            addAndMakeVisible(stopPreviewButton);
             addAndMakeVisible(applyTrimButton);
             addAndMakeVisible(resetTrimButton);
             addAndMakeVisible(trimStatusLabel);
@@ -293,7 +284,6 @@ namespace
             auto previewRow = area.removeFromTop(34);
             previewTrimButton.setBounds(previewRow.removeFromLeft(128).reduced(4, 4));
             playFullSourceButton.setBounds(previewRow.removeFromLeft(140).reduced(4, 4));
-            stopPreviewButton.setBounds(previewRow.removeFromLeft(118).reduced(4, 4));
             area.removeFromTop(6);
 
             arrangementHelpLabel.setBounds(area.removeFromTop(24).reduced(4, 2));
@@ -1200,7 +1190,6 @@ namespace
             trimEndBox.setEnabled(hasEditableClip && !trimFrozenForArrangement);
             previewTrimButton.setEnabled(hasEditableClip);
             playFullSourceButton.setEnabled(hasEditableClip);
-            stopPreviewButton.setEnabled(hasEditableClip);
             applyTrimButton.setEnabled(hasEditableClip);
             resetTrimButton.setEnabled(hasEditableClip && !trimFrozenForArrangement);
 
@@ -1886,7 +1875,6 @@ namespace
         juce::TextEditor trimEndBox;
         juce::TextButton previewTrimButton;
         juce::TextButton playFullSourceButton;
-        juce::TextButton stopPreviewButton;
         juce::TextButton applyTrimButton;
         juce::TextButton resetTrimButton;
         juce::Label trimStatusLabel;

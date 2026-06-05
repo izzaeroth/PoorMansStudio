@@ -86,6 +86,7 @@ namespace
     {
         std::filesystem::path path;
         double startOffsetSeconds = 0.0;
+        double intendedDurationSeconds = 0.0;
     };
 
     double ticksToSeconds(std::int64_t ticks, int tempoBpm)
@@ -140,10 +141,82 @@ namespace
         return static_cast<double>(samples) / sampleRate;
     }
 
+    double intendedAudioClipDurationSeconds(const mw::core::AudioClip& clip)
+    {
+        if (clip.durationSamples <= 0 || clip.sampleRate <= 0.0)
+            return 0.0;
+
+        const auto trimmedSamples = mw::core::audioClipTrimmedDurationSamples(clip);
+        const auto durationSamples = trimmedSamples > 0 ? trimmedSamples : clip.durationSamples;
+        return samplesToSeconds(durationSamples, clip.sampleRate);
+    }
+
     std::filesystem::path audioClipEffectTempFolderFor(const mw::audio::RenderJob& job)
     {
         const auto safeBaseName = sanitizeAudioClipTempName(job.baseFileName.empty() ? std::string("render") : job.baseFileName);
         return mw::app::AppPaths::tempFolder() / "audioclip_render" / safeBaseName;
+    }
+
+    bool capAudioClipPreparedWavToIntendedDuration(
+        const mw::audio::RenderJob& job,
+        const std::filesystem::path& wavPath,
+        double intendedDurationSeconds,
+        const mw::audio::RenderJobCallbacks& callbacks,
+        std::string& errorMessage)
+    {
+        if (wavPath.empty() || intendedDurationSeconds <= 0.0 || !std::isfinite(intendedDurationSeconds))
+            return true;
+
+        const auto folder = audioClipEffectTempFolderFor(job);
+        std::error_code ec;
+        std::filesystem::create_directories(folder, ec);
+        if (ec)
+        {
+            errorMessage = "Failed to create AudioClip duration-cap temp folder: " + ec.message();
+            return false;
+        }
+
+        const auto cappedWav = folder / (sanitizeAudioClipTempName(wavPath.stem().string()) + "_duration_cap.wav");
+
+        mw::audio::FfmpegTrimRequest trimRequest;
+        trimRequest.ffmpegExePath = job.ffmpegPath;
+        trimRequest.inputPath = wavPath;
+        trimRequest.outputWavPath = cappedWav;
+        trimRequest.trimStartSeconds = 0.0;
+        trimRequest.trimDurationSeconds = intendedDurationSeconds;
+        trimRequest.outputChannels = job.channelCount;
+
+        const auto trimResult = mw::audio::ExternalFfmpegEncoder::trimToWav(trimRequest);
+        log(callbacks, "FFmpeg AudioClip trim-duration cap command: " + trimResult.commandLine);
+        log(callbacks, trimResult.message);
+
+        if (!trimResult.success || !std::filesystem::exists(cappedWav))
+        {
+            errorMessage = "Failed to cap trimmed AudioClip preview/render length.";
+            return false;
+        }
+
+        ec.clear();
+        std::filesystem::remove(wavPath, ec);
+
+        ec.clear();
+        std::filesystem::rename(cappedWav, wavPath, ec);
+        if (ec)
+        {
+            ec.clear();
+            std::filesystem::copy_file(cappedWav, wavPath, std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec)
+            {
+                errorMessage = "Failed to replace AudioClip duration-capped WAV: " + ec.message();
+                return false;
+            }
+
+            std::error_code ignored;
+            std::filesystem::remove(cappedWav, ignored);
+        }
+
+        log(callbacks, "Trimmed AudioClip preview/render capped to kept source duration: " + std::to_string(intendedDurationSeconds) + " sec.");
+        return true;
     }
 
     void cleanupAudioClipEffectTempFolderAfterSuccessfulRender(
@@ -212,6 +285,7 @@ namespace
             const auto clipStem = sanitizeAudioClipTempName(!clip.name.empty() ? clip.name : path.stem().string());
             const auto effectFolder = audioClipEffectTempFolderFor(job);
             const auto startOffsetSeconds = ticksToSeconds(clip.startTick, job.project.getTempoBpm());
+            const auto intendedDurationSeconds = intendedAudioClipDurationSeconds(clip);
             std::filesystem::path preparedSource = path;
 
             const bool hasActiveTrim = mw::core::audioClipHasActiveTrim(clip);
@@ -264,7 +338,11 @@ namespace
 
             if (track == nullptr || !mw::vst::VstInstrumentHost::trackHasEnabledVstEffect(*track))
             {
-                inputs.push_back({ preparedSource, startOffsetSeconds });
+                if (hasActiveTrim
+                    && !capAudioClipPreparedWavToIntendedDuration(job, preparedSource, intendedDurationSeconds, callbacks, errorMessage))
+                    return {};
+
+                inputs.push_back({ preparedSource, startOffsetSeconds, intendedDurationSeconds });
                 ++clipIndex;
                 continue;
             }
@@ -325,7 +403,11 @@ namespace
                 return {};
             }
 
-            inputs.push_back({ processedWav, startOffsetSeconds });
+            if (hasActiveTrim
+                && !capAudioClipPreparedWavToIntendedDuration(job, processedWav, intendedDurationSeconds, callbacks, errorMessage))
+                return {};
+
+            inputs.push_back({ processedWav, startOffsetSeconds, intendedDurationSeconds });
             log(callbacks, sourceKindTitle + " AudioClip VST3 effect processed for track: " + track->getName() + " -> " + processedWav.string());
             ++clipIndex;
         }
