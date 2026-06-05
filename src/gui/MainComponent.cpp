@@ -148,6 +148,267 @@ namespace
         return mw::core::AudioClipSavedFormat::Wav;
     }
 
+
+    std::string joinAudioFilters(const std::vector<std::string>& filters)
+    {
+        std::ostringstream joined;
+        for (std::size_t i = 0; i < filters.size(); ++i)
+        {
+            if (i > 0)
+                joined << ",";
+            joined << filters[i];
+        }
+        return joined.str();
+    }
+
+    int enhancementStrengthIndex(mw::gui::AudioClipEnhancementAmount amount)
+    {
+        switch (amount)
+        {
+            case mw::gui::AudioClipEnhancementAmount::low: return 0;
+            case mw::gui::AudioClipEnhancementAmount::medium: return 1;
+            case mw::gui::AudioClipEnhancementAmount::high: return 2;
+        }
+
+        return 1;
+    }
+
+    std::string compressorFilterForStrength(mw::gui::AudioClipEnhancementAmount amount)
+    {
+        // Phase 5B.2 keeps the FFmpeg-only enhancement path, but separates preset
+        // character more clearly. This default compressor remains conservative for
+        // general cleanup; stronger preset-specific compressors are declared below.
+        switch (amount)
+        {
+            case mw::gui::AudioClipEnhancementAmount::low:
+                return "acompressor=threshold=0.34:ratio=1.30:attack=28:release=280";
+            case mw::gui::AudioClipEnhancementAmount::medium:
+                return "acompressor=threshold=0.24:ratio=1.85:attack=18:release=240";
+            case mw::gui::AudioClipEnhancementAmount::high:
+                return "acompressor=threshold=0.16:ratio=2.60:attack=10:release=190";
+        }
+
+        return "acompressor=threshold=0.24:ratio=1.85:attack=18:release=240";
+    }
+
+    std::string repairCompressorFilterForStrength(mw::gui::AudioClipEnhancementAmount amount)
+    {
+        switch (amount)
+        {
+            case mw::gui::AudioClipEnhancementAmount::low:
+                return "acompressor=threshold=0.30:ratio=1.45:attack=22:release=300";
+            case mw::gui::AudioClipEnhancementAmount::medium:
+                return "acompressor=threshold=0.19:ratio=2.35:attack=14:release=255";
+            case mw::gui::AudioClipEnhancementAmount::high:
+                return "acompressor=threshold=0.10:ratio=3.65:attack=7:release=220";
+        }
+
+        return "acompressor=threshold=0.19:ratio=2.35:attack=14:release=255";
+    }
+
+    std::string voiceCompressorFilterForStrength(mw::gui::AudioClipEnhancementAmount amount)
+    {
+        switch (amount)
+        {
+            case mw::gui::AudioClipEnhancementAmount::low:
+                return "acompressor=threshold=0.28:ratio=1.60:attack=12:release=190";
+            case mw::gui::AudioClipEnhancementAmount::medium:
+                return "acompressor=threshold=0.18:ratio=2.55:attack=8:release=160";
+            case mw::gui::AudioClipEnhancementAmount::high:
+                return "acompressor=threshold=0.10:ratio=4.00:attack=4:release=130";
+        }
+
+        return "acompressor=threshold=0.18:ratio=2.55:attack=8:release=160";
+    }
+
+    std::string masteringCompressorFilterForStrength(mw::gui::AudioClipEnhancementAmount amount)
+    {
+        switch (amount)
+        {
+            case mw::gui::AudioClipEnhancementAmount::low:
+                return "acompressor=threshold=0.36:ratio=1.25:attack=35:release=320";
+            case mw::gui::AudioClipEnhancementAmount::medium:
+                return "acompressor=threshold=0.25:ratio=1.70:attack=24:release=280";
+            case mw::gui::AudioClipEnhancementAmount::high:
+                return "acompressor=threshold=0.16:ratio=2.45:attack=14:release=230";
+        }
+
+        return "acompressor=threshold=0.25:ratio=1.70:attack=24:release=280";
+    }
+
+    std::string deHarshCompressorFilterForStrength(mw::gui::AudioClipEnhancementAmount amount)
+    {
+        switch (amount)
+        {
+            case mw::gui::AudioClipEnhancementAmount::low:
+                return "acompressor=threshold=0.38:ratio=1.20:attack=26:release=260";
+            case mw::gui::AudioClipEnhancementAmount::medium:
+                return "acompressor=threshold=0.30:ratio=1.45:attack=20:release=230";
+            case mw::gui::AudioClipEnhancementAmount::high:
+                return "acompressor=threshold=0.22:ratio=1.85:attack=14:release=210";
+        }
+
+        return "acompressor=threshold=0.30:ratio=1.45:attack=20:release=230";
+    }
+
+    std::string limiterFilterForStrength(mw::gui::AudioClipEnhancementAmount amount)
+    {
+        switch (amount)
+        {
+            case mw::gui::AudioClipEnhancementAmount::low: return "alimiter=limit=0.97";
+            case mw::gui::AudioClipEnhancementAmount::medium: return "alimiter=limit=0.94";
+            case mw::gui::AudioClipEnhancementAmount::high: return "alimiter=limit=0.90";
+        }
+
+        return "alimiter=limit=0.94";
+    }
+
+    std::string strengthDriveFilter(mw::gui::AudioClipEnhancementAmount amount, double lowDb, double mediumDb, double highDb)
+    {
+        double driveDb = mediumDb;
+        switch (amount)
+        {
+            case mw::gui::AudioClipEnhancementAmount::low: driveDb = lowDb; break;
+            case mw::gui::AudioClipEnhancementAmount::medium: driveDb = mediumDb; break;
+            case mw::gui::AudioClipEnhancementAmount::high: driveDb = highDb; break;
+        }
+
+        std::ostringstream filter;
+        filter << "volume=" << std::fixed << std::setprecision(1) << driveDb << "dB";
+        return filter.str();
+    }
+
+    std::string strengthDriveFilter(mw::gui::AudioClipEnhancementAmount amount)
+    {
+        return strengthDriveFilter(amount, 0.6, 1.8, 3.2);
+    }
+
+    std::string buildAudioClipEnhancementFilterChain(
+        mw::gui::AudioClipEnhancementPreset preset,
+        mw::gui::AudioClipEnhancementAmount amount)
+    {
+        const auto strength = enhancementStrengthIndex(amount);
+        std::vector<std::string> filters;
+
+        auto addEq = [&filters](int frequencyHz, double width, double gainDb)
+        {
+            std::ostringstream filter;
+            filter << "equalizer=f=" << frequencyHz
+                   << ":width_type=q:width=" << std::fixed << std::setprecision(2) << width
+                   << ":g=" << std::fixed << std::setprecision(2) << gainDb;
+            filters.push_back(filter.str());
+        };
+
+        switch (preset)
+        {
+            case mw::gui::AudioClipEnhancementPreset::mildCleanup:
+            {
+                // Keep Mild Cleanup conservative: small rumble cleanup, a little mud
+                // reduction, and gentle top smoothing without changing the source's
+                // basic character.
+                filters.push_back(strength == 0 ? "highpass=f=26" : strength == 1 ? "highpass=f=34" : "highpass=f=46");
+                addEq(260, 1.05, strength == 0 ? -0.25 : strength == 1 ? -0.60 : -1.00);
+                addEq(6800, 0.90, strength == 0 ? -0.50 : strength == 1 ? -1.20 : -2.10);
+                addEq(11500, 0.85, strength == 0 ? 0.00 : strength == 1 ? -0.40 : -0.90);
+                filters.push_back(compressorFilterForStrength(amount));
+                filters.push_back(strengthDriveFilter(amount, 0.3, 1.0, 1.8));
+                filters.push_back(limiterFilterForStrength(amount));
+                break;
+            }
+
+            case mw::gui::AudioClipEnhancementPreset::lowBitrateMp3Repair:
+            {
+                // Make the repair preset the most obvious artifact-masking option.
+                // High intentionally trades some openness for smoother, less brittle
+                // playback on old/poorly-ripped MP3 sources.
+                filters.push_back(strength == 0 ? "highpass=f=30" : strength == 1 ? "highpass=f=44" : "highpass=f=60");
+                filters.push_back(strength == 0 ? "lowpass=f=16500" : strength == 1 ? "lowpass=f=12500" : "lowpass=f=9000");
+                addEq(strength == 0 ? 9200 : strength == 1 ? 6800 : 4800, 0.78, strength == 0 ? -1.70 : strength == 1 ? -3.80 : -6.20);
+                addEq(3400, 1.10, strength == 0 ? -0.40 : strength == 1 ? -1.20 : -2.00);
+                addEq(strength == 0 ? 190 : strength == 1 ? 230 : 285, 0.82, strength == 0 ? 0.90 : strength == 1 ? 2.00 : 3.40);
+                addEq(650, 1.20, strength == 0 ? 0.10 : strength == 1 ? 0.45 : 0.75);
+                filters.push_back(repairCompressorFilterForStrength(amount));
+                filters.push_back(strengthDriveFilter(amount, 0.8, 2.2, 3.8));
+                filters.push_back(limiterFilterForStrength(amount));
+                break;
+            }
+
+            case mw::gui::AudioClipEnhancementPreset::warmAndSmooth:
+            {
+                // Warm + Smooth should read as body/warmth first, repair second.
+                // It softens the top but keeps more air than Low Bitrate MP3 Repair.
+                filters.push_back(strength == 0 ? "highpass=f=24" : strength == 1 ? "highpass=f=30" : "highpass=f=38");
+                filters.push_back(strength == 0 ? "lowpass=f=19000" : strength == 1 ? "lowpass=f=17000" : "lowpass=f=14500");
+                addEq(150, 0.78, strength == 0 ? 0.90 : strength == 1 ? 1.90 : 3.00);
+                addEq(360, 0.95, strength == 0 ? 0.25 : strength == 1 ? 0.65 : 1.00);
+                addEq(2600, 1.10, strength == 0 ? 0.00 : strength == 1 ? -0.25 : -0.55);
+                addEq(7200, 0.85, strength == 0 ? -0.80 : strength == 1 ? -1.90 : -3.20);
+                filters.push_back(compressorFilterForStrength(amount));
+                filters.push_back(strengthDriveFilter(amount, 0.7, 1.8, 3.0));
+                filters.push_back(limiterFilterForStrength(amount));
+                break;
+            }
+
+            case mw::gui::AudioClipEnhancementPreset::voiceCleanup:
+            {
+                // Voice Cleanup should focus on intelligibility and control rather
+                // than warm music mastering. High is intentionally more broadcast-like.
+                filters.push_back(strength == 0 ? "highpass=f=75" : strength == 1 ? "highpass=f=105" : "highpass=f=145");
+                addEq(180, 1.00, strength == 0 ? -0.35 : strength == 1 ? -0.90 : -1.60);
+                addEq(3000, 0.95, strength == 0 ? 1.00 : strength == 1 ? 2.30 : 3.60);
+                addEq(5200, 0.90, strength == 0 ? 0.20 : strength == 1 ? 0.50 : 0.80);
+                addEq(7800, 0.82, strength == 0 ? -0.90 : strength == 1 ? -2.20 : -3.80);
+                filters.push_back(voiceCompressorFilterForStrength(amount));
+                filters.push_back(strengthDriveFilter(amount, 0.8, 2.0, 3.4));
+                filters.push_back(limiterFilterForStrength(amount));
+                break;
+            }
+
+            case mw::gui::AudioClipEnhancementPreset::musicMasteringLite:
+            {
+                // Music Mastering Lite should be glue/level/broad tone, not heavy
+                // artifact repair. It is intentionally less dark than MP3 Repair.
+                filters.push_back(strength == 0 ? "highpass=f=22" : strength == 1 ? "highpass=f=30" : "highpass=f=40");
+                addEq(70, 0.75, strength == 0 ? 0.35 : strength == 1 ? 0.80 : 1.25);
+                addEq(260, 1.05, strength == 0 ? -0.35 : strength == 1 ? -0.80 : -1.25);
+                addEq(1700, 1.00, strength == 0 ? 0.10 : strength == 1 ? 0.35 : 0.60);
+                addEq(4400, 0.85, strength == 0 ? 0.35 : strength == 1 ? 0.85 : 1.30);
+                addEq(9800, 0.92, strength == 0 ? 0.10 : strength == 1 ? -0.25 : -0.75);
+                filters.push_back(masteringCompressorFilterForStrength(amount));
+                filters.push_back(strengthDriveFilter(amount, 0.9, 2.3, 3.7));
+                filters.push_back(limiterFilterForStrength(amount));
+                break;
+            }
+
+            case mw::gui::AudioClipEnhancementPreset::gentleDeHarsh:
+            {
+                // Gentle De-Harsh is deliberately not a loudness preset. It should
+                // mostly reduce fatigue/brittleness while keeping the level push mild.
+                filters.push_back(strength == 0 ? "highpass=f=28" : strength == 1 ? "highpass=f=36" : "highpass=f=48");
+                filters.push_back(strength == 0 ? "lowpass=f=18500" : strength == 1 ? "lowpass=f=15000" : "lowpass=f=12000");
+                addEq(3300, 0.86, strength == 0 ? -0.90 : strength == 1 ? -2.30 : -3.90);
+                addEq(5800, 0.78, strength == 0 ? -1.20 : strength == 1 ? -3.10 : -5.00);
+                addEq(9200, 0.90, strength == 0 ? -0.70 : strength == 1 ? -1.70 : -2.80);
+                filters.push_back(deHarshCompressorFilterForStrength(amount));
+                filters.push_back(strengthDriveFilter(amount, 0.2, 0.8, 1.4));
+                filters.push_back(limiterFilterForStrength(amount));
+                break;
+            }
+
+            case mw::gui::AudioClipEnhancementPreset::loudnessNormalize:
+            {
+                // Keep this boring on purpose: level/peak utility, not tone repair.
+                const char* target = strength == 0 ? "-18" : strength == 1 ? "-15" : "-12";
+                const char* truePeak = strength == 0 ? "-1.5" : strength == 1 ? "-1.0" : "-0.8";
+                filters.push_back(std::string("loudnorm=I=") + target + ":TP=" + truePeak + ":LRA=9");
+                filters.push_back(limiterFilterForStrength(amount));
+                break;
+            }
+        }
+
+        return joinAudioFilters(filters);
+    }
+
     bool folderContainsAnyRegularFile(const std::filesystem::path& folder)
     {
         std::error_code ec;
@@ -24757,6 +25018,414 @@ void MainComponent::selectTrackFromManagerPage()
         return true;
     }
 
+    bool MainComponent::handleAudioClipEditorEnhancementRequest(mw::gui::AudioClipEnhancementRequest request)
+    {
+        if (!currentProject || request.clipId <= 0)
+        {
+            logMessage("AudioClip Enhancement: no AudioClip selected.");
+            return false;
+        }
+
+        const mw::core::AudioClip* sourceClip = nullptr;
+        for (const auto& clip : currentProject->getAudioClips())
+        {
+            if (clip.id == request.clipId)
+            {
+                sourceClip = &clip;
+                break;
+            }
+        }
+
+        if (sourceClip == nullptr)
+        {
+            logMessage("AudioClip Enhancement: selected AudioClip media could not be found.");
+            return false;
+        }
+
+        if (sourceClip->durationSamples <= 0 || sourceClip->sampleRate <= 0.0)
+        {
+            logMessage("AudioClip Enhancement: selected AudioClip has no valid full-source duration.");
+            return false;
+        }
+
+        if (renderingInProgress)
+        {
+            logMessage(request.action == mw::gui::AudioClipEnhancementAction::previewEnhanced
+                ? "AudioClip Enhancement Preview: render/preview already in progress."
+                : "AudioClip Enhancement Copy: render/preview already in progress.");
+            return false;
+        }
+
+        auto resolveEnhancementSourcePath = [this](const mw::core::AudioClip& clip) -> std::filesystem::path
+        {
+            std::error_code ec;
+            if (!clip.projectRelativePath.empty())
+            {
+                if (clip.projectRelativePath.is_absolute())
+                {
+                    if (std::filesystem::exists(clip.projectRelativePath, ec) && !ec)
+                        return clip.projectRelativePath;
+                }
+                else
+                {
+                    const auto projectFolder = getCurrentProjectFolder();
+                    if (!projectFolder.empty())
+                    {
+                        const auto absolute = (projectFolder / clip.projectRelativePath).lexically_normal();
+                        if (std::filesystem::exists(absolute, ec) && !ec)
+                            return absolute;
+                    }
+
+                    if (std::filesystem::exists(clip.projectRelativePath, ec) && !ec)
+                        return clip.projectRelativePath;
+                }
+            }
+
+            // Last-resort fallback only.  Enhancement should normally use the
+            // active normalized/project-safe source, not mutate or depend on the
+            // external original import path.
+            if (!clip.originalSourcePath.empty() && std::filesystem::exists(clip.originalSourcePath, ec) && !ec)
+                return clip.originalSourcePath;
+
+            return {};
+        };
+
+        const auto sourcePath = resolveEnhancementSourcePath(*sourceClip);
+        if (sourcePath.empty())
+        {
+            logMessage(request.action == mw::gui::AudioClipEnhancementAction::previewEnhanced
+                ? "AudioClip Enhancement Preview: selected AudioClip media file could not be resolved."
+                : "AudioClip Enhancement Copy: selected AudioClip media file could not be resolved.");
+            return false;
+        }
+
+        const auto filterChain = buildAudioClipEnhancementFilterChain(request.preset, request.amount);
+        if (filterChain.empty())
+        {
+            logMessage(request.action == mw::gui::AudioClipEnhancementAction::previewEnhanced
+                ? "AudioClip Enhancement Preview: selected preset/strength produced no FFmpeg filter chain."
+                : "AudioClip Enhancement Copy: selected preset/strength produced no FFmpeg filter chain.");
+            return false;
+        }
+
+        const auto outputChannels = channelsCombo.getSelectedId() == 1 ? 1 : 2;
+        const auto ffmpegPath = std::filesystem::path(ffmpegPathBox.getText().toStdString());
+        const auto outputSampleRate = sourceClip->sampleRate > 0.0
+            ? std::max(8000, static_cast<int>(std::llround(sourceClip->sampleRate)))
+            : 44100;
+
+        auto sourceClipCopy = *sourceClip;
+        sourceClipCopy.sourceTrimStartSamples = 0;
+        sourceClipCopy.sourceTrimEndSamples = sourceClipCopy.durationSamples;
+        mw::core::normalizeAudioClipTrim(sourceClipCopy);
+
+        juce::String label;
+        label << "AudioClip Enhancement "
+              << (request.action == mw::gui::AudioClipEnhancementAction::previewEnhanced ? "preview" : "copy")
+              << " for media #" << sourceClipCopy.id
+              << " (" << mw::gui::audioClipEnhancementPresetName(request.preset)
+              << " / " << mw::gui::audioClipEnhancementAmountName(request.amount)
+              << " strength, full source)";
+
+        if (request.action == mw::gui::AudioClipEnhancementAction::createEnhancedCopy)
+        {
+            if (!ensureProjectFolderReadyForAudio())
+                return false;
+
+            if (!canAddAnotherTrack("Create Enhanced Copy"))
+                return false;
+
+            const bool targetProjectIsSaved = currentProjectFilePath && !currentProjectFilePath->empty();
+            const auto projectFolder = targetProjectIsSaved ? getCurrentProjectFolder() : std::filesystem::path{};
+            if (targetProjectIsSaved && projectFolder.empty())
+            {
+                logMessage("AudioClip Enhancement Copy: current project folder could not be resolved.");
+                return false;
+            }
+
+            const auto stagingProjectFolder = targetProjectIsSaved
+                ? std::filesystem::path{}
+                : getAudioRecordingSessionFolder();
+            const auto importProjectFolder = targetProjectIsSaved ? projectFolder : stagingProjectFolder;
+            if (importProjectFolder.empty())
+            {
+                logMessage("AudioClip Enhancement Copy: staging/project media folder could not be resolved.");
+                return false;
+            }
+
+            const auto now = juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S").toStdString();
+            const auto scratchFolder = mw::app::AppPaths::tempFolder() / "audioclip_enhance_copy" / ("enhanced_" + now);
+            auto preferredName = sourceClipCopy.name.empty()
+                ? sourcePath.stem().string()
+                : sourceClipCopy.name;
+            preferredName += "_enhanced_";
+            preferredName += mw::gui::audioClipEnhancementPresetName(request.preset).toStdString();
+            preferredName += "_";
+            preferredName += mw::gui::audioClipEnhancementAmountName(request.amount).toStdString();
+
+            mw::audio::FfmpegEnhancePreviewRequest ffmpegRequest;
+            ffmpegRequest.ffmpegExePath = ffmpegPath;
+            ffmpegRequest.inputPath = sourcePath;
+            ffmpegRequest.outputWavPath = scratchFolder / "enhanced_full_source.wav";
+            ffmpegRequest.audioFilterChain = filterChain;
+            ffmpegRequest.outputChannels = outputChannels;
+            ffmpegRequest.outputSampleRate = outputSampleRate;
+            ffmpegRequest.mciCompatibleWav = false;
+            ffmpegRequest.timeoutSeconds = 900;
+
+            if (renderThread.joinable())
+                renderThread.join();
+
+            cancelRenderRequested = false;
+            setRenderingState(true);
+            logMessage(juce::String("AudioClip Enhancement Copy started: ") + label);
+            logMessage("AudioClip Enhancement Copy filter chain: " + filterChain);
+
+            renderThread = std::thread(
+                [this,
+                 ffmpegRequest,
+                 scratchFolder,
+                 importProjectFolder,
+                 targetProjectIsSaved,
+                 preferredName,
+                 sourceClipCopy,
+                 label]
+                {
+                    struct EnhancementCopyResult
+                    {
+                        bool success = false;
+                        bool stagedUntilProjectSave = false;
+                        juce::String message;
+                        std::string ffmpegCommandLine;
+                        mw::audio::AudioClipImportResult importResult;
+                    } result;
+
+                    std::error_code ec;
+                    std::filesystem::create_directories(scratchFolder, ec);
+                    if (ec)
+                    {
+                        result.message = "AudioClip Enhancement Copy: could not create workspace temp render folder: " + juce::String(ec.message());
+                    }
+                    else
+                    {
+                        const auto enhanceResult = mw::audio::ExternalFfmpegEncoder::enhancePreviewToWav(ffmpegRequest);
+                        result.ffmpegCommandLine = enhanceResult.commandLine;
+
+                        if (!enhanceResult.success || !std::filesystem::exists(ffmpegRequest.outputWavPath))
+                        {
+                            result.message = "AudioClip Enhancement Copy: FFmpeg could not render enhanced full-source media. " + juce::String(enhanceResult.message);
+                        }
+                        else
+                        {
+                            mw::audio::AudioClipImportRequest importRequest;
+                            importRequest.sourcePath = ffmpegRequest.outputWavPath;
+                            importRequest.projectFolder = importProjectFolder;
+                            importRequest.ffmpegExePath = ffmpegRequest.ffmpegExePath;
+                            // Phase 5C commits enhanced copies as readable WAV media first.
+                            // This keeps the new-track workflow safe and predictable; later
+                            // phases can add format matching if needed.
+                            importRequest.savedFormat = mw::core::AudioClipSavedFormat::Wav;
+                            importRequest.qualityKbps = 320;
+                            importRequest.channelCount = ffmpegRequest.outputChannels;
+                            importRequest.imported = true;
+                            importRequest.forceTranscode = false;
+                            importRequest.fallbackToReadableWav = true;
+                            importRequest.preferredName = preferredName;
+
+                            result.importResult = mw::audio::AudioClipImporter::importToProject(importRequest);
+                            if (!result.importResult.success)
+                            {
+                                result.message = "AudioClip Enhancement Copy: could not import/stage enhanced media. " + juce::String(result.importResult.message);
+                            }
+                            else
+                            {
+                                result.success = true;
+                                result.stagedUntilProjectSave = !targetProjectIsSaved;
+                                const auto displayedPath = result.stagedUntilProjectSave
+                                    ? result.importResult.absolutePath
+                                    : result.importResult.relativePath;
+                                result.message = "AudioClip Enhancement Copy: created enhanced generated media: "
+                                    + juce::String(displayedPath.string())
+                                    + ". Original AudioClip source media was not modified.";
+                                if (result.stagedUntilProjectSave)
+                                    result.message += " Staged in the current AudioClip temp session until Save Project migrates it into the project's input/audio/imported folder.";
+                            }
+                        }
+                    }
+
+                    std::filesystem::remove_all(scratchFolder, ec);
+
+                    juce::MessageManager::callAsync(
+                        [this, result, sourceClipCopy, label]
+                        {
+                            if (!result.ffmpegCommandLine.empty())
+                                logMessage("FFmpeg AudioClip Enhancement copy command: " + result.ffmpegCommandLine);
+                            logMessage(result.message);
+
+                            if (!result.success)
+                            {
+                                setRenderingState(false);
+                                return;
+                            }
+
+                            const int trackIndex = createAudioClipTrackForNewClip("Enhanced AudioClip");
+                            if (trackIndex < 0)
+                            {
+                                logMessage("AudioClip Enhancement Copy: enhanced media was created but could not be attached because a new track could not be created.");
+                                setRenderingState(false);
+                                return;
+                            }
+
+                            mw::core::AudioClip clip;
+                            clip.name = safeClipDisplayName(result.importResult.absolutePath).toStdString();
+                            clip.trackIndex = trackIndex;
+                            clip.sequenceNumber = sourceClipCopy.sequenceNumber;
+                            clip.sourceType = mw::core::AudioClipSourceType::Imported;
+                            clip.savedFormat = result.importResult.savedFormat;
+                            clip.projectRelativePath = result.stagedUntilProjectSave
+                                ? result.importResult.absolutePath
+                                : result.importResult.relativePath;
+                            // For unsaved projects, leave originalSourcePath empty so Save/Save As
+                            // migrates the staged generated media into the project input folder
+                            // instead of preserving a workspace/temp path as the long-term source.
+                            clip.originalSourcePath = result.stagedUntilProjectSave
+                                ? std::filesystem::path{}
+                                : result.importResult.absolutePath;
+                            clip.startTick = sourceClipCopy.startTick;
+                            clip.durationSamples = result.importResult.durationSamples;
+                            clip.sampleRate = result.importResult.sampleRate;
+                            clip.channelCount = result.importResult.channelCount;
+                            clip.bitDepth = result.importResult.bitDepth;
+                            clip.sizeBytes = result.importResult.sizeBytes;
+                            clip.sourceTrimStartSamples = 0;
+                            clip.sourceTrimEndSamples = clip.durationSamples;
+                            mw::core::normalizeAudioClipTrim(clip);
+
+                            expandSequenceEndTickForAudioClip(clip);
+                            addAudioClipToProject(std::move(clip));
+
+                            logMessage(result.stagedUntilProjectSave
+                                ? "AudioClip Enhancement Copy: created new imported-style AudioClip track from staged enhanced media. Save Project will migrate it into input/audio/imported. Original source media was not modified."
+                                : "AudioClip Enhancement Copy: created new imported-style AudioClip track from enhanced media in project input/audio/imported. Original source media was not modified.");
+                            logMessage(juce::String("AudioClip Enhancement Copy completed: ") + label);
+                            setRenderingState(false);
+                        }
+                    );
+                }
+            );
+
+            return true;
+        }
+
+        cleanupPianoRollPreviewFiles();
+        lastPianoRollPreviewScope = 4;
+        lastAudioClipEditorPreviewClipId = sourceClip->id;
+        lastAudioClipEditorPreviewStartSamples = 0;
+        lastAudioClipEditorPreviewEndSamples = sourceClip->durationSamples;
+        lastAudioClipEditorPreviewFullSource = true;
+        lastPianoRollPreviewNotes.clear();
+        lastPianoRollPreviewAudioClips.clear();
+
+        const auto previewFolder = mw::app::AppPaths::previewFolder();
+        std::error_code folderError;
+        std::filesystem::create_directories(previewFolder, folderError);
+        if (folderError)
+        {
+            logMessage("AudioClip Enhancement Preview: could not create preview temp folder: " + juce::String(folderError.message()));
+            return false;
+        }
+
+        // Keep the AudioClip enhancement preview WAV basename intentionally short.
+        // The Preview Player currently uses Windows MCI for WAV playback, and MCI can
+        // reject otherwise-valid WAV files when the generated filename/path is too long.
+        const auto outputPath = previewFolder / "aceh.wav";
+        const auto tempo = pianoRollBpmBox.getText().getDoubleValue() > 0.0
+            ? pianoRollBpmBox.getText().getDoubleValue()
+            : static_cast<double>(std::max(1, currentProject->getTempoBpm()));
+        const auto fallbackPreviewBeats = std::max(0.01, (static_cast<double>(sourceClip->durationSamples) / sourceClip->sampleRate) * tempo / 60.0);
+
+        mw::audio::FfmpegEnhancePreviewRequest ffmpegRequest;
+        ffmpegRequest.ffmpegExePath = ffmpegPath;
+        ffmpegRequest.inputPath = sourcePath;
+        ffmpegRequest.outputWavPath = outputPath;
+        ffmpegRequest.audioFilterChain = filterChain;
+        ffmpegRequest.outputChannels = outputChannels;
+        ffmpegRequest.outputSampleRate = 44100;
+        ffmpegRequest.mciCompatibleWav = true;
+
+        if (renderThread.joinable())
+            renderThread.join();
+
+        cancelRenderRequested = false;
+        setRenderingState(true);
+        logMessage(juce::String("AudioClip Enhancement Preview started: ") + label);
+        logMessage("AudioClip Enhancement Preview filter chain: " + filterChain);
+
+        renderThread = std::thread(
+            [this, ffmpegRequest, outputPath, sourceClipCopy, label, tempo, fallbackPreviewBeats]
+            {
+                const auto enhanceResult = mw::audio::ExternalFfmpegEncoder::enhancePreviewToWav(ffmpegRequest);
+
+                juce::MessageManager::callAsync(
+                    [this, enhanceResult, outputPath, sourceClipCopy, label, tempo, fallbackPreviewBeats]
+                    {
+                        logMessage("FFmpeg AudioClip Enhancement preview command: " + enhanceResult.commandLine);
+                        logMessage(enhanceResult.message);
+
+                        if (!enhanceResult.success || !std::filesystem::exists(outputPath))
+                        {
+                            logMessage(juce::String("AudioClip Enhancement Preview failed (") + label + "): could not create enhanced preview WAV in workspace/temp.");
+                            setRenderingState(false);
+                            return;
+                        }
+
+                        const auto info = readAudioFileBasicInfo(outputPath);
+                        if (!info.valid || info.durationSamples <= 0 || info.sampleRate <= 0.0)
+                        {
+                            logMessage(juce::String("AudioClip Enhancement Preview failed (") + label + "): enhanced preview WAV was not readable or had no duration.");
+                            setRenderingState(false);
+                            return;
+                        }
+
+                        generatedPreviewFiles.clear();
+                        generatedPreviewFiles.push_back(outputPath);
+
+                        lastPianoRollPreviewWavPath = outputPath;
+                        lastPianoRollPreviewTempoBpm = tempo;
+                        const auto renderedPreviewSeconds = getAudioFileDurationSeconds(outputPath);
+                        lastPianoRollPreviewDurationBeats = renderedPreviewSeconds > 0.0
+                            ? std::max(0.01, renderedPreviewSeconds * tempo / 60.0)
+                            : fallbackPreviewBeats;
+                        pianoRollPreviewPaused = false;
+                        pendingPianoRollPreviewStartSeconds = 0.0;
+
+                        auto previewMapClip = sourceClipCopy;
+                        previewMapClip.projectRelativePath = outputPath;
+                        previewMapClip.originalSourcePath.clear();
+                        previewMapClip.durationSamples = info.durationSamples;
+                        previewMapClip.sampleRate = info.sampleRate;
+                        previewMapClip.channelCount = info.channelCount;
+                        previewMapClip.bitDepth = info.bitDepth;
+                        previewMapClip.sizeBytes = info.sizeBytes;
+                        previewMapClip.startTick = 0;
+                        previewMapClip.sourceTrimStartSamples = 0;
+                        previewMapClip.sourceTrimEndSamples = previewMapClip.durationSamples;
+                        mw::core::normalizeAudioClipTrim(previewMapClip);
+                        lastPianoRollPreviewAudioClips = { previewMapClip };
+
+                        openPianoRollPreviewPlayerWindow();
+                        playPianoRollPreviewFile(lastPianoRollPreviewWavPath);
+                        logMessage("Opened AudioClip Enhancement Preview Player for: " + outputPath.string());
+                        logMessage("AudioClip Enhancement Preview completed as temporary full-source media only. Original AudioClip source/project metadata were not changed.");
+                        setRenderingState(false);
+                    }
+                );
+            }
+        );
+
+        return true;
+    }
+
     void MainComponent::stopAudioClipEditorPreview()
     {
 #if JUCE_WINDOWS
@@ -24933,6 +25602,11 @@ void MainComponent::selectTrackFromManagerPage()
             return renderAudioClipEditorArrangementToNewTrack(std::move(arrangementClips));
         };
 
+        auto enhanceAudioClip = [this](mw::gui::AudioClipEnhancementRequest request)
+        {
+            return handleAudioClipEditorEnhancementRequest(request);
+        };
+
         audioClipEditorContent = createAudioClipEditorComponent(
             *currentProject,
             trackIndex,
@@ -24944,13 +25618,14 @@ void MainComponent::selectTrackFromManagerPage()
             stopPreview,
             previewArrangement,
             renderArrangement,
+            enhanceAudioClip,
             closeWindow
         );
 
         auto* window = new PianoRollDocumentWindow("AudioClip Editor", closeWindow);
         applyPoorMansStudioCustomTitleBar(*window);
         window->setResizable(true, true);
-        window->setResizeLimits(860, 720, 1900, 1300);
+        window->setResizeLimits(860, 800, 1900, 1300);
         window->setContentNonOwned(audioClipEditorContent.get(), true);
         window->centreWithSize(1120, 900);
         window->setVisible(true);

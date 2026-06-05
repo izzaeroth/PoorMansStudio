@@ -17,6 +17,84 @@
 
 namespace mw::gui
 {
+juce::String audioClipEnhancementPresetName(AudioClipEnhancementPreset preset)
+{
+    switch (preset)
+    {
+        case AudioClipEnhancementPreset::mildCleanup: return "Mild Cleanup";
+        case AudioClipEnhancementPreset::lowBitrateMp3Repair: return "Low Bitrate MP3 Repair";
+        case AudioClipEnhancementPreset::warmAndSmooth: return "Warm + Smooth";
+        case AudioClipEnhancementPreset::voiceCleanup: return "Voice Cleanup";
+        case AudioClipEnhancementPreset::musicMasteringLite: return "Music Mastering Lite";
+        case AudioClipEnhancementPreset::gentleDeHarsh: return "Gentle De-Harsh";
+        case AudioClipEnhancementPreset::loudnessNormalize: return "Loudness Normalize";
+    }
+
+    return "Mild Cleanup";
+}
+
+juce::String audioClipEnhancementAmountName(AudioClipEnhancementAmount amount)
+{
+    switch (amount)
+    {
+        case AudioClipEnhancementAmount::low: return "Low";
+        case AudioClipEnhancementAmount::medium: return "Medium";
+        case AudioClipEnhancementAmount::high: return "High";
+    }
+
+    return "Medium";
+}
+
+
+juce::String audioClipEnhancementPresetDescription(AudioClipEnhancementPreset preset)
+{
+    switch (preset)
+    {
+        case AudioClipEnhancementPreset::mildCleanup:
+            return "Balanced gentle cleanup: light rumble control, small tonal smoothing, safer level control.";
+        case AudioClipEnhancementPreset::lowBitrateMp3Repair:
+            return "For harsh or swirly low-bitrate files: smooths brittle highs, adds a little body, and rebalances the source. It cannot restore audio detail that compression already discarded.";
+        case AudioClipEnhancementPreset::warmAndSmooth:
+            return "For thin or sharp audio: adds subtle body/warmth and softens harsh top end.";
+        case AudioClipEnhancementPreset::voiceCleanup:
+            return "For spoken or sung voice: reduces rumble/harshness, controls peaks, and aims for clearer usable voice level.";
+        case AudioClipEnhancementPreset::musicMasteringLite:
+            return "For full songs or loops: conservative tone balance, light compression, loudness control, and limiting.";
+        case AudioClipEnhancementPreset::gentleDeHarsh:
+            return "For fatiguing audio: focuses on reducing sharp highs and brittle edge without trying to make it louder.";
+        case AudioClipEnhancementPreset::loudnessNormalize:
+            return "For level matching: mostly adjusts loudness and peak safety with minimal tone change.";
+    }
+
+    return "Balanced gentle cleanup: light rumble control, small tonal smoothing, safer level control.";
+}
+
+juce::String audioClipEnhancementAmountDescription(AudioClipEnhancementAmount amount)
+{
+    switch (amount)
+    {
+        case AudioClipEnhancementAmount::low:
+            return "Low strength: safest/subtlest setting. Small EQ, smoothing, compression, and limiting moves.";
+        case AudioClipEnhancementAmount::medium:
+            return "Medium strength: default balanced setting. Noticeable cleanup without pushing the source too hard.";
+        case AudioClipEnhancementAmount::high:
+            return "High strength: strongest setting. More aggressive smoothing/level control; useful for rough audio but more likely to change the tone.";
+    }
+
+    return "Medium strength: default balanced setting. Noticeable cleanup without pushing the source too hard.";
+}
+
+juce::String audioClipEnhancementActionName(AudioClipEnhancementAction action)
+{
+    switch (action)
+    {
+        case AudioClipEnhancementAction::previewEnhanced: return "Preview Enhanced";
+        case AudioClipEnhancementAction::createEnhancedCopy: return "Create Enhanced Copy";
+    }
+
+    return "Preview Enhanced";
+}
+
 namespace
 {
     juce::String formatBytes(std::uintmax_t bytes)
@@ -50,6 +128,7 @@ namespace
             std::function<void()> stopPreviewCallback,
             std::function<bool(std::vector<AudioClipArrangementRenderClip>)> previewArrangementCallback,
             std::function<bool(std::vector<AudioClipArrangementRenderClip>)> renderArrangementCallback,
+            std::function<bool(AudioClipEnhancementRequest)> enhancementCallback,
             std::function<void()> closeCallback)
             : projectSnapshot(project),
               selectedTrackIndex(selectedTrackIndex),
@@ -61,17 +140,18 @@ namespace
               onStopPreview(std::move(stopPreviewCallback)),
               onPreviewArrangement(std::move(previewArrangementCallback)),
               onRenderArrangement(std::move(renderArrangementCallback)),
+              onEnhanceAudioClip(std::move(enhancementCallback)),
               onClose(std::move(closeCallback))
         {
             titleLabel.setText("AudioClip Editor", juce::dontSendNotification);
             titleLabel.setJustificationType(juce::Justification::centredLeft);
             titleLabel.setFont(juce::FontOptions(22.0f, juce::Font::bold));
 
-            statusLabel.setText("Phase 4J: drag trim handles, Freeze the kept section, click the larger lane to arrange repeats/overlaps, Preview Arrangement, then render to a new AudioClip track. Source files stay untouched.", juce::dontSendNotification);
+            statusLabel.setText("Phase 5C: trim/arrangement workflow is preserved. Preview Enhanced renders temp audio; Create Enhanced Copy makes a new full-source enhanced AudioClip track.", juce::dontSendNotification);
             statusLabel.setJustificationType(juce::Justification::centredLeft);
             statusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
             statusLabel.setFont(juce::FontOptions(13.0f));
-            statusLabel.setTooltip("Quick summary of the AudioClip Editor workflow: trim the source, freeze a kept section, place repeats in the lane, preview, then render to a new track.");
+            statusLabel.setTooltip("AudioClip Editor workflow: trim/arrange as before. Enhancement is full-source and non-destructive: Preview Enhanced is temp-only, while Create Enhanced Copy creates a new AudioClip track.");
 
             detailsBox.setMultiLine(true);
             detailsBox.setReadOnly(true);
@@ -111,6 +191,54 @@ namespace
             playFullSourceButton.setButtonText("Play Full Source");
             playFullSourceButton.setTooltip("Render/play the full original source range without changing trim metadata.");
             playFullSourceButton.onClick = [this] { previewFullSource(); };
+
+            enhancementHelpLabel.setText("Full-source enhancement: Preset chooses the repair style; Strength controls how hard it is applied. Original and trim/arrangement stay untouched.", juce::dontSendNotification);
+            enhancementHelpLabel.setJustificationType(juce::Justification::centredLeft);
+            enhancementHelpLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+            enhancementHelpLabel.setFont(juce::FontOptions(12.5f));
+            enhancementHelpLabel.setTooltip("Audio Enhancement / Repair will process the whole AudioClip source file and create a new generated AudioClip copy. It does not use trim handles or arrangement clips, and it does not overwrite original imported/recorded media.");
+
+            enhancementPresetLabel.setText("Preset", juce::dontSendNotification);
+            enhancementPresetLabel.setJustificationType(juce::Justification::centredRight);
+            enhancementPresetLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.86f));
+            enhancementPresetLabel.setTooltip("Preset chooses the enhancement style for the full source, such as low-bitrate smoothing, voice cleanup, de-harshing, or loudness normalization. Preview Enhanced and Create Enhanced Copy use this same tuned FFmpeg chain.");
+
+            enhancementPresetCombo.setTooltip("Choose what kind of repair/enhancement will be applied to the full AudioClip source. Each preset changes the planned EQ/smoothing/compression/limiting chain; it does not change source length or apply trim handles.");
+            enhancementPresetCombo.addItem(audioClipEnhancementPresetName(AudioClipEnhancementPreset::mildCleanup), static_cast<int>(AudioClipEnhancementPreset::mildCleanup));
+            enhancementPresetCombo.addItem(audioClipEnhancementPresetName(AudioClipEnhancementPreset::lowBitrateMp3Repair), static_cast<int>(AudioClipEnhancementPreset::lowBitrateMp3Repair));
+            enhancementPresetCombo.addItem(audioClipEnhancementPresetName(AudioClipEnhancementPreset::warmAndSmooth), static_cast<int>(AudioClipEnhancementPreset::warmAndSmooth));
+            enhancementPresetCombo.addItem(audioClipEnhancementPresetName(AudioClipEnhancementPreset::voiceCleanup), static_cast<int>(AudioClipEnhancementPreset::voiceCleanup));
+            enhancementPresetCombo.addItem(audioClipEnhancementPresetName(AudioClipEnhancementPreset::musicMasteringLite), static_cast<int>(AudioClipEnhancementPreset::musicMasteringLite));
+            enhancementPresetCombo.addItem(audioClipEnhancementPresetName(AudioClipEnhancementPreset::gentleDeHarsh), static_cast<int>(AudioClipEnhancementPreset::gentleDeHarsh));
+            enhancementPresetCombo.addItem(audioClipEnhancementPresetName(AudioClipEnhancementPreset::loudnessNormalize), static_cast<int>(AudioClipEnhancementPreset::loudnessNormalize));
+            enhancementPresetCombo.setSelectedId(static_cast<int>(AudioClipEnhancementPreset::mildCleanup), juce::dontSendNotification);
+            enhancementPresetCombo.onChange = [this] { updateEnhancementStatusForSelection(); };
+
+            enhancementAmountLabel.setText("Strength", juce::dontSendNotification);
+            enhancementAmountLabel.setJustificationType(juce::Justification::centredRight);
+            enhancementAmountLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.86f));
+            enhancementAmountLabel.setTooltip("Strength controls how aggressively the selected preset will be applied. It is not a volume knob: it changes the planned EQ, smoothing, compression, and limiting intensity.");
+
+            enhancementAmountCombo.setTooltip("Low is subtle and safest. Medium is the default balanced repair. High is stronger and may change the tone more. This controls processing strength, not output volume.");
+            enhancementAmountCombo.addItem(audioClipEnhancementAmountName(AudioClipEnhancementAmount::low), static_cast<int>(AudioClipEnhancementAmount::low));
+            enhancementAmountCombo.addItem(audioClipEnhancementAmountName(AudioClipEnhancementAmount::medium), static_cast<int>(AudioClipEnhancementAmount::medium));
+            enhancementAmountCombo.addItem(audioClipEnhancementAmountName(AudioClipEnhancementAmount::high), static_cast<int>(AudioClipEnhancementAmount::high));
+            enhancementAmountCombo.setSelectedId(static_cast<int>(AudioClipEnhancementAmount::medium), juce::dontSendNotification);
+            enhancementAmountCombo.onChange = [this] { updateEnhancementStatusForSelection(); };
+
+            previewEnhancedButton.setButtonText("Preview Enhanced");
+            previewEnhancedButton.setTooltip("Render a temporary enhanced preview of the full AudioClip source and open it in the Preview Player. Original media, trim handles, arrangement clips, and project metadata stay untouched.");
+            previewEnhancedButton.onClick = [this] { requestAudioClipEnhancement(AudioClipEnhancementAction::previewEnhanced); };
+
+            createEnhancedCopyButton.setButtonText("Create Enhanced Copy");
+            createEnhancedCopyButton.setTooltip("Render the full AudioClip source to a new enhanced generated WAV and create a new imported-style AudioClip track. Original media, trim handles, and arrangement clips stay untouched.");
+            createEnhancedCopyButton.onClick = [this] { requestAudioClipEnhancement(AudioClipEnhancementAction::createEnhancedCopy); };
+
+            enhancementStatusLabel.setJustificationType(juce::Justification::centredLeft);
+            enhancementStatusLabel.setColour(juce::Label::textColourId, juce::Colours::yellow.withAlpha(0.92f));
+            enhancementStatusLabel.setFont(juce::FontOptions(12.0f));
+            enhancementStatusLabel.setTooltip("Shows the selected enhancement plan. Preview Enhanced renders temporary full-source preview audio; Create Enhanced Copy creates a new non-destructive enhanced AudioClip track.");
+            updateEnhancementStatusForSelection();
 
             applyTrimButton.setButtonText("Apply Trim");
             applyTrimButton.setTooltip("Save the pending trim start/end metadata for this AudioClip. The source media file is not modified.");
@@ -224,6 +352,14 @@ namespace
             addAndMakeVisible(trimEndBox);
             addAndMakeVisible(previewTrimButton);
             addAndMakeVisible(playFullSourceButton);
+            addAndMakeVisible(enhancementHelpLabel);
+            addAndMakeVisible(enhancementPresetLabel);
+            addAndMakeVisible(enhancementPresetCombo);
+            addAndMakeVisible(enhancementAmountLabel);
+            addAndMakeVisible(enhancementAmountCombo);
+            addAndMakeVisible(previewEnhancedButton);
+            addAndMakeVisible(createEnhancedCopyButton);
+            addAndMakeVisible(enhancementStatusLabel);
             addAndMakeVisible(applyTrimButton);
             addAndMakeVisible(resetTrimButton);
             addAndMakeVisible(trimStatusLabel);
@@ -280,6 +416,17 @@ namespace
             auto previewRow = area.removeFromTop(34);
             previewTrimButton.setBounds(previewRow.removeFromLeft(128).reduced(4, 4));
             playFullSourceButton.setBounds(previewRow.removeFromLeft(140).reduced(4, 4));
+            area.removeFromTop(6);
+
+            enhancementHelpLabel.setBounds(area.removeFromTop(24).reduced(4, 2));
+            auto enhancementRow = area.removeFromTop(34);
+            enhancementPresetLabel.setBounds(enhancementRow.removeFromLeft(62).reduced(4, 2));
+            enhancementPresetCombo.setBounds(enhancementRow.removeFromLeft(198).reduced(4, 4));
+            enhancementAmountLabel.setBounds(enhancementRow.removeFromLeft(70).reduced(4, 2));
+            enhancementAmountCombo.setBounds(enhancementRow.removeFromLeft(116).reduced(4, 4));
+            previewEnhancedButton.setBounds(enhancementRow.removeFromLeft(154).reduced(4, 4));
+            createEnhancedCopyButton.setBounds(enhancementRow.removeFromLeft(178).reduced(4, 4));
+            enhancementStatusLabel.setBounds(enhancementRow.reduced(4, 2));
             area.removeFromTop(6);
 
             arrangementHelpLabel.setBounds(area.removeFromTop(24).reduced(4, 2));
@@ -1213,6 +1360,7 @@ namespace
                 pendingTrimStartSamples = 0;
                 pendingTrimEndSamples = 0;
                 trimStatusLabel.setText("No AudioClip selected.", juce::dontSendNotification);
+                refreshEnhancementControls();
                 return;
             }
 
@@ -1221,6 +1369,7 @@ namespace
             waveformView.setPendingTrim(pendingTrimStartSamples, pendingTrimEndSamples);
             refreshTrimTextBoxesFromPending();
             updateTrimStatusLabel(true);
+            refreshEnhancementControls();
             refreshArrangementControls();
         }
 
@@ -1343,6 +1492,7 @@ namespace
             waveformView.setPendingTrim(pendingTrimStartSamples, pendingTrimEndSamples);
             refreshTrimTextBoxesFromPending();
             updateTrimStatusLabel(true);
+            refreshEnhancementControls();
             refreshArrangementControls();
             detailsBox.setText(buildDetailsText(), juce::dontSendNotification);
             return true;
@@ -1359,6 +1509,7 @@ namespace
             waveformView.setPendingTrim(pendingTrimStartSamples, pendingTrimEndSamples);
             refreshTrimTextBoxesFromPending();
             updateTrimStatusLabel(true);
+            refreshEnhancementControls();
             refreshArrangementControls();
             trimStatusLabel.setText("Pending trim changes discarded.", juce::dontSendNotification);
         }
@@ -1385,8 +1536,136 @@ namespace
             waveformView.setPendingTrim(pendingTrimStartSamples, pendingTrimEndSamples);
             refreshTrimTextBoxesFromPending();
             updateTrimStatusLabel(true);
+            refreshEnhancementControls();
             refreshArrangementControls();
             detailsBox.setText(buildDetailsText(), juce::dontSendNotification);
+        }
+
+
+        AudioClipEnhancementPreset selectedEnhancementPreset() const
+        {
+            const auto selectedId = enhancementPresetCombo.getSelectedId();
+            switch (static_cast<AudioClipEnhancementPreset>(selectedId))
+            {
+                case AudioClipEnhancementPreset::mildCleanup:
+                case AudioClipEnhancementPreset::lowBitrateMp3Repair:
+                case AudioClipEnhancementPreset::warmAndSmooth:
+                case AudioClipEnhancementPreset::voiceCleanup:
+                case AudioClipEnhancementPreset::musicMasteringLite:
+                case AudioClipEnhancementPreset::gentleDeHarsh:
+                case AudioClipEnhancementPreset::loudnessNormalize:
+                    return static_cast<AudioClipEnhancementPreset>(selectedId);
+            }
+
+            return AudioClipEnhancementPreset::mildCleanup;
+        }
+
+        AudioClipEnhancementAmount selectedEnhancementAmount() const
+        {
+            const auto selectedId = enhancementAmountCombo.getSelectedId();
+            switch (static_cast<AudioClipEnhancementAmount>(selectedId))
+            {
+                case AudioClipEnhancementAmount::low:
+                case AudioClipEnhancementAmount::medium:
+                case AudioClipEnhancementAmount::high:
+                    return static_cast<AudioClipEnhancementAmount>(selectedId);
+            }
+
+            return AudioClipEnhancementAmount::medium;
+        }
+
+        void updateEnhancementStatusForSelection()
+        {
+            const auto preset = selectedEnhancementPreset();
+            const auto amount = selectedEnhancementAmount();
+
+            juce::String status;
+            status << audioClipEnhancementPresetName(preset)
+                   << " / " << audioClipEnhancementAmountName(amount)
+                   << " strength | full source | original untouched";
+            enhancementStatusLabel.setText(status, juce::dontSendNotification);
+            updateEnhancementTooltips();
+        }
+
+        void updateEnhancementTooltips()
+        {
+            const auto preset = selectedEnhancementPreset();
+            const auto amount = selectedEnhancementAmount();
+
+            enhancementPresetCombo.setTooltip(
+                juce::String("Selected preset: ") + audioClipEnhancementPresetName(preset) + ". "
+                + audioClipEnhancementPresetDescription(preset)
+                + " Enhancement is full-source and non-destructive.");
+
+            enhancementAmountCombo.setTooltip(
+                juce::String("Selected strength: ") + audioClipEnhancementAmountName(amount) + ". "
+                + audioClipEnhancementAmountDescription(amount)
+                + " Strength controls processing intensity, not volume. Medium is the recommended starting point.");
+
+            enhancementStatusLabel.setTooltip(
+                juce::String("Plan: process the full AudioClip source with ")
+                + audioClipEnhancementPresetName(preset)
+                + " at " + audioClipEnhancementAmountName(amount)
+                + " strength, then create preview/generated media in later phases. Original media, trim handles, and arrangement clips are not changed.");
+        }
+
+        void refreshEnhancementControls()
+        {
+            const auto* clip = findLocalClip(editableClipId);
+            const bool hasEditableClip = clip != nullptr && clip->durationSamples > 0 && clip->sampleRate > 0.0;
+            const bool hasCallback = static_cast<bool>(onEnhanceAudioClip);
+
+            enhancementPresetCombo.setEnabled(hasEditableClip);
+            enhancementAmountCombo.setEnabled(hasEditableClip);
+            previewEnhancedButton.setEnabled(hasEditableClip && hasCallback);
+            createEnhancedCopyButton.setEnabled(hasEditableClip && hasCallback);
+
+            if (!hasEditableClip)
+            {
+                enhancementStatusLabel.setText("No AudioClip source available for enhancement.", juce::dontSendNotification);
+                return;
+            }
+
+            updateEnhancementStatusForSelection();
+        }
+
+        void requestAudioClipEnhancement(AudioClipEnhancementAction action)
+        {
+            const auto* clip = findLocalClip(editableClipId);
+            if (clip == nullptr || clip->durationSamples <= 0 || clip->sampleRate <= 0.0)
+            {
+                enhancementStatusLabel.setText("No valid full source available for enhancement.", juce::dontSendNotification);
+                return;
+            }
+
+            if (!onEnhanceAudioClip)
+            {
+                enhancementStatusLabel.setText("Enhancement callback is unavailable.", juce::dontSendNotification);
+                return;
+            }
+
+            AudioClipEnhancementRequest request;
+            request.clipId = clip->id;
+            request.preset = selectedEnhancementPreset();
+            request.amount = selectedEnhancementAmount();
+            request.action = action;
+
+            juce::String message;
+            message << audioClipEnhancementActionName(action)
+                    << " requested for full source with "
+                    << audioClipEnhancementPresetName(request.preset)
+                    << " / " << audioClipEnhancementAmountName(request.amount)
+                    << " strength.";
+            enhancementStatusLabel.setText(message, juce::dontSendNotification);
+
+            if (!onEnhanceAudioClip(request))
+            {
+                enhancementStatusLabel.setText(
+                    action == AudioClipEnhancementAction::previewEnhanced
+                        ? "Enhanced preview could not be started. Check FFmpeg path/source media and try again."
+                        : "Create Enhanced Copy could not be started. Check FFmpeg path/source media and track limit, then try again.",
+                    juce::dontSendNotification);
+            }
         }
 
 
@@ -1791,7 +2070,8 @@ namespace
             }
 
             text << "Attached AudioClip media: " << static_cast<int>(clips.size()) << "\n";
-            text << "Editing State: interactive non-destructive trim metadata. Preview/export honors the kept range; original media files are untouched.\n\n";
+            text << "Editing State: interactive non-destructive trim metadata. Preview/export honors the kept range; original media files are untouched.\n";
+            text << "Enhancement State: Phase 5C is available. Preview Enhanced renders temporary full-source media; Create Enhanced Copy renders a new generated AudioClip track.\n\n";
 
             for (std::size_t i = 0; i < clips.size(); ++i)
             {
@@ -1879,13 +2159,15 @@ namespace
             text << "\nPhase reminders:\n";
             text << "- AudioClip startTick still controls placement on the project/sequence timeline.\n";
             text << "- Source trim start/end only choose which source samples are kept.\n";
-            text << "- Phase 4J uses direct handle dragging only for waveform trim changes before Apply.\n";
+            text << "- Direct handle dragging is still used only for waveform trim changes before Apply.\n";
             text << "- Freeze locks the current pending trim range for local arrangement sketching.\n";
             text << "- Arrangement clips are transparent, editor-local instances capped at 64 clips in this phase.\n";
             text << "- Extend +10s changes the working window only; Preview/Render use actual audible clip end.\n";
             text << "- Repeated lane clicks intentionally place repeated copies of the frozen trim.\n";
             text << "- Preview/export honors the kept source trim range.\n";
             text << "- Original recorded/imported media files are never modified by this editor.\n";
+            text << "- Enhancement is full-source and non-destructive; original media, trim handles, and arrangement clips stay untouched.\n";
+            text << "- Preview Enhanced writes only temporary preview media; Create Enhanced Copy creates a new imported-style AudioClip track.\n";
 
             return text;
         }
@@ -1924,6 +2206,14 @@ namespace
         juce::TextEditor trimEndBox;
         juce::TextButton previewTrimButton;
         juce::TextButton playFullSourceButton;
+        juce::Label enhancementHelpLabel;
+        juce::Label enhancementPresetLabel;
+        juce::ComboBox enhancementPresetCombo;
+        juce::Label enhancementAmountLabel;
+        juce::ComboBox enhancementAmountCombo;
+        juce::TextButton previewEnhancedButton;
+        juce::TextButton createEnhancedCopyButton;
+        juce::Label enhancementStatusLabel;
         juce::TextButton applyTrimButton;
         juce::TextButton resetTrimButton;
         juce::Label trimStatusLabel;
@@ -1951,6 +2241,7 @@ namespace
         std::function<void()> onStopPreview;
         std::function<bool(std::vector<AudioClipArrangementRenderClip>)> onPreviewArrangement;
         std::function<bool(std::vector<AudioClipArrangementRenderClip>)> onRenderArrangement;
+        std::function<bool(AudioClipEnhancementRequest)> onEnhanceAudioClip;
         std::function<void()> onClose;
     };
 }
@@ -1966,6 +2257,7 @@ std::unique_ptr<juce::Component> createAudioClipEditorComponent(
     std::function<void()> stopPreviewCallback,
     std::function<bool(std::vector<AudioClipArrangementRenderClip>)> previewArrangementCallback,
     std::function<bool(std::vector<AudioClipArrangementRenderClip>)> renderArrangementCallback,
+    std::function<bool(AudioClipEnhancementRequest)> enhancementCallback,
     std::function<void()> closeCallback)
 {
     return std::make_unique<AudioClipEditorComponentImpl>(
@@ -1979,6 +2271,7 @@ std::unique_ptr<juce::Component> createAudioClipEditorComponent(
         std::move(stopPreviewCallback),
         std::move(previewArrangementCallback),
         std::move(renderArrangementCallback),
+        std::move(enhancementCallback),
         std::move(closeCallback));
 }
 }

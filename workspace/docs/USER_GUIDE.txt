@@ -80,7 +80,7 @@ Imported AudioClip files remain dry. Recorded AudioClip files can be dry or wet 
 
 Offline processing
 ------------------
-Preview, Test Effect, selected-track render, selected-sequence render, AudioClip arrangement preview, and final export use offline render paths. Track Live Effect monitoring is separate from whether recording is printed wet; it controls whether you hear the wet track effect while recording.
+Preview, Test Effect, selected-track render, selected-sequence render, AudioClip enhancement preview, AudioClip arrangement preview, and final export use offline render paths. Track Live Effect monitoring is separate from whether recording is printed wet; it controls whether you hear the wet track effect while recording.
 
 3. Main Window Reference
 ========================
@@ -211,7 +211,8 @@ Media type | Unsaved project location | Saved project location | When moved
 Imported AudioClip | workspace\temp\recordings\rec_...\input\audio\imported | input\audio\imported | Save Project
 Applied recording take | workspace\temp\recordings\rec_... | input\audio\recorded | Save Project
 Rendered AudioClip arrangement before first project save | workspace\temp\recordings\rec_...\input\audio\imported | input\audio\imported | Save Project
-Preview files | workspace\temp or render temp folders | Not committed | Clean Temp or automatic cleanup
+Enhanced AudioClip copy before first project save | workspace\temp\recordings\rec_...\input\audio\imported | input\audio\imported | Save Project
+Preview files, including enhanced AudioClip previews | workspace\temp or render temp folders | Not committed | Clean Temp or automatic cleanup
 VST test-effect WAV output | temporary effect/test location | Not committed | Automatic or Clean Temp cleanup
 Final exports | Chosen export folder | Usually workspace\exports | Render/export
 NOTE: Import Audio should not create a project folder under workspace\projects until the user chooses Save Project. Discarding unsaved changes removes the active staged AudioClip session.
@@ -278,7 +279,7 @@ Select a track, open Piano Roll, make note edits, preview a small region, adjust
 
 9. AudioClip Import And Editor Workflow
 =======================================
-AudioClip import lets you bring external audio into a project as a track. Imported audio can be used dry, processed through the two-slot VST Effect chain during preview/export, edited non-destructively in the AudioClip Editor, arranged into repeated or overlapping local clips, or mixed with MIDI-rendered tracks.
+AudioClip import lets you bring external audio into a project as a track. Imported audio can be used dry, processed through the two-slot VST Effect chain during preview/export, edited non-destructively in the AudioClip Editor, enhanced into a new full-source generated copy, arranged into repeated or overlapping local clips, or mixed with MIDI-rendered tracks.
 
 Import behavior by project state
 --------------------------------
@@ -296,7 +297,7 @@ Step | Action | Result
 2 | Use Start From File or Import Audio to choose WAV, MP3, FLAC, or OGG. | The app creates or attaches an AudioClip track.
 3 | For unsaved projects, verify the log reports staging under workspace\temp\recordings\rec_.... | This confirms the import is tied to the current session, not a random project folder.
 4 | Optional: choose VST Effect 1 and/or 2, check Enable, adjust Bypass, and click Apply Track Settings. | The imported track's offline effect chain is committed.
-5 | Preview or render. | Temporary processed WAVs are created if effects are active; the source stays dry.
+5 | Preview, enhance, or render. | Temporary processed WAVs are created for previews; enhanced copies create new AudioClip media without overwriting the source.
 6 | Save Project when you want to keep the imported clip. | Attached staged import moves to input\audio\imported.
 WARNING: If you discard an unsaved project after importing audio, the staged imported audio is removed. This is the intended safety behavior so abandoned clips do not become orphans and do not attach to the wrong project later.
 
@@ -305,6 +306,16 @@ AudioClip Editor source trim
 The AudioClip Editor opens from the main window, the Track Manager, or the View menu. The top waveform is the source trim area. Drag only the green Start handle or the red End handle to adjust the kept range, or type trim values directly. Click Apply Trim to commit the source trim metadata. The original imported or recorded media file is not overwritten.
 
 Dirty-close behavior applies only to source trim changes. If the AudioClip Editor prompts on close, Apply Trim and Close commits pending source-trim metadata, Discard Pending and Close reverts only the pending source-trim edit, and Cancel keeps the editor open. This prompt does not delete or roll back any new arrangement track that was already created with Render To Track.
+
+AudioClip Enhancement / Repair
+------------------------------
+The AudioClip Editor includes a source-level enhancement section for imported or recorded AudioClips that need cleanup or repair. Choose a Preset to select the enhancement style, such as mild cleanup, low-bitrate MP3 repair, warm smoothing, voice cleanup, mastering-lite, de-harshing, or loudness normalization. Choose Strength to control how aggressively the selected preset is applied. Strength is not a volume knob; it changes the processing intensity.
+
+Preview Enhanced renders a temporary enhanced preview of the full AudioClip source and opens it in the Preview Player. This does not create a track, change project metadata, apply trim handles, or rewrite original media.
+
+Create Enhanced Copy renders the full AudioClip source through the selected preset and Strength, then creates a new imported-style AudioClip track from the enhanced WAV. The original imported or recorded source remains untouched. If the project is already saved, the enhanced media is stored under input/audio/imported. If the project is unsaved, the enhanced media stages temporarily and migrates into input/audio/imported when Save Project or Save As completes.
+
+This feature is enhancement and repair, not true restoration. A poor low-bitrate file can often be made less harsh, less thin, and more usable, but missing information from the original compression cannot be recreated.
 
 AudioClip Editor local arrangement lane
 ---------------------------------------
@@ -591,7 +602,17 @@ Step | Action
 7 | Preview/render. The dry take is processed through temporary render files without rewriting the source take.
 8 | Save Project to commit the take into input\audio\recorded.
 
-Example F - Build a repeated AudioClip arrangement
+Example F - Enhance an imported or recorded AudioClip
+----------------------------------------------------
+Step | Action
+--- | ---
+1 | Select an imported or recorded AudioClip track and open AudioClip Editor.
+2 | Choose an enhancement Preset and Strength.
+3 | Use Preview Enhanced to audition a temporary full-source enhanced preview.
+4 | If the preview is useful, use Create Enhanced Copy to create a new imported-style AudioClip track from the enhanced WAV.
+5 | Save Project. If the project was unsaved, the staged enhanced media is migrated into input\audio\imported.
+
+Example G - Build a repeated AudioClip arrangement
 -------------------------------------------------
 Step | Action
 --- | ---
@@ -664,11 +685,13 @@ Open Slot 2 | VST Effect 2 row | Open effect slot 2 editor after a plugin is ass
 Open VST Instrument | Track Controls | Open selected track's VST instrument editor.
 Window > VST Instrument | Window menu | Side submenu listing open VST instrument editors; choose an item to bring that editor to the front.
 Window > VST Effect | Window menu | Side submenu listing open VST effect editors by track/slot/plugin; choose an item to bring that editor to the front.
+Preview Enhanced | AudioClip Editor | Temporary preview of the full-source enhanced AudioClip without creating a new track.
 Preview Arrangement | AudioClip Editor | Temporary preview of the local AudioClip arrangement without creating a new track.
 Preview Project | Render controls | Temporary full-project preview.
 Record Test | AudioClip Recorder | Record/play/delete a short test.
 Render | Render controls | Final project export.
 Render To Track | AudioClip Editor | Render the local AudioClip arrangement into a new imported-style AudioClip track.
+Create Enhanced Copy | AudioClip Editor | Render the full AudioClip source through the selected enhancement preset and create a new imported-style AudioClip track.
 Render Selected Sequence | Render controls | Export active sequence only.
 Render Selected Track | Render controls | Export selected track only.
 Save | VST editor snapshots | Save current plugin state as a host snapshot.
@@ -700,7 +723,8 @@ AudioClip Editor window
 Area | Purpose | Workflow notes
 --- | --- | ---
 Source waveform | Shows the original AudioClip source and kept range. | Drag only the green Start or red End handle to change source trim.
-Trim controls | Preview Trim, Play Full Source, Stop Preview, Apply Trim, and Reset Trim. | Apply Trim commits source trim metadata; it does not rewrite the source file.
+Trim controls | Preview Trim, Play Full Source, Apply Trim, and Reset Trim. | Apply Trim commits source trim metadata; it does not rewrite the source file.
+Enhancement controls | Preset, Strength, Preview Enhanced, and Create Enhanced Copy. | Enhancement works on the full source and creates temp previews or a new enhanced AudioClip track without overwriting the original.
 Arrangement lane | Local placement area for repeated or overlapping frozen trim clips. | Freeze Trim, then click the lane to place or repeat the frozen range.
 Clip selector | Chooses the currently selected arranged clip number. | Delete Clip removes the selected clip.
 Preview Arrangement | Auditions the current local arrangement. | Creates temporary preview audio only.
@@ -753,6 +777,7 @@ Check | Why
 Project name/base name is correct. | Keeps .mwproj and output filenames clear.
 Imported AudioClip tracks play correctly. | Confirms staged media is reachable before commit.
 Rendered AudioClip arrangements that should become tracks have been created with Render To Track. | Ensures staged generated arrangement media can migrate into the saved project folder.
+Enhanced AudioClip copies that should become tracks have been created with Create Enhanced Copy. | Ensures staged enhanced media can migrate into the saved project folder.
 Recorded takes have been Save / Applied or discarded. | Avoids losing a wanted take or keeping an unwanted one.
 Track settings have been applied after changes. | Ensures dropdowns, Enable, Bypass, mute/solo, and volume are saved.
 Open VST editors have had Apply Changes clicked after parameter edits. | Captures plugin state into the project.

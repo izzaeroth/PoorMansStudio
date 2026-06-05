@@ -490,6 +490,7 @@ namespace mw::gui
         void stopAudioClipEditorPreview();
         bool previewAudioClipEditorArrangement(std::vector<mw::gui::AudioClipArrangementRenderClip> arrangementClips);
         bool renderAudioClipEditorArrangementToNewTrack(std::vector<mw::gui::AudioClipArrangementRenderClip> arrangementClips);
+        bool handleAudioClipEditorEnhancementRequest(mw::gui::AudioClipEnhancementRequest request);
         void closeAudioRecorderWindowWithPrompt();
         void closeAudioRecorderWindowNow();
         void startAudioRecordingTake();

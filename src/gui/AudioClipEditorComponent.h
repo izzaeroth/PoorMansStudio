@@ -27,6 +27,42 @@ namespace mw::gui
         virtual bool requestCloseWithPendingPrompt(std::function<void()> closeAction) = 0;
     };
 
+    enum class AudioClipEnhancementPreset
+    {
+        mildCleanup = 1,
+        lowBitrateMp3Repair,
+        warmAndSmooth,
+        voiceCleanup,
+        musicMasteringLite,
+        gentleDeHarsh,
+        loudnessNormalize
+    };
+
+    enum class AudioClipEnhancementAmount
+    {
+        low = 1,
+        medium,
+        high
+    };
+
+    enum class AudioClipEnhancementAction
+    {
+        previewEnhanced = 1,
+        createEnhancedCopy
+    };
+
+    struct AudioClipEnhancementRequest
+    {
+        int clipId = 0;
+        AudioClipEnhancementPreset preset = AudioClipEnhancementPreset::mildCleanup;
+        AudioClipEnhancementAmount amount = AudioClipEnhancementAmount::medium;
+        AudioClipEnhancementAction action = AudioClipEnhancementAction::previewEnhanced;
+    };
+
+    juce::String audioClipEnhancementPresetName(AudioClipEnhancementPreset preset);
+    juce::String audioClipEnhancementAmountName(AudioClipEnhancementAmount amount);
+    juce::String audioClipEnhancementActionName(AudioClipEnhancementAction action);
+
     std::unique_ptr<juce::Component> createAudioClipEditorComponent(
         const mw::core::Project& project,
         int selectedTrackIndex,
@@ -38,5 +74,6 @@ namespace mw::gui
         std::function<void()> stopPreviewCallback,
         std::function<bool(std::vector<AudioClipArrangementRenderClip>)> previewArrangementCallback,
         std::function<bool(std::vector<AudioClipArrangementRenderClip>)> renderArrangementCallback,
+        std::function<bool(AudioClipEnhancementRequest)> enhancementCallback,
         std::function<void()> closeCallback);
 }

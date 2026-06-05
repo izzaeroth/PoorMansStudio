@@ -74,6 +74,27 @@ namespace mw::audio
         std::string message;
     };
 
+
+    struct FfmpegEnhancePreviewRequest
+    {
+        std::filesystem::path ffmpegExePath;
+        std::filesystem::path inputPath;
+        std::filesystem::path outputWavPath;
+        std::string audioFilterChain;
+        int outputChannels = 2;
+        int outputSampleRate = 44100;
+        bool mciCompatibleWav = true;
+        int timeoutSeconds = 300;
+    };
+
+    struct FfmpegEnhancePreviewResult
+    {
+        bool success = false;
+        int exitCode = -1;
+        std::string commandLine;
+        std::string message;
+    };
+
     class ExternalFfmpegEncoder
     {
     public:
@@ -84,5 +105,9 @@ namespace mw::audio
         static FfmpegTrimResult trimToWav(const FfmpegTrimRequest& request);
         static std::string buildTrimCommandLine(const FfmpegTrimRequest& request);
         static bool validateTrimRequest(const FfmpegTrimRequest& request, std::string& errorMessage);
+
+        static FfmpegEnhancePreviewResult enhancePreviewToWav(const FfmpegEnhancePreviewRequest& request);
+        static std::string buildEnhancePreviewCommandLine(const FfmpegEnhancePreviewRequest& request);
+        static bool validateEnhancePreviewRequest(const FfmpegEnhancePreviewRequest& request, std::string& errorMessage);
     };
 }

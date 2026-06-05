@@ -12,7 +12,7 @@ It is intentionally practical: bring in MIDI or score material, clean up tracks,
 - Create MIDI tracks from score/MIDI files.
 - Create AudioClip tracks from imported, recorded, or rendered AudioClip arrangement audio.
 - Edit notes in the main editor and in dedicated Piano Roll windows.
-- Edit AudioClip source trim non-destructively, freeze a kept range, arrange repeated or overlapping local clips, preview the arrangement, and render it into a new AudioClip track.
+- Edit AudioClip source trim non-destructively, enhance the full AudioClip source into a new generated copy, freeze a kept range, arrange repeated or overlapping local clips, preview the arrangement, and render it into a new AudioClip track.
 - Keep one Piano Roll window per track so track edits stay understandable.
 - Organize track groups, song sections, sequence assignments, ordering, names, and track layout through the Track Manager.
 - Save projects as `.mwproj` files with project-relative media paths.
@@ -50,7 +50,7 @@ Normal VST3 instrument hosting is still mostly in-process, so a plugin crash can
 
 ### Preview, Render, And Export
 
-- Preview a selected track, selected sequence, Piano Roll area, AudioClip arrangement, or the full project.
+- Preview a selected track, selected sequence, Piano Roll area, enhanced AudioClip source preview, AudioClip arrangement, or the full project.
 - Render the full project, selected track, selected sequence, or stems depending on render settings.
 - Export WAV, FLAC, MP3, and OGG audio.
 - Export MIDI for use in other tools.
@@ -63,7 +63,7 @@ Normal VST3 instrument hosting is still mostly in-process, so a plugin crash can
 
 Poor Man's Studio keeps user-facing renders in `workspace/exports` by default instead of auto-switching exports into each project folder. Saving or opening a `.mwproj` no longer retargets the export box to `workspace/projects/<project>/renders`; older project-local `renders`/`output` paths are reset back to the workspace export folder unless you manually choose another custom export folder.
 
-Render Settings retention applies consistently to non-WAV exports too. When **Keep WAV audio stems** is enabled, the source WAV sidecar used for MP3/FLAC/OGG encoding is kept next to the final export; when **Keep MIDI stem files** is enabled, generated MIDI sidecars/stems are kept. Preview/temp renders still clean themselves under `workspace/temp`.
+Render Settings retention applies consistently to non-WAV exports too. When **Keep WAV audio stems** is enabled, the source WAV sidecar used for MP3/FLAC/OGG encoding is kept next to the final export; when **Keep MIDI stem files** is enabled, generated MIDI sidecars/stems are kept. Preview/temp renders, including enhanced AudioClip previews, still clean themselves under `workspace/temp`.
 
 ### Usability And Project Safety
 
@@ -146,7 +146,7 @@ Projects should live under:
 workspace/projects/<Project Name>/
 ```
 
-AudioClip media is not embedded into the `.mwproj` file. Newly imported files, Save / Apply recorded takes, and rendered AudioClip arrangements for unsaved projects stage first under the active `workspace/temp/recordings/rec_...` session. **Save Project** is the commit point that moves attached staged media into the saved project folder under `input/audio/imported` or `input/audio/recorded`. Import Audio and Render To Track should not create a new folder under `workspace/projects` until the project is actually saved, and they should not leave unreferenced media inside an already saved project folder if the user later discards changes. Choosing **Discard** from New/Open/Start From File/Exit unsaved-change prompts removes the active staged AudioClip session so abandoned imports, takes, and unsaved arrangement renders do not carry into the next project. Move or share the whole saved project folder, not just the `.mwproj` file.
+AudioClip media is not embedded into the `.mwproj` file. Newly imported files, Save / Apply recorded takes, enhanced AudioClip copies, and rendered AudioClip arrangements for unsaved projects stage first under the active `workspace/temp/recordings/rec_...` session. **Save Project** is the commit point that moves attached staged media into the saved project folder under `input/audio/imported` or `input/audio/recorded`. Import Audio and Render To Track should not create a new folder under `workspace/projects` until the project is actually saved, and they should not leave unreferenced media inside an already saved project folder if the user later discards changes. Choosing **Discard** from New/Open/Start From File/Exit unsaved-change prompts removes the active staged AudioClip session so abandoned imports, takes, enhanced copies, and unsaved arrangement renders do not carry into the next project. Move or share the whole saved project folder, not just the `.mwproj` file.
 
 ## Build Environment Overview
 
@@ -564,7 +564,7 @@ Unassigned, disabled, or bypassed slots are skipped. Open Slot 1/2 is unavailabl
 
 Use **Apply Track Settings** as the clear commit point for track-level effect choices: slot assignments, Enable, Bypass, mute/solo, volume, and other track controls. Use **Apply Changes** inside a VST editor only after changing plugin parameters; that editor button saves the plugin state for the owning track and slot.
 
-Imported AudioClip source media stays dry. Recorded AudioClip media can be dry or wet depending on the selected track's enabled VST effect state at recording time. During offline preview/export, enabled non-bypassed slots are applied to temporary processed WAV files and those temporary files are mixed into the render without rewriting the source media. New AudioClip media stages in the active `workspace/temp/recordings/rec_...` session when the project is unsaved; **Save Project** moves only applied/attached staged clips into the saved project folder, while **Discard** removes the current staging session instead of leaving abandoned media for a later project.
+Imported AudioClip source media stays dry. Recorded AudioClip media can be dry or wet depending on the selected track's enabled VST effect state at recording time. During offline preview/export, enabled non-bypassed slots are applied to temporary processed WAV files and those temporary files are mixed into the render without rewriting the source media. AudioClip Enhancement / Repair creates temporary previews or generated enhanced copies without overwriting the original source. New AudioClip media stages in the active `workspace/temp/recordings/rec_...` session when the project is unsaved; **Save Project** moves only applied/attached staged clips into the saved project folder, while **Discard** removes the current staging session instead of leaving abandoned media for a later project.
 
 ### AudioClip Editor Arrangement Workflow
 
@@ -575,6 +575,12 @@ Use the top waveform to set the kept range. Drag only the green Start handle or 
 Use **Freeze Trim** to lock the current kept range for arrangement. Then click in the arrangement lane to place it. Clicking again places another copy of the same frozen range, which is the intended loop/repeat workflow. Transparent colored clips make overlaps visible. Use **Clip #** and **Delete Clip** to remove a selected placed clip. **Extend +10s** adds workspace; the horizontal scroll is free-form.
 
 **Preview Arrangement** auditions the local arrangement without creating a new track. **Render To Track** creates a new imported-style AudioClip track from the arrangement. The rendered file length follows the last audible placed clip, not the visible arrangement-window length, so extra empty workspace does not add dead air. Saved projects write the generated media under `input/audio/imported`; unsaved projects stage it in temp and migrate it into `input/audio/imported` when the project is saved.
+
+### AudioClip Enhancement / Repair
+
+The AudioClip Editor also includes a source-level enhancement section for rough imported or recorded clips. Choose an enhancement preset and Strength, then use **Preview Enhanced** to create a temporary preview or **Create Enhanced Copy** to generate a new AudioClip track from the full source. The original source file is not overwritten, and source trim handles or local arrangement clips are not baked into the enhancement.
+
+Enhanced copies are written as editable generated WAV media. Saved projects store them under `input/audio/imported`; unsaved projects stage them temporarily and migrate them into the saved project folder when the project is saved. Use final render/export settings later when you want a delivery file such as MP3, FLAC, or OGG.
 
 ### AudioClip Recorder Wet And Live Effect Behavior
 
