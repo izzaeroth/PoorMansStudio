@@ -10,8 +10,9 @@ It is intentionally practical: bring in MIDI or score material, clean up tracks,
 
 - Import MusicXML, compressed MXL, MIDI, Poor Man's Studio `.mwproj`, WAV, MP3, FLAC, and OGG files.
 - Create MIDI tracks from score/MIDI files.
-- Create AudioClip tracks from imported or recorded audio.
+- Create AudioClip tracks from imported, recorded, or rendered AudioClip arrangement audio.
 - Edit notes in the main editor and in dedicated Piano Roll windows.
+- Edit AudioClip source trim non-destructively, freeze a kept range, arrange repeated or overlapping local clips, preview the arrangement, and render it into a new AudioClip track.
 - Keep one Piano Roll window per track so track edits stay understandable.
 - Organize track groups, song sections, sequence assignments, ordering, names, and track layout through the Track Manager.
 - Save projects as `.mwproj` files with project-relative media paths.
@@ -49,7 +50,7 @@ Normal VST3 instrument hosting is still mostly in-process, so a plugin crash can
 
 ### Preview, Render, And Export
 
-- Preview a selected track, selected sequence, Piano Roll area, or the full project.
+- Preview a selected track, selected sequence, Piano Roll area, AudioClip arrangement, or the full project.
 - Render the full project, selected track, selected sequence, or stems depending on render settings.
 - Export WAV, FLAC, MP3, and OGG audio.
 - Export MIDI for use in other tools.
@@ -69,7 +70,7 @@ Render Settings retention applies consistently to non-WAV exports too. When **Ke
 - Helper bubbles for in-app guidance.
 - Plain key/value settings file that can be inspected by hand.
 - Settings save behavior separates explicit full settings saves from narrow one-key acknowledgements.
-- Dirty-state prompts so unapplied editor changes are not silently discarded.
+- Dirty-state prompts so unapplied editor changes are not silently discarded. AudioClip Editor close prompts apply only to pending source-trim edits, not arrangement tracks already rendered with Render To Track.
 - Workspace cleanup for temporary files.
 - Theme preset support.
 - Included PDF and text guides under `workspace/docs`.
@@ -145,7 +146,7 @@ Projects should live under:
 workspace/projects/<Project Name>/
 ```
 
-AudioClip media is not embedded into the `.mwproj` file. Newly imported files and Save / Apply recorded takes stage first under the active `workspace/temp/recordings/rec_...` session. **Save Project** is the commit point that moves attached staged media into the saved project folder under `input/audio/imported` or `input/audio/recorded`. Import Audio should not create a new folder under `workspace/projects` until the project is actually saved, and it should not leave unreferenced media inside an already saved project folder if the user later discards changes. Choosing **Discard** from New/Open/Start From File/Exit unsaved-change prompts removes the active staged AudioClip session so abandoned imports and takes do not carry into the next project. Move or share the whole saved project folder, not just the `.mwproj` file.
+AudioClip media is not embedded into the `.mwproj` file. Newly imported files, Save / Apply recorded takes, and rendered AudioClip arrangements for unsaved projects stage first under the active `workspace/temp/recordings/rec_...` session. **Save Project** is the commit point that moves attached staged media into the saved project folder under `input/audio/imported` or `input/audio/recorded`. Import Audio and Render To Track should not create a new folder under `workspace/projects` until the project is actually saved, and they should not leave unreferenced media inside an already saved project folder if the user later discards changes. Choosing **Discard** from New/Open/Start From File/Exit unsaved-change prompts removes the active staged AudioClip session so abandoned imports, takes, and unsaved arrangement renders do not carry into the next project. Move or share the whole saved project folder, not just the `.mwproj` file.
 
 ## Build Environment Overview
 
@@ -319,7 +320,6 @@ Example summary:
 ```text
 Poor Man's Studio Build Summary
 --------------------------------
-Version:        0.60.7
 Configuration:  Release
 Generator:      Visual Studio 18 2026
 Platform:       x64
@@ -564,11 +564,23 @@ Unassigned, disabled, or bypassed slots are skipped. Open Slot 1/2 is unavailabl
 
 Use **Apply Track Settings** as the clear commit point for track-level effect choices: slot assignments, Enable, Bypass, mute/solo, volume, and other track controls. Use **Apply Changes** inside a VST editor only after changing plugin parameters; that editor button saves the plugin state for the owning track and slot.
 
-Imported and recorded AudioClip source media stays dry. During offline preview/export, enabled non-bypassed slots are applied to temporary processed WAV files and those temporary files are mixed into the render. Imported and recorded AudioClip tracks use the same workflow. New AudioClip media stages in the active `workspace/temp/recordings/rec_...` session; **Save Project** moves only applied/attached staged clips into the saved project folder, while **Discard** removes the current staging session instead of leaving its imported/recorded media for a later project.
+Imported AudioClip source media stays dry. Recorded AudioClip media can be dry or wet depending on the selected track's enabled VST effect state at recording time. During offline preview/export, enabled non-bypassed slots are applied to temporary processed WAV files and those temporary files are mixed into the render without rewriting the source media. New AudioClip media stages in the active `workspace/temp/recordings/rec_...` session when the project is unsaved; **Save Project** moves only applied/attached staged clips into the saved project folder, while **Discard** removes the current staging session instead of leaving abandoned media for a later project.
 
-### AudioClip Recorder Track Live Effect
+### AudioClip Editor Arrangement Workflow
 
-The AudioClip Recorder includes a **Track Live Effect** checkbox. When enabled, the recorder tries to monitor the live input through the selected target track's first active VST effect slot while the recorded WAV remains dry. This is monitor-only and is not the final effect-render path. Offline preview/export remains the commit path for applying the track's VST Effect chain. Recording targets the selected existing track instead of auto-creating a new track. Create/select the track first, assign its effects, then use Track Live Effect to monitor while the saved clip remains dry.
+The AudioClip Editor provides non-destructive source trimming and a local arrangement lane. The original imported or recorded source media is not rewritten, moved, or deleted by source-trim edits.
+
+Use the top waveform to set the kept range. Drag only the green Start handle or red End handle, or type trim values directly, then use **Apply Trim** to commit source trim metadata. The close warning in the AudioClip Editor applies only to pending source-trim edits. Applying or discarding pending trim does not delete or roll back any new arrangement track already created with **Render To Track**.
+
+Use **Freeze Trim** to lock the current kept range for arrangement. Then click in the arrangement lane to place it. Clicking again places another copy of the same frozen range, which is the intended loop/repeat workflow. Transparent colored clips make overlaps visible. Use **Clip #** and **Delete Clip** to remove a selected placed clip. **Extend +10s** adds workspace; the horizontal scroll is free-form.
+
+**Preview Arrangement** auditions the local arrangement without creating a new track. **Render To Track** creates a new imported-style AudioClip track from the arrangement. The rendered file length follows the last audible placed clip, not the visible arrangement-window length, so extra empty workspace does not add dead air. Saved projects write the generated media under `input/audio/imported`; unsaved projects stage it in temp and migrate it into `input/audio/imported` when the project is saved.
+
+### AudioClip Recorder Wet And Live Effect Behavior
+
+The AudioClip Recorder can record dry or wet audio. If the selected target track has a VST effect slot assigned, enabled, not bypassed, and applied, that effect is printed into the recorded AudioClip. To record dry audio, leave the VST Effect **Enable** box unchecked before recording.
+
+The **Track Live Effect** checkbox controls monitoring only. When it is checked, the recorder tries to let you hear the enabled track effect while recording. When it is unchecked, you do not hear that monitoring path, but the recording can still be wet if the track effect is enabled and applied. Recording targets the selected existing track instead of auto-creating a new track. Create/select the track first, assign/apply its effects, then decide whether Track Live Effect should monitor the wet signal while recording.
 
 ### VST Editor Host Windows
 

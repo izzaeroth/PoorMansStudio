@@ -12,6 +12,15 @@
 
 namespace mw::gui
 {
+    struct AudioClipArrangementRenderClip
+    {
+        int number = 0;
+        int sourceClipId = 0;
+        long long sourceStartSamples = 0;
+        long long sourceEndSamples = 0;
+        double arrangementStartSeconds = 0.0;
+    };
+
     struct WindowPendingCloseHandler
     {
         virtual ~WindowPendingCloseHandler() = default;
@@ -27,5 +36,7 @@ namespace mw::gui
         std::function<bool(int)> resetTrimCallback,
         std::function<void(int, long long, long long, bool)> previewClipCallback,
         std::function<void()> stopPreviewCallback,
+        std::function<bool(std::vector<AudioClipArrangementRenderClip>)> previewArrangementCallback,
+        std::function<bool(std::vector<AudioClipArrangementRenderClip>)> renderArrangementCallback,
         std::function<void()> closeCallback);
 }

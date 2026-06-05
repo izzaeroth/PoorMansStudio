@@ -9,6 +9,7 @@
 #include "audio/ExternalFluidSynthRenderer.h"
 #include "audio/ExternalSfizzRenderer.h"
 #include "audio/ExternalFfmpegEncoder.h"
+#include "audio/ExternalFfmpegMixer.h"
 #include "audio/AudioClipImporter.h"
 #include "audio/RenderPlan.h"
 #include "audio/RenderJob.h"
@@ -216,6 +217,45 @@ namespace
         }
 
         return childIt != child.end();
+    }
+
+    void removeEmptyDirectoriesUpTo(std::filesystem::path folder, const std::filesystem::path& stopBefore)
+    {
+        if (folder.empty() || stopBefore.empty())
+            return;
+
+        const auto stop = normalizedPathForCompare(stopBefore);
+        std::error_code ec;
+        while (!folder.empty() && pathIsInsideFolder(folder, stop))
+        {
+            if (!std::filesystem::exists(folder, ec) || ec)
+                break;
+
+            if (!std::filesystem::is_empty(folder, ec) || ec)
+                break;
+
+            std::filesystem::remove(folder, ec);
+            if (ec)
+                break;
+
+            folder = folder.parent_path();
+        }
+    }
+
+    std::filesystem::path stagedAudioClipSessionFolderForPath(const std::filesystem::path& mediaPath, const std::filesystem::path& stagedRoot)
+    {
+        if (mediaPath.empty() || stagedRoot.empty() || !pathIsInsideFolder(mediaPath, stagedRoot))
+            return {};
+
+        const auto relative = normalizedPathForCompare(mediaPath).lexically_relative(normalizedPathForCompare(stagedRoot));
+        if (relative.empty())
+            return {};
+
+        auto it = relative.begin();
+        if (it == relative.end())
+            return {};
+
+        return stagedRoot / *it;
     }
 
     bool isLegacyProjectLocalExportFolder(const std::filesystem::path& path)
@@ -6984,7 +7024,7 @@ namespace mw::gui
                 micGainUpButton.setButtonText("+");
                 micGainResetButton.setButtonText("0 dB");
                 trackLiveEffectToggle.setButtonText("Track Live Effect");
-                trackLiveEffectToggle.setTooltip("Monitor recorder input through the selected target track's first enabled, non-bypassed VST3 effect. The recorded clip remains dry; offline preview/export still applies the track effect later.");
+                trackLiveEffectToggle.setTooltip("Monitor recorder input through the selected target track's first enabled, non-bypassed VST3 effect. The applied track effect is printed into the recorded clip whether this monitor checkbox is on or off.");
                 pauseButton.setButtonText("Pause");
                 stopButton.setButtonText("Stop");
                 keepButton.setButtonText("Save / Apply");
@@ -15185,6 +15225,8 @@ void MainComponent::importMusicXmlOnly()
         bool committedAny = false;
         bool committedImported = false;
         bool committedRecorded = false;
+        std::vector<std::filesystem::path> committedStagedParents;
+        std::set<std::filesystem::path> committedStagedSessions;
 
         for (auto& clip : currentProject->getAudioClips())
         {
@@ -15239,11 +15281,20 @@ void MainComponent::importMusicXmlOnly()
 
             const auto stagedPath = clip.projectRelativePath;
             const auto previousOriginalSourcePath = clip.originalSourcePath;
+            const bool previousOriginalWasStaged = !previousOriginalSourcePath.empty()
+                && previousOriginalSourcePath.is_absolute()
+                && pathIsInsideFolder(previousOriginalSourcePath, stagedAudioClipRoot);
             const bool hadActiveTrimBeforeCommit = mw::core::audioClipHasActiveTrim(clip);
             clip.name = safeClipDisplayName(result.absolutePath).toStdString();
             clip.projectRelativePath = result.relativePath;
             clip.savedFormat = result.savedFormat;
-            clip.originalSourcePath = isImportedClip && !previousOriginalSourcePath.empty() ? previousOriginalSourcePath : result.absolutePath;
+            // Preserve a real external import source when one exists, but never keep
+            // workspace/temp/recordings as the long-term original source after Save/Save As.
+            // This lets a saved rendered arrangement and its source recording migrate cleanly
+            // into the project folder without the old temp session being kept alive.
+            clip.originalSourcePath = isImportedClip && !previousOriginalSourcePath.empty() && !previousOriginalWasStaged
+                ? previousOriginalSourcePath
+                : result.absolutePath;
             clip.sizeBytes = result.sizeBytes;
             if (result.durationSamples > 0)
                 clip.durationSamples = result.durationSamples;
@@ -15262,7 +15313,16 @@ void MainComponent::importMusicXmlOnly()
             clip.missingMedia = false;
 
             std::error_code removeError;
-            std::filesystem::remove(stagedPath, removeError);
+            if (!std::filesystem::remove(stagedPath, removeError) && removeError)
+                logMessage("WARNING: Migrated staged AudioClip media, but could not remove temp source file: " + juce::String(stagedPath.string()) + " (" + juce::String(removeError.message()) + ")");
+            else
+            {
+                committedStagedParents.push_back(stagedPath.parent_path());
+                const auto stagedSessionFolder = stagedAudioClipSessionFolderForPath(stagedPath, stagedAudioClipRoot);
+                if (!stagedSessionFolder.empty())
+                    committedStagedSessions.insert(stagedSessionFolder);
+            }
+
             committedAny = true;
             committedImported = committedImported || isImportedClip;
             committedRecorded = committedRecorded || !isImportedClip;
@@ -15280,6 +15340,78 @@ void MainComponent::importMusicXmlOnly()
 
             logMessage("Committed applied staged AudioClip media to: " + destinations);
 
+            for (const auto& parent : committedStagedParents)
+                removeEmptyDirectoriesUpTo(parent, stagedAudioClipRoot);
+
+            auto projectStillReferencesStagedFolder = [this](const std::filesystem::path& folder)
+            {
+                if (!currentProject || folder.empty())
+                    return false;
+
+                for (const auto& clip : currentProject->getAudioClips())
+                {
+                    if (!clip.projectRelativePath.empty()
+                        && clip.projectRelativePath.is_absolute()
+                        && pathIsInsideFolder(clip.projectRelativePath, folder))
+                        return true;
+
+                    // originalSourcePath is historical source/audit metadata, not an active
+                    // saved-project media reference.  A stale staged originalSourcePath must not
+                    // prevent cleanup after the clip's projectRelativePath has been migrated.
+                }
+
+                return false;
+            };
+
+            auto activeRecorderStillNeedsStagedFolder = [this](const std::filesystem::path& folder)
+            {
+                if (folder.empty())
+                    return false;
+
+                if (audioClipRecorder && audioClipRecorder->isRecording()
+                    && audioRecordingSessionFolderPath
+                    && (pathsReferToSameLocation(*audioRecordingSessionFolderPath, folder)
+                        || pathIsInsideFolder(*audioRecordingSessionFolderPath, folder)))
+                    return true;
+
+                if (audioRecordingTakeDirty)
+                {
+                    if (!activeRecordingTempWavPath.empty() && pathIsInsideFolder(activeRecordingTempWavPath, folder))
+                        return true;
+                    if (!activeRecordingSourceWavPath.empty() && pathIsInsideFolder(activeRecordingSourceWavPath, folder))
+                        return true;
+                }
+
+                return false;
+            };
+
+            for (const auto& sessionFolder : committedStagedSessions)
+            {
+                std::error_code sessionError;
+                if (!std::filesystem::exists(sessionFolder, sessionError) || sessionError)
+                    continue;
+
+                if (projectStillReferencesStagedFolder(sessionFolder) || activeRecorderStillNeedsStagedFolder(sessionFolder))
+                    continue;
+
+                // Once every applied clip from an AudioClip staging session has been
+                // migrated into the saved project folder, the whole temp session is
+                // disposable.  Remove it rather than leaving the original staged
+                // recording beside a newly rendered arrangement copy.
+                std::filesystem::remove_all(sessionFolder, sessionError);
+                if (sessionError)
+                {
+                    logMessage("WARNING: Migrated staged AudioClip media, but could not remove temp staging folder: "
+                        + juce::String(sessionFolder.string())
+                        + " (" + juce::String(sessionError.message()) + ")");
+                }
+                else if (audioRecordingSessionFolderPath
+                         && pathsReferToSameLocation(*audioRecordingSessionFolderPath, sessionFolder))
+                {
+                    audioRecordingSessionFolderPath.reset();
+                }
+            }
+
             if (audioRecordingSessionFolderPath && !audioRecordingSessionFolderPath->empty())
             {
                 std::error_code sessionError;
@@ -15289,6 +15421,29 @@ void MainComponent::importMusicXmlOnly()
                     std::filesystem::remove_all(*audioRecordingSessionFolderPath, sessionError);
                     audioRecordingSessionFolderPath.reset();
                 }
+            }
+
+            // Save/Save As may migrate staged arrangement renders that were attached
+            // before this app session remembered the staging folder.  Remove any empty
+            // leftover directories under workspace/temp/recordings, but never remove
+            // folders that still contain regular files.
+            std::error_code scanError;
+            if (std::filesystem::exists(stagedAudioClipRoot, scanError) && !scanError)
+            {
+                std::vector<std::filesystem::path> stagedDirs;
+                for (std::filesystem::recursive_directory_iterator it(stagedAudioClipRoot, std::filesystem::directory_options::skip_permission_denied, scanError), end; !scanError && it != end; it.increment(scanError))
+                {
+                    if (it->is_directory(scanError) && !scanError)
+                        stagedDirs.push_back(it->path());
+                }
+
+                std::sort(stagedDirs.begin(), stagedDirs.end(), [](const auto& a, const auto& b)
+                {
+                    return a.string().size() > b.string().size();
+                });
+
+                for (const auto& folder : stagedDirs)
+                    removeEmptyDirectoriesUpTo(folder, stagedAudioClipRoot);
             }
         }
 
@@ -15828,17 +15983,17 @@ void MainComponent::openAudioRecorderWindow()
             content->setTrackLiveEffectEnabled(audioRecorderTrackLiveEffectEnabled);
 
         logMessage(enabled
-            ? "AudioClip Recorder Track Live Effect enabled for monitor-only recording. Recorded clips remain dry."
-            : "AudioClip Recorder Track Live Effect disabled.");
+            ? "AudioClip Recorder Track Live Effect monitor enabled. The applied track VST effect will be printed into the take either way."
+            : "AudioClip Recorder Track Live Effect monitor disabled. Applied track VST effects still print into the recorded take.");
         refreshAudioRecorderWindowStatus();
     }
 
     mw::audio::AudioClipRecorderLiveEffectOptions MainComponent::buildAudioRecorderLiveEffectOptions(int targetTrackIndex, int sourceTrackIndex) const
     {
         mw::audio::AudioClipRecorderLiveEffectOptions options;
-        options.enabled = audioRecorderTrackLiveEffectEnabled;
+        options.monitorEnabled = audioRecorderTrackLiveEffectEnabled;
 
-        if (!options.enabled || !currentProject)
+        if (!currentProject)
             return options;
 
         const auto& tracks = currentProject->getTracks();
@@ -15859,10 +16014,11 @@ void MainComponent::openAudioRecorderWindow()
                     || slot->plugin.bundlePath.empty())
                     continue;
 
+                options.enabled = true;
                 options.trackName = track.getName() + " - VST Effect " + std::to_string(slotIndex + 1);
                 if (slot->plugin.stateBase64.empty())
                 {
-                    options.unavailableMessage = "Track Live Effect requested, but this VST effect slot has no applied parameter state yet. Open the effect editor and click Apply Changes once before recording with Track Live Effect; unapplied live editor tweaks are not used by the recorder.";
+                    options.unavailableMessage = "Track VST effect recording requested, but this effect slot has no applied parameter state yet. Open the effect editor and click Apply Changes once before recording; unapplied live editor tweaks are not printed into the take.";
                     return true;
                 }
 
@@ -16142,9 +16298,10 @@ void MainComponent::openAudioRecorderWindow()
 
         status << "\nMic Gain: " << juce::String(audioRecorderMicGainDb, 1) << " dB";
         const bool trackLiveEffectUsable = audioRecorderTrackLiveEffectEnabled && hasLiveEffectTarget;
-        status << "\nTrack Live Effect: " << (trackLiveEffectUsable ? "On (monitor only; recorded clip stays dry)" : "Off");
+        status << "\nTrack VST Record Effect: " << (hasLiveEffectTarget ? "On (prints applied effect into take)" : "Off");
+        status << "\nTrack Live Effect Monitor: " << (trackLiveEffectUsable ? "On" : "Off");
 
-        if (trackLiveEffectUsable && currentProject)
+        if (hasLiveEffectTarget && currentProject)
         {
             const auto& selectedTrack = currentProject->getTracks()[static_cast<std::size_t>(selectedRecordingTargetIndex)];
             const auto& effects = selectedTrack.getVstEffects();
@@ -16166,6 +16323,10 @@ void MainComponent::openAudioRecorderWindow()
         if (audioClipRecorder)
         {
             status << "\nDevice: " << audioClipRecorder->getCurrentDeviceSummary();
+            if (audioClipRecorder->isRecordEffectActive())
+                status << "\nRecord Effect: " << audioClipRecorder->getRecordEffectSummary();
+            else if (audioClipRecorder->getRecordEffectSummary().isNotEmpty())
+                status << "\nRecord Effect: " << audioClipRecorder->getRecordEffectSummary();
             if (audioClipRecorder->isLiveEffectMonitorActive())
                 status << "\nLive Monitor: " << audioClipRecorder->getLiveEffectMonitorSummary();
             else if (audioRecorderTrackLiveEffectEnabled && audioClipRecorder->getLiveEffectMonitorSummary().isNotEmpty())
@@ -16250,8 +16411,10 @@ void MainComponent::openAudioRecorderWindow()
         }
 
         const bool trackLiveEffectUsable = trackHasUsableLiveEffectForAudioRecorder(trackIndex);
+        if (trackLiveEffectUsable)
+            logMessage("AudioClip Recorder will print the selected track's last applied VST effect state into the take. Unapplied open effect-editor tweaks are ignored until Apply Changes is clicked.");
         if (audioRecorderTrackLiveEffectEnabled && trackLiveEffectUsable)
-            logMessage("AudioClip Recorder Track Live Effect uses the selected track's last applied VST effect state. Unapplied open effect-editor tweaks are ignored until Apply Changes is clicked.");
+            logMessage("AudioClip Recorder Track Live Effect monitor is enabled for the same applied wet signal.");
 
         if (activeImportSectionIndex < 0 || activeImportSectionIndex >= static_cast<int>(importSections.size()))
         {
@@ -16327,11 +16490,17 @@ void MainComponent::openAudioRecorderWindow()
         activeRecordingSampleRate = startResult.sampleRate;
         activeRecordingChannelCount = startResult.channelCount;
         logMessage("Recording AudioClip take to temp file. Pause skips time; no silent gap is inserted.");
+        if (startResult.recordEffectRequested)
+        {
+            logMessage(startResult.recordEffectActive
+                ? juce::String("AudioClip Recorder: ") + juce::String(startResult.recordEffectMessage)
+                : juce::String("AudioClip Recorder: dry recording continues. ") + juce::String(startResult.recordEffectMessage));
+        }
         if (startResult.liveEffectMonitorRequested)
         {
             logMessage(startResult.liveEffectMonitorActive
                 ? juce::String("AudioClip Recorder: ") + juce::String(startResult.liveEffectMessage)
-                : juce::String("AudioClip Recorder: dry recording continues. ") + juce::String(startResult.liveEffectMessage));
+                : juce::String("AudioClip Recorder: ") + juce::String(startResult.liveEffectMessage));
         }
         refreshAudioRecorderWindowStatus();
     }
@@ -23944,6 +24113,650 @@ void MainComponent::selectTrackFromManagerPage()
         );
     }
 
+    bool MainComponent::previewAudioClipEditorArrangement(std::vector<mw::gui::AudioClipArrangementRenderClip> arrangementClips)
+    {
+        if (renderingInProgress)
+        {
+            logMessage("AudioClip Editor Arrangement Preview: render/preview already in progress.");
+            return false;
+        }
+
+        if (!currentProject)
+        {
+            logMessage("AudioClip Editor Arrangement Preview: no project loaded.");
+            return false;
+        }
+
+        if (arrangementClips.empty())
+        {
+            logMessage("AudioClip Editor Arrangement Preview: place at least one clip before previewing.");
+            return false;
+        }
+
+        auto resolveSourcePath = [this](const mw::core::AudioClip& clip) -> std::filesystem::path
+        {
+            std::error_code ec;
+            if (!clip.projectRelativePath.empty())
+            {
+                if (clip.projectRelativePath.is_absolute())
+                {
+                    if (std::filesystem::exists(clip.projectRelativePath, ec) && !ec)
+                        return clip.projectRelativePath;
+                }
+                else
+                {
+                    const auto folder = getCurrentProjectFolder();
+                    if (!folder.empty())
+                    {
+                        const auto absolute = (folder / clip.projectRelativePath).lexically_normal();
+                        if (std::filesystem::exists(absolute, ec) && !ec)
+                            return absolute;
+                    }
+
+                    if (std::filesystem::exists(clip.projectRelativePath, ec) && !ec)
+                        return clip.projectRelativePath;
+                }
+            }
+
+            if (!clip.originalSourcePath.empty() && std::filesystem::exists(clip.originalSourcePath, ec) && !ec)
+                return clip.originalSourcePath;
+
+            return {};
+        };
+
+        struct PreparedArrangementClip
+        {
+            mw::gui::AudioClipArrangementRenderClip request;
+            mw::core::AudioClip sourceClip;
+            std::filesystem::path sourcePath;
+        };
+
+        std::vector<PreparedArrangementClip> preparedClips;
+        preparedClips.reserve(arrangementClips.size());
+
+        for (const auto& request : arrangementClips)
+        {
+            if (request.sourceClipId <= 0 || request.sourceEndSamples <= request.sourceStartSamples)
+            {
+                logMessage("AudioClip Editor Arrangement Preview: skipped invalid arrangement clip request.");
+                continue;
+            }
+
+            const mw::core::AudioClip* sourceClip = nullptr;
+            for (const auto& clip : currentProject->getAudioClips())
+            {
+                if (clip.id == request.sourceClipId)
+                {
+                    sourceClip = &clip;
+                    break;
+                }
+            }
+
+            if (sourceClip == nullptr || sourceClip->durationSamples <= 0 || sourceClip->sampleRate <= 0.0)
+            {
+                logMessage("AudioClip Editor Arrangement Preview: source AudioClip media for an arrangement clip could not be found or has no valid duration.");
+                return false;
+            }
+
+            const auto sourcePath = resolveSourcePath(*sourceClip);
+            if (sourcePath.empty())
+            {
+                logMessage("AudioClip Editor Arrangement Preview: source media file could not be resolved for AudioClip media #" + juce::String(sourceClip->id) + ".");
+                return false;
+            }
+
+            PreparedArrangementClip prepared;
+            prepared.request = request;
+            prepared.sourceClip = *sourceClip;
+            prepared.sourcePath = sourcePath;
+            preparedClips.push_back(std::move(prepared));
+        }
+
+        if (preparedClips.empty())
+        {
+            logMessage("AudioClip Editor Arrangement Preview: no valid arrangement clips were available to preview.");
+            return false;
+        }
+
+        cleanupPianoRollPreviewFiles();
+        lastPianoRollPreviewScope = 4;
+        lastAudioClipEditorPreviewClipId = preparedClips.front().sourceClip.id;
+        lastAudioClipEditorPreviewStartSamples = preparedClips.front().request.sourceStartSamples;
+        lastAudioClipEditorPreviewEndSamples = preparedClips.front().request.sourceEndSamples;
+        lastAudioClipEditorPreviewFullSource = false;
+        lastPianoRollPreviewNotes.clear();
+        lastPianoRollPreviewAudioClips.clear();
+
+        const auto outputChannels = channelsCombo.getSelectedId() == 1 ? 1 : 2;
+        const auto ffmpegPath = std::filesystem::path(ffmpegPathBox.getText().toStdString());
+        const auto now = juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S").toStdString();
+        const auto scratchFolder = mw::app::AppPaths::tempFolder() / "audioclip_render" / ("arrangement_preview_" + now);
+        const auto previewFolder = mw::app::AppPaths::previewFolder();
+        const auto outputPath = previewFolder / "acea.wav";
+        const auto placementSourceClip = preparedClips.front().sourceClip;
+        const auto tempo = pianoRollBpmBox.getText().getDoubleValue() > 0.0
+            ? pianoRollBpmBox.getText().getDoubleValue()
+            : static_cast<double>(std::max(1, currentProject->getTempoBpm()));
+
+        if (renderThread.joinable())
+            renderThread.join();
+
+        cancelRenderRequested = false;
+        setRenderingState(true);
+        logMessage("AudioClip Editor Arrangement Preview started: rendering current placed clips to workspace/temp preview audio.");
+
+        renderThread = std::thread(
+            [this,
+             preparedClips = std::move(preparedClips),
+             ffmpegPath,
+             scratchFolder,
+             previewFolder,
+             outputPath,
+             outputChannels,
+             placementSourceClip,
+             tempo]
+            {
+                struct ArrangementPreviewResult
+                {
+                    bool success = false;
+                    double actualAudibleEndSeconds = 0.0;
+                    juce::String message;
+                } result;
+
+                std::error_code ec;
+                std::filesystem::create_directories(scratchFolder, ec);
+                std::filesystem::create_directories(previewFolder, ec);
+                if (ec)
+                {
+                    result.message = "AudioClip Editor Arrangement Preview: could not create workspace temp preview folder: " + juce::String(ec.message());
+                }
+                else
+                {
+                    std::filesystem::remove(outputPath, ec);
+
+                    std::vector<std::filesystem::path> preparedWavs;
+                    std::vector<double> startOffsets;
+                    preparedWavs.reserve(preparedClips.size());
+                    startOffsets.reserve(preparedClips.size());
+
+                    int clipIndex = 0;
+                    double actualAudibleEndSeconds = 0.0;
+                    for (const auto& clip : preparedClips)
+                    {
+                        ++clipIndex;
+                        const auto sourceDurationSamples = std::max<long long>(1, clip.sourceClip.durationSamples);
+                        const auto safeStartSamples = std::clamp<long long>(clip.request.sourceStartSamples, 0, sourceDurationSamples - 1);
+                        const auto safeEndSamples = std::clamp<long long>(clip.request.sourceEndSamples, safeStartSamples + 1, sourceDurationSamples);
+                        const auto durationSamples = std::max<long long>(0, safeEndSamples - safeStartSamples);
+                        if (durationSamples <= 0 || clip.sourceClip.sampleRate <= 0.0)
+                            continue;
+
+                        const auto preparedWav = scratchFolder / ("arrprev_" + std::to_string(clipIndex) + ".wav");
+                        mw::audio::FfmpegTrimRequest trimRequest;
+                        trimRequest.ffmpegExePath = ffmpegPath;
+                        trimRequest.inputPath = clip.sourcePath;
+                        trimRequest.outputWavPath = preparedWav;
+                        trimRequest.trimStartSeconds = static_cast<double>(safeStartSamples) / clip.sourceClip.sampleRate;
+                        trimRequest.trimDurationSeconds = static_cast<double>(durationSamples) / clip.sourceClip.sampleRate;
+                        trimRequest.outputChannels = outputChannels;
+                        trimRequest.outputSampleRate = 44100;
+                        trimRequest.mciCompatibleWav = true;
+                        trimRequest.timeoutSeconds = 600;
+
+                        const auto trimResult = mw::audio::ExternalFfmpegEncoder::trimToWav(trimRequest);
+                        if (!trimResult.success || !std::filesystem::exists(preparedWav))
+                        {
+                            result.message = "AudioClip Editor Arrangement Preview: failed to prepare one arranged clip range. " + juce::String(trimResult.message);
+                            break;
+                        }
+
+                        const auto placementStartSeconds = std::max(0.0, clip.request.arrangementStartSeconds);
+                        const auto clipDurationSeconds = static_cast<double>(durationSamples) / clip.sourceClip.sampleRate;
+                        preparedWavs.push_back(preparedWav);
+                        startOffsets.push_back(placementStartSeconds);
+                        actualAudibleEndSeconds = std::max(actualAudibleEndSeconds, placementStartSeconds + clipDurationSeconds);
+                    }
+
+                    if (result.message.isEmpty())
+                    {
+                        if (preparedWavs.empty())
+                        {
+                            result.message = "AudioClip Editor Arrangement Preview: all arranged clip ranges were empty.";
+                        }
+                        else
+                        {
+                            result.actualAudibleEndSeconds = actualAudibleEndSeconds;
+                            const bool needsMix = preparedWavs.size() > 1 || (!startOffsets.empty() && startOffsets.front() > 0.0005);
+                            if (needsMix)
+                            {
+                                mw::audio::FfmpegMixRequest mixRequest;
+                                mixRequest.ffmpegExePath = ffmpegPath;
+                                mixRequest.inputWavPaths = preparedWavs;
+                                mixRequest.inputStartOffsetsSeconds = startOffsets;
+                                mixRequest.outputWavPath = outputPath;
+                                mixRequest.timeoutSeconds = 900;
+
+                                const auto mixResult = mw::audio::ExternalFfmpegMixer::mixWavFiles(mixRequest);
+                                if (!mixResult.success || !std::filesystem::exists(outputPath))
+                                    result.message = "AudioClip Editor Arrangement Preview: failed to mix arranged clips. " + juce::String(mixResult.message);
+                            }
+                            else
+                            {
+                                std::filesystem::copy_file(preparedWavs.front(), outputPath, std::filesystem::copy_options::overwrite_existing, ec);
+                                if (ec || !std::filesystem::exists(outputPath))
+                                    result.message = "AudioClip Editor Arrangement Preview: failed to prepare preview WAV: " + juce::String(ec.message());
+                            }
+
+                            if (result.message.isEmpty())
+                            {
+                                result.success = true;
+                                result.message = "AudioClip Editor Arrangement Preview: rendered current arrangement to workspace/temp preview audio. Actual audible end "
+                                    + juce::String(result.actualAudibleEndSeconds, 2)
+                                    + "s; window/segment length ignored.";
+                            }
+                        }
+                    }
+                }
+
+                std::filesystem::remove_all(scratchFolder, ec);
+
+                juce::MessageManager::callAsync(
+                    [this, result, outputPath, placementSourceClip, tempo]
+                    {
+                        logMessage(result.message);
+
+                        if (!result.success || !std::filesystem::exists(outputPath))
+                        {
+                            setRenderingState(false);
+                            return;
+                        }
+
+                        generatedPreviewFiles.clear();
+                        generatedPreviewFiles.push_back(outputPath);
+
+                        lastPianoRollPreviewWavPath = outputPath;
+                        lastPianoRollPreviewTempoBpm = tempo;
+                        const auto renderedPreviewSeconds = getAudioFileDurationSeconds(outputPath);
+                        lastPianoRollPreviewDurationBeats = renderedPreviewSeconds > 0.0
+                            ? std::max(0.01, renderedPreviewSeconds * tempo / 60.0)
+                            : std::max(0.01, result.actualAudibleEndSeconds * tempo / 60.0);
+                        pianoRollPreviewPaused = false;
+                        pendingPianoRollPreviewStartSeconds = 0.0;
+
+                        auto previewMapClip = placementSourceClip;
+                        previewMapClip.projectRelativePath = outputPath;
+                        previewMapClip.originalSourcePath.clear();
+                        const auto info = readAudioFileBasicInfo(outputPath);
+                        if (info.valid)
+                        {
+                            previewMapClip.durationSamples = info.durationSamples;
+                            previewMapClip.sampleRate = info.sampleRate;
+                            previewMapClip.channelCount = info.channelCount;
+                            previewMapClip.bitDepth = info.bitDepth;
+                            previewMapClip.sizeBytes = info.sizeBytes;
+                        }
+                        previewMapClip.startTick = 0;
+                        previewMapClip.sourceTrimStartSamples = 0;
+                        previewMapClip.sourceTrimEndSamples = previewMapClip.durationSamples;
+                        mw::core::normalizeAudioClipTrim(previewMapClip);
+                        lastPianoRollPreviewAudioClips = { previewMapClip };
+
+                        openPianoRollPreviewPlayerWindow();
+                        playPianoRollPreviewFile(lastPianoRollPreviewWavPath);
+                        logMessage("Opened AudioClip Editor Arrangement Preview Player for: " + outputPath.string());
+                        setRenderingState(false);
+                    }
+                );
+            }
+        );
+
+        return true;
+    }
+
+    bool MainComponent::renderAudioClipEditorArrangementToNewTrack(std::vector<mw::gui::AudioClipArrangementRenderClip> arrangementClips)
+    {
+        if (renderingInProgress)
+        {
+            logMessage("AudioClip Editor Arrangement: render/preview already in progress.");
+            return false;
+        }
+
+        if (!currentProject)
+        {
+            logMessage("AudioClip Editor Arrangement: no project loaded.");
+            return false;
+        }
+
+        if (arrangementClips.empty())
+        {
+            logMessage("AudioClip Editor Arrangement: place at least one clip before rendering.");
+            return false;
+        }
+
+        if (!ensureProjectFolderReadyForAudio())
+            return false;
+
+        const bool renderTargetProjectIsSaved = currentProjectFilePath && !currentProjectFilePath->empty();
+        const auto projectFolder = renderTargetProjectIsSaved ? getCurrentProjectFolder() : std::filesystem::path{};
+        if (renderTargetProjectIsSaved && projectFolder.empty())
+        {
+            logMessage("AudioClip Editor Arrangement: current project folder could not be resolved.");
+            return false;
+        }
+
+        auto resolveSourcePath = [this](const mw::core::AudioClip& clip) -> std::filesystem::path
+        {
+            std::error_code ec;
+            if (!clip.projectRelativePath.empty())
+            {
+                if (clip.projectRelativePath.is_absolute())
+                {
+                    if (std::filesystem::exists(clip.projectRelativePath, ec) && !ec)
+                        return clip.projectRelativePath;
+                }
+                else
+                {
+                    const auto folder = getCurrentProjectFolder();
+                    if (!folder.empty())
+                    {
+                        const auto absolute = (folder / clip.projectRelativePath).lexically_normal();
+                        if (std::filesystem::exists(absolute, ec) && !ec)
+                            return absolute;
+                    }
+
+                    if (std::filesystem::exists(clip.projectRelativePath, ec) && !ec)
+                        return clip.projectRelativePath;
+                }
+            }
+
+            // Last-resort fallback only.  Generated arrangement audio should normally
+            // read from the normalized project/staged media, not the external original.
+            if (!clip.originalSourcePath.empty() && std::filesystem::exists(clip.originalSourcePath, ec) && !ec)
+                return clip.originalSourcePath;
+
+            return {};
+        };
+
+        struct PreparedArrangementClip
+        {
+            mw::gui::AudioClipArrangementRenderClip request;
+            mw::core::AudioClip sourceClip;
+            std::filesystem::path sourcePath;
+        };
+
+        std::vector<PreparedArrangementClip> preparedClips;
+        preparedClips.reserve(arrangementClips.size());
+
+        for (const auto& request : arrangementClips)
+        {
+            if (request.sourceClipId <= 0 || request.sourceEndSamples <= request.sourceStartSamples)
+            {
+                logMessage("AudioClip Editor Arrangement: skipped invalid arrangement clip request.");
+                continue;
+            }
+
+            const mw::core::AudioClip* sourceClip = nullptr;
+            for (const auto& clip : currentProject->getAudioClips())
+            {
+                if (clip.id == request.sourceClipId)
+                {
+                    sourceClip = &clip;
+                    break;
+                }
+            }
+
+            if (sourceClip == nullptr || sourceClip->durationSamples <= 0 || sourceClip->sampleRate <= 0.0)
+            {
+                logMessage("AudioClip Editor Arrangement: source AudioClip media for an arrangement clip could not be found or has no valid duration.");
+                return false;
+            }
+
+            const auto sourcePath = resolveSourcePath(*sourceClip);
+            if (sourcePath.empty())
+            {
+                logMessage("AudioClip Editor Arrangement: source media file could not be resolved for AudioClip media #" + juce::String(sourceClip->id) + ".");
+                return false;
+            }
+
+            PreparedArrangementClip prepared;
+            prepared.request = request;
+            prepared.sourceClip = *sourceClip;
+            prepared.sourcePath = sourcePath;
+            preparedClips.push_back(std::move(prepared));
+        }
+
+        if (preparedClips.empty())
+        {
+            logMessage("AudioClip Editor Arrangement: no valid arrangement clips were available to render.");
+            return false;
+        }
+
+        const auto placementSourceClip = preparedClips.front().sourceClip;
+        const auto requestedFormat = placementSourceClip.savedFormat;
+        const auto outputChannels = channelsCombo.getSelectedId() == 1 ? 1 : 2;
+        const auto qualityKbps = getSelectedAudioClipQualityKbps();
+        const auto ffmpegPath = std::filesystem::path(ffmpegPathBox.getText().toStdString());
+        const auto now = juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S").toStdString();
+        const auto scratchFolder = mw::app::AppPaths::tempFolder() / "audioclip_render" / ("arrangement_" + now);
+        const auto pendingArrangementProjectFolder = renderTargetProjectIsSaved
+            ? std::filesystem::path{}
+            : getAudioRecordingSessionFolder();
+
+        if (renderThread.joinable())
+            renderThread.join();
+
+        cancelRenderRequested = false;
+        setRenderingState(true);
+        logMessage("AudioClip Editor Arrangement: rendering " + juce::String(static_cast<int>(preparedClips.size())) + " arranged clip(s) to a new AudioClip track.");
+
+        renderThread = std::thread(
+            [this,
+             preparedClips = std::move(preparedClips),
+             projectFolder,
+             pendingArrangementProjectFolder,
+             renderTargetProjectIsSaved,
+             ffmpegPath,
+             scratchFolder,
+             requestedFormat,
+             outputChannels,
+             qualityKbps,
+             placementSourceClip]
+            {
+                struct ArrangementRenderResult
+                {
+                    bool success = false;
+                    bool stagedUntilProjectSave = false;
+                    double actualAudibleEndSeconds = 0.0;
+                    juce::String message;
+                    mw::audio::AudioClipImportResult importResult;
+                } result;
+
+                std::error_code ec;
+                std::filesystem::create_directories(scratchFolder, ec);
+                if (ec)
+                {
+                    result.message = "AudioClip Editor Arrangement: could not create workspace temp render folder: " + juce::String(ec.message());
+                }
+                else
+                {
+                    std::vector<std::filesystem::path> preparedWavs;
+                    std::vector<double> startOffsets;
+                    preparedWavs.reserve(preparedClips.size());
+                    startOffsets.reserve(preparedClips.size());
+
+                    int clipIndex = 0;
+                    double actualAudibleEndSeconds = 0.0;
+                    for (const auto& clip : preparedClips)
+                    {
+                        ++clipIndex;
+                        const auto sourceDurationSamples = std::max<long long>(1, clip.sourceClip.durationSamples);
+                        const auto safeStartSamples = std::clamp<long long>(clip.request.sourceStartSamples, 0, sourceDurationSamples - 1);
+                        const auto safeEndSamples = std::clamp<long long>(clip.request.sourceEndSamples, safeStartSamples + 1, sourceDurationSamples);
+                        const auto durationSamples = std::max<long long>(0, safeEndSamples - safeStartSamples);
+                        if (durationSamples <= 0 || clip.sourceClip.sampleRate <= 0.0)
+                            continue;
+
+                        const auto preparedWav = scratchFolder / ("arrclip_" + std::to_string(clipIndex) + ".wav");
+                        mw::audio::FfmpegTrimRequest trimRequest;
+                        trimRequest.ffmpegExePath = ffmpegPath;
+                        trimRequest.inputPath = clip.sourcePath;
+                        trimRequest.outputWavPath = preparedWav;
+                        trimRequest.trimStartSeconds = static_cast<double>(safeStartSamples) / clip.sourceClip.sampleRate;
+                        trimRequest.trimDurationSeconds = static_cast<double>(durationSamples) / clip.sourceClip.sampleRate;
+                        trimRequest.outputChannels = outputChannels;
+                        trimRequest.timeoutSeconds = 600;
+
+                        const auto trimResult = mw::audio::ExternalFfmpegEncoder::trimToWav(trimRequest);
+                        if (!trimResult.success || !std::filesystem::exists(preparedWav))
+                        {
+                            result.message = "AudioClip Editor Arrangement: failed to prepare one arranged clip range. " + juce::String(trimResult.message);
+                            break;
+                        }
+
+                        const auto placementStartSeconds = std::max(0.0, clip.request.arrangementStartSeconds);
+                        const auto clipDurationSeconds = static_cast<double>(durationSamples) / clip.sourceClip.sampleRate;
+
+                        preparedWavs.push_back(preparedWav);
+                        startOffsets.push_back(placementStartSeconds);
+                        actualAudibleEndSeconds = std::max(actualAudibleEndSeconds, placementStartSeconds + clipDurationSeconds);
+                    }
+
+                    if (result.message.isEmpty())
+                    {
+                        if (preparedWavs.empty())
+                        {
+                            result.message = "AudioClip Editor Arrangement: all arranged clip ranges were empty.";
+                        }
+                        else
+                        {
+                            // Render length follows the actual final audible clip end.
+                            // The free-form arrangement window/segment length is only UI space
+                            // and is intentionally not used as the rendered audio duration.
+                            result.actualAudibleEndSeconds = actualAudibleEndSeconds;
+                            std::filesystem::path mixWavPath = preparedWavs.front();
+                            const bool needsMix = preparedWavs.size() > 1 || (!startOffsets.empty() && startOffsets.front() > 0.0005);
+                            if (needsMix)
+                            {
+                                mixWavPath = scratchFolder / "arrangement_mix.wav";
+                                mw::audio::FfmpegMixRequest mixRequest;
+                                mixRequest.ffmpegExePath = ffmpegPath;
+                                mixRequest.inputWavPaths = preparedWavs;
+                                mixRequest.inputStartOffsetsSeconds = startOffsets;
+                                mixRequest.outputWavPath = mixWavPath;
+                                mixRequest.timeoutSeconds = 900;
+
+                                const auto mixResult = mw::audio::ExternalFfmpegMixer::mixWavFiles(mixRequest);
+                                if (!mixResult.success || !std::filesystem::exists(mixWavPath))
+                                    result.message = "AudioClip Editor Arrangement: failed to mix arranged clips. " + juce::String(mixResult.message);
+                            }
+
+                            if (result.message.isEmpty())
+                            {
+                                mw::audio::AudioClipImportRequest importRequest;
+                                importRequest.sourcePath = mixWavPath;
+                                importRequest.projectFolder = renderTargetProjectIsSaved ? projectFolder : pendingArrangementProjectFolder;
+                                importRequest.ffmpegExePath = ffmpegPath;
+                                importRequest.savedFormat = requestedFormat;
+                                importRequest.qualityKbps = qualityKbps;
+                                importRequest.channelCount = outputChannels;
+                                // imported=true writes saved-project renders into
+                                // <project>/input/audio/imported via AudioClipImporter.
+                                // Unsaved-project renders are staged under the current workspace/temp AudioClip session
+                                // and migrated to <project>/input/audio/imported during Save/Save As.
+                                // The original source/imported media is never rewritten.
+                                importRequest.imported = true;
+                                importRequest.forceTranscode = true;
+                                importRequest.fallbackToReadableWav = true;
+                                importRequest.preferredName = placementSourceClip.name.empty()
+                                    ? "audioclip_arrangement"
+                                    : placementSourceClip.name + "_arrangement";
+
+                                result.importResult = mw::audio::AudioClipImporter::importToProject(importRequest);
+                                if (!result.importResult.success)
+                                {
+                                    result.message = "AudioClip Editor Arrangement: could not import/stage rendered arrangement audio. " + juce::String(result.importResult.message);
+                                }
+                                else
+                                {
+                                    result.success = true;
+                                    result.stagedUntilProjectSave = !renderTargetProjectIsSaved;
+                                    const auto displayedPath = result.stagedUntilProjectSave
+                                        ? result.importResult.absolutePath
+                                        : result.importResult.relativePath;
+                                    result.message = "AudioClip Editor Arrangement: rendered arrangement media: "
+                                        + juce::String(displayedPath.string())
+                                        + " | actual audio end "
+                                        + juce::String(result.actualAudibleEndSeconds, 2)
+                                        + "s; window/segment length ignored to avoid trailing dead air.";
+                                    if (result.stagedUntilProjectSave)
+                                        result.message += " Staged in the current AudioClip temp session until Save Project migrates it into the project's input/audio/imported folder.";
+                                }
+                            }
+                        }
+                    }
+                }
+
+                std::filesystem::remove_all(scratchFolder, ec);
+
+                juce::MessageManager::callAsync(
+                    [this, result, placementSourceClip]
+                    {
+                        logMessage(result.message);
+
+                        if (!result.success)
+                        {
+                            setRenderingState(false);
+                            return;
+                        }
+
+                        const int trackIndex = createAudioClipTrackForNewClip("AudioClip Arrangement");
+                        if (trackIndex < 0)
+                        {
+                            logMessage("AudioClip Editor Arrangement: rendered media was created but could not be attached because a new track could not be created.");
+                            setRenderingState(false);
+                            return;
+                        }
+
+                        mw::core::AudioClip clip;
+                        clip.name = safeClipDisplayName(result.importResult.absolutePath).toStdString();
+                        clip.trackIndex = trackIndex;
+                        clip.sequenceNumber = placementSourceClip.sequenceNumber;
+                        clip.sourceType = mw::core::AudioClipSourceType::Imported;
+                        clip.savedFormat = result.importResult.savedFormat;
+                        clip.projectRelativePath = result.stagedUntilProjectSave
+                            ? result.importResult.absolutePath
+                            : result.importResult.relativePath;
+                        // For unsaved projects, leave originalSourcePath empty so Save/Save As
+                        // migrates the staged generated media into the project input folder
+                        // instead of preserving a workspace/temp path as the long-term source.
+                        clip.originalSourcePath = result.stagedUntilProjectSave
+                            ? std::filesystem::path{}
+                            : result.importResult.absolutePath;
+                        clip.startTick = placementSourceClip.startTick;
+                        clip.durationSamples = result.importResult.durationSamples;
+                        clip.sampleRate = result.importResult.sampleRate;
+                        clip.channelCount = result.importResult.channelCount;
+                        clip.bitDepth = result.importResult.bitDepth;
+                        clip.sizeBytes = result.importResult.sizeBytes;
+                        clip.sourceTrimStartSamples = 0;
+                        clip.sourceTrimEndSamples = clip.durationSamples;
+                        mw::core::normalizeAudioClipTrim(clip);
+
+                        expandSequenceEndTickForAudioClip(clip);
+                        addAudioClipToProject(std::move(clip));
+
+                        logMessage(result.stagedUntilProjectSave
+                            ? "AudioClip Editor Arrangement: created new imported-style AudioClip track from staged media. Save Project will migrate it into input/audio/imported. Original source media was not modified."
+                            : "AudioClip Editor Arrangement: created new imported-style AudioClip track from the rendered arrangement in project input/audio/imported. Original source media was not modified.");
+                        setRenderingState(false);
+                    }
+                );
+            }
+        );
+
+        return true;
+    }
+
     void MainComponent::stopAudioClipEditorPreview()
     {
 #if JUCE_WINDOWS
@@ -24110,6 +24923,16 @@ void MainComponent::selectTrackFromManagerPage()
             stopAudioClipEditorPreview();
         };
 
+        auto previewArrangement = [this](std::vector<mw::gui::AudioClipArrangementRenderClip> arrangementClips)
+        {
+            return previewAudioClipEditorArrangement(std::move(arrangementClips));
+        };
+
+        auto renderArrangement = [this](std::vector<mw::gui::AudioClipArrangementRenderClip> arrangementClips)
+        {
+            return renderAudioClipEditorArrangementToNewTrack(std::move(arrangementClips));
+        };
+
         audioClipEditorContent = createAudioClipEditorComponent(
             *currentProject,
             trackIndex,
@@ -24119,15 +24942,17 @@ void MainComponent::selectTrackFromManagerPage()
             resetTrim,
             previewClip,
             stopPreview,
+            previewArrangement,
+            renderArrangement,
             closeWindow
         );
 
         auto* window = new PianoRollDocumentWindow("AudioClip Editor", closeWindow);
         applyPoorMansStudioCustomTitleBar(*window);
         window->setResizable(true, true);
-        window->setResizeLimits(760, 620, 1800, 1200);
+        window->setResizeLimits(860, 720, 1900, 1300);
         window->setContentNonOwned(audioClipEditorContent.get(), true);
-        window->centreWithSize(980, 780);
+        window->centreWithSize(1120, 900);
         window->setVisible(true);
         applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::AudioClipEditor);
 

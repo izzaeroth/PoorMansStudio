@@ -23,11 +23,17 @@ namespace mw::audio
         bool liveEffectMonitorRequested = false;
         bool liveEffectMonitorActive = false;
         std::string liveEffectMessage;
+        bool recordEffectRequested = false;
+        bool recordEffectActive = false;
+        std::string recordEffectMessage;
     };
 
     struct AudioClipRecorderLiveEffectOptions
     {
+        // enabled means the selected track's applied VST effect should be printed into the recorded take.
         bool enabled = false;
+        // monitorEnabled only controls whether that same wet signal is sent to the output while recording.
+        bool monitorEnabled = false;
         mw::core::VstPluginAssignment effect;
         std::string trackName;
         std::string unavailableMessage;
@@ -60,6 +66,8 @@ namespace mw::audio
         double getInputGainDb() const { return static_cast<double>(inputGainDb.load()); }
         bool isLiveEffectMonitorActive() const { return liveEffectMonitorActive.load(); }
         juce::String getLiveEffectMonitorSummary() const { return liveEffectMonitorSummary; }
+        bool isRecordEffectActive() const { return recordEffectActive.load(); }
+        juce::String getRecordEffectSummary() const { return recordEffectSummary; }
 
     private:
         void audioDeviceAboutToStart(juce::AudioIODevice* device) override;
@@ -87,7 +95,7 @@ namespace mw::audio
         juce::TimeSliceThread backgroundThread { "AudioClip Recorder Writer" };
         std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> threadedWriter;
         std::unique_ptr<juce::AudioBuffer<float>> scratchBuffer;
-        std::unique_ptr<juce::AudioBuffer<float>> monitorBuffer;
+        std::unique_ptr<juce::AudioBuffer<float>> effectBuffer;
         std::unique_ptr<juce::AudioPluginInstance> liveEffectInstance;
         std::atomic<juce::AudioFormatWriter::ThreadedWriter*> activeWriter { nullptr };
         std::atomic<bool> recording { false };
@@ -96,12 +104,15 @@ namespace mw::audio
         std::atomic<float> inputGainDb { 0.0f };
         std::atomic<float> inputGainLinear { 1.0f };
         std::atomic<bool> liveEffectMonitorActive { false };
+        std::atomic<bool> recordEffectActive { false };
         std::filesystem::path outputPath;
         juce::String preferredInputDeviceName;
         double currentSampleRate = 48000.0;
         int channelCount = 1;
         int bitDepth = 24;
         int liveEffectMonitorChannels = 0;
+        int recordEffectProcessChannels = 0;
         juce::String liveEffectMonitorSummary;
+        juce::String recordEffectSummary;
     };
 }

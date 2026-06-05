@@ -26,7 +26,8 @@ namespace mw::audio
                                                                      const AudioClipRecorderLiveEffectOptions& liveEffectOptions)
     {
         AudioClipRecorderStartResult result;
-        result.liveEffectMonitorRequested = liveEffectOptions.enabled;
+        result.recordEffectRequested = liveEffectOptions.enabled;
+        result.liveEffectMonitorRequested = liveEffectOptions.monitorEnabled;
 
         stop();
 
@@ -39,7 +40,7 @@ namespace mw::audio
         std::error_code ec;
         std::filesystem::create_directories(outputPath.parent_path(), ec);
 
-        const int requestedOutputChannels = liveEffectOptions.enabled ? 2 : 0;
+        const int requestedOutputChannels = liveEffectOptions.monitorEnabled ? 2 : 0;
         auto initError = deviceManager.initialise(channelCount, requestedOutputChannels, nullptr, true, preferredInputDeviceName);
         if (initError.isNotEmpty())
         {
@@ -76,44 +77,84 @@ namespace mw::audio
                 ? liveEffectOptions.effect.bundlePath.filename().string()
                 : liveEffectOptions.effect.name;
 
+            const bool monitorRequestedWithOutput = liveEffectOptions.monitorEnabled && availableOutputChannels > 0;
+
             if (!liveEffectOptions.unavailableMessage.empty())
             {
-                result.liveEffectMessage = liveEffectOptions.unavailableMessage;
-                liveEffectMonitorSummary = result.liveEffectMessage;
+                result.recordEffectMessage = liveEffectOptions.unavailableMessage;
+                recordEffectSummary = result.recordEffectMessage;
+                if (liveEffectOptions.monitorEnabled)
+                {
+                    result.liveEffectMessage = liveEffectOptions.unavailableMessage;
+                    liveEffectMonitorSummary = result.liveEffectMessage;
+                }
             }
             else if (!liveEffectOptions.effect.hasPluginIdentity() || liveEffectOptions.effect.bundlePath.empty())
             {
-                result.liveEffectMessage = "Track Live Effect requested, but the target track does not have a VST3 effect assignment.";
-                liveEffectMonitorSummary = result.liveEffectMessage;
+                result.recordEffectMessage = "Track effect recording requested, but the target track does not have a VST3 effect assignment.";
+                recordEffectSummary = result.recordEffectMessage;
+                if (liveEffectOptions.monitorEnabled)
+                {
+                    result.liveEffectMessage = "Track Live Effect requested, but the target track does not have a VST3 effect assignment.";
+                    liveEffectMonitorSummary = result.liveEffectMessage;
+                }
             }
             else if (liveEffectOptions.effect.bypassed)
             {
-                result.liveEffectMessage = "Track Live Effect requested, but the target track effect is bypassed.";
-                liveEffectMonitorSummary = result.liveEffectMessage;
-            }
-            else if (availableOutputChannels <= 0)
-            {
-                result.liveEffectMessage = "Track Live Effect requested, but no audio output device/channel is available for monitoring.";
-                liveEffectMonitorSummary = result.liveEffectMessage;
+                result.recordEffectMessage = "Track effect recording requested, but the target track effect is bypassed.";
+                recordEffectSummary = result.recordEffectMessage;
+                if (liveEffectOptions.monitorEnabled)
+                {
+                    result.liveEffectMessage = "Track Live Effect requested, but the target track effect is bypassed.";
+                    liveEffectMonitorSummary = result.liveEffectMessage;
+                }
             }
             else
             {
-                liveEffectMonitorChannels = juce::jlimit(1, 2, std::max(channelCount, std::min(2, availableOutputChannels)));
-                auto load = mw::vst::VstInstrumentHost::loadPluginAssignment(liveEffectOptions.effect, currentSampleRate, 512, liveEffectMonitorChannels, liveEffectMonitorChannels);
+                const int requestedProcessChannels = monitorRequestedWithOutput
+                    ? juce::jlimit(1, 2, std::max(channelCount, std::min(2, availableOutputChannels)))
+                    : juce::jlimit(1, 2, channelCount);
+
+                auto load = mw::vst::VstInstrumentHost::loadPluginAssignment(liveEffectOptions.effect, currentSampleRate, 512, requestedProcessChannels, requestedProcessChannels);
                 if (load.success && load.instance != nullptr)
                 {
                     liveEffectInstance = std::move(load.instance);
-                    liveEffectMonitorActive = true;
-                    result.liveEffectMonitorActive = true;
-                    result.liveEffectMessage = "Track Live Effect monitor active: " + effectName
+                    recordEffectProcessChannels = requestedProcessChannels;
+                    recordEffectActive = true;
+                    result.recordEffectActive = true;
+                    result.recordEffectMessage = "Track VST effect will be printed into the recorded take: " + effectName
                         + (liveEffectOptions.trackName.empty() ? std::string() : (" on " + liveEffectOptions.trackName));
-                    liveEffectMonitorSummary = result.liveEffectMessage;
+                    recordEffectSummary = result.recordEffectMessage;
+
+                    if (liveEffectOptions.monitorEnabled)
+                    {
+                        if (monitorRequestedWithOutput)
+                        {
+                            liveEffectMonitorChannels = requestedProcessChannels;
+                            liveEffectMonitorActive = true;
+                            result.liveEffectMonitorActive = true;
+                            result.liveEffectMessage = "Track Live Effect monitor active: " + effectName
+                                + (liveEffectOptions.trackName.empty() ? std::string() : (" on " + liveEffectOptions.trackName));
+                            liveEffectMonitorSummary = result.liveEffectMessage;
+                        }
+                        else
+                        {
+                            result.liveEffectMessage = "Track Live Effect requested, but no audio output device/channel is available for monitoring. Wet recording continues.";
+                            liveEffectMonitorSummary = result.liveEffectMessage;
+                        }
+                    }
                 }
                 else
                 {
-                    result.liveEffectMessage = "Track Live Effect could not load the VST3 effect for live monitoring: " + load.message;
-                    liveEffectMonitorSummary = result.liveEffectMessage;
-                    liveEffectMonitorChannels = 0;
+                    result.recordEffectMessage = "Track VST effect could not load for wet recording; dry recording continues: " + load.message;
+                    recordEffectSummary = result.recordEffectMessage;
+                    recordEffectProcessChannels = 0;
+                    if (liveEffectOptions.monitorEnabled)
+                    {
+                        result.liveEffectMessage = "Track Live Effect could not load the VST3 effect for live monitoring: " + load.message;
+                        liveEffectMonitorSummary = result.liveEffectMessage;
+                        liveEffectMonitorChannels = 0;
+                    }
                 }
             }
         }
@@ -141,8 +182,8 @@ namespace mw::audio
         stream.release();
         threadedWriter = std::make_unique<juce::AudioFormatWriter::ThreadedWriter>(writer.release(), backgroundThread, 32768);
         scratchBuffer = std::make_unique<juce::AudioBuffer<float>>(channelCount, 4096);
-        if (liveEffectMonitorActive.load())
-            monitorBuffer = std::make_unique<juce::AudioBuffer<float>>(juce::jmax(1, liveEffectMonitorChannels), 4096);
+        if (recordEffectActive.load())
+            effectBuffer = std::make_unique<juce::AudioBuffer<float>>(juce::jmax(1, recordEffectProcessChannels), 4096);
         activeWriter = threadedWriter.get();
         paused = false;
         recording = true;
@@ -219,20 +260,23 @@ namespace mw::audio
         activeWriter = nullptr;
         threadedWriter.reset();
         scratchBuffer.reset();
-        monitorBuffer.reset();
+        effectBuffer.reset();
         clearLiveEffectMonitor();
     }
 
     void AudioClipRecorder::clearLiveEffectMonitor()
     {
         liveEffectMonitorActive = false;
+        recordEffectActive = false;
         liveEffectMonitorChannels = 0;
+        recordEffectProcessChannels = 0;
         if (liveEffectInstance)
         {
             liveEffectInstance->releaseResources();
             liveEffectInstance.reset();
         }
         liveEffectMonitorSummary.clear();
+        recordEffectSummary.clear();
     }
 
     juce::String AudioClipRecorder::getCurrentDeviceSummary() const
@@ -315,16 +359,15 @@ namespace mw::audio
                 juce::FloatVectorOperations::multiply(dest, gain, numSamples);
         }
 
-        if (liveEffectMonitorActive.load() && liveEffectInstance && monitorBuffer
-            && monitorBuffer->getNumSamples() >= numSamples
-            && numOutputChannels > 0)
+        if (recordEffectActive.load() && liveEffectInstance && effectBuffer
+            && effectBuffer->getNumSamples() >= numSamples)
         {
-            const int monitorChannels = juce::jlimit(1, monitorBuffer->getNumChannels(), juce::jmax(1, liveEffectMonitorChannels));
-            monitorBuffer->setSize(monitorChannels, numSamples, false, false, true);
-            monitorBuffer->clear(0, numSamples);
-            for (int ch = 0; ch < monitorChannels; ++ch)
+            const int processChannels = juce::jlimit(1, effectBuffer->getNumChannels(), juce::jmax(1, recordEffectProcessChannels));
+            effectBuffer->setSize(processChannels, numSamples, false, false, true);
+            effectBuffer->clear(0, numSamples);
+            for (int ch = 0; ch < processChannels; ++ch)
             {
-                auto* dest = monitorBuffer->getWritePointer(ch);
+                auto* dest = effectBuffer->getWritePointer(ch);
                 if (ch < channelCount)
                     juce::FloatVectorOperations::copy(dest, scratchBuffer->getReadPointer(ch), numSamples);
                 else if (channelCount > 0)
@@ -336,21 +379,36 @@ namespace mw::audio
             juce::MidiBuffer emptyMidi;
             try
             {
-                liveEffectInstance->processBlock(*monitorBuffer, emptyMidi);
-                for (int ch = 0; ch < numOutputChannels; ++ch)
-                {
-                    if (outputChannelData[ch] == nullptr)
-                        continue;
+                liveEffectInstance->processBlock(*effectBuffer, emptyMidi);
 
-                    if (ch < monitorChannels)
-                        juce::FloatVectorOperations::copy(outputChannelData[ch], monitorBuffer->getReadPointer(ch), numSamples);
-                    else
-                        juce::FloatVectorOperations::clear(outputChannelData[ch], numSamples);
+                for (int ch = 0; ch < channelCount; ++ch)
+                {
+                    if (ch < processChannels)
+                        juce::FloatVectorOperations::copy(scratchBuffer->getWritePointer(ch), effectBuffer->getReadPointer(ch), numSamples);
+                    else if (processChannels > 0)
+                        juce::FloatVectorOperations::copy(scratchBuffer->getWritePointer(ch), effectBuffer->getReadPointer(0), numSamples);
+                }
+
+                if (liveEffectMonitorActive.load() && numOutputChannels > 0)
+                {
+                    const int monitorChannels = juce::jlimit(1, processChannels, juce::jmax(1, liveEffectMonitorChannels));
+                    for (int ch = 0; ch < numOutputChannels; ++ch)
+                    {
+                        if (outputChannelData[ch] == nullptr)
+                            continue;
+
+                        if (ch < monitorChannels)
+                            juce::FloatVectorOperations::copy(outputChannelData[ch], effectBuffer->getReadPointer(ch), numSamples);
+                        else
+                            juce::FloatVectorOperations::clear(outputChannelData[ch], numSamples);
+                    }
                 }
             }
             catch (...)
             {
+                recordEffectActive = false;
                 liveEffectMonitorActive = false;
+                recordEffectSummary = "Track VST effect failed while printing into the take; dry recording continued.";
                 liveEffectMonitorSummary = "Track Live Effect failed during monitoring; dry recording continued.";
                 for (int ch = 0; ch < numOutputChannels; ++ch)
                     if (outputChannelData[ch] != nullptr)
