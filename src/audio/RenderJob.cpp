@@ -441,6 +441,7 @@ namespace
             encodeRequest.metadataAlbum = job.metadataAlbum;
             encodeRequest.metadataTrackNumber = job.metadataTrackNumber;
             encodeRequest.metadataYear = job.metadataYear;
+            encodeRequest.albumArtPath = job.albumArtPath;
 
             const auto encodeResult = mw::audio::ExternalFfmpegEncoder::encodeFromWav(encodeRequest);
             log(callbacks, "FFmpeg AudioClip preview/render command: " + encodeResult.commandLine);
@@ -1284,6 +1285,7 @@ namespace mw::audio
             encodeRequest.metadataAlbum = job.metadataAlbum;
             encodeRequest.metadataTrackNumber = job.metadataTrackNumber;
             encodeRequest.metadataYear = job.metadataYear;
+            encodeRequest.albumArtPath = job.albumArtPath;
 
             const auto encodeResult = mw::audio::ExternalFfmpegEncoder::encodeFromWav(encodeRequest);
             log(callbacks, "FFmpeg command: " + encodeResult.commandLine);
@@ -1409,6 +1411,7 @@ namespace mw::audio
             encodeRequest.metadataAlbum = job.metadataAlbum;
             encodeRequest.metadataTrackNumber = job.metadataTrackNumber;
             encodeRequest.metadataYear = job.metadataYear;
+            encodeRequest.albumArtPath = job.albumArtPath;
 
             const auto encodeResult = mw::audio::ExternalFfmpegEncoder::encodeFromWav(encodeRequest);
             log(callbacks, "FFmpeg command: " + encodeResult.commandLine);
@@ -1554,6 +1557,7 @@ namespace mw::audio
         encodeRequest.metadataAlbum = job.metadataAlbum;
         encodeRequest.metadataTrackNumber = job.metadataTrackNumber;
         encodeRequest.metadataYear = job.metadataYear;
+        encodeRequest.albumArtPath = job.albumArtPath;
 
         const auto encodeResult = mw::audio::ExternalFfmpegEncoder::encodeFromWav(encodeRequest);
 

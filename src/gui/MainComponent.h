@@ -474,6 +474,12 @@ namespace mw::gui
         void chooseSfzFile();
         void createSfzTestMidiAndRender();
         void chooseExportFolder();
+        void chooseAlbumArtImage();
+        bool copyAlbumArtImageToManagedFolder(const std::filesystem::path& sourcePath);
+        bool commitStagedAlbumArtToProjectFolder(const std::filesystem::path& projectFolder);
+        bool isMp3OutputFormatSelected() const;
+        void refreshAlbumArtControls();
+        std::filesystem::path resolveAlbumArtPathForRender() const;
         void chooseSoundFont();
         void openProjectInfoWindow();
         void applyProjectInfoToGuiAndProject();
@@ -798,6 +804,7 @@ namespace mw::gui
         juce::TextButton cleanTempButton {"Clean Temp"};
         juce::TextButton saveSettingsButton {"Save Settings"};
         juce::TextButton editInfoButton {"Edit Info"};
+        juce::ToggleButton attachAlbumArtToggle {"Attach Album Art"};
         juce::TextButton exportFolderButton {"Choose Export Folder"};
         juce::TextButton browseSoundFontButton {"C"};
         juce::TextButton refreshSoundFontsButton {"Refresh"};
@@ -884,6 +891,7 @@ namespace mw::gui
         juce::Label channelsLabel;
         juce::Label renderWorkersLabel;
         juce::Label renderOutputSummaryLabel;
+        juce::Label albumArtStatusLabel;
         juce::Label trackLabel;
         juce::Label trackSoundLibraryLabel;
         juce::Label instrumentLabel;
@@ -1081,6 +1089,7 @@ namespace mw::gui
         double audioRecorderMicGainDb = 0.0;
         bool audioRecorderTrackLiveEffectEnabled = false;
         std::optional<std::filesystem::path> audioRecordingSessionFolderPath;
+        std::filesystem::path selectedAlbumArtPath;
         std::filesystem::path activeRecordingTempWavPath;
         std::filesystem::path activeRecordingSourceWavPath;
         std::optional<std::filesystem::path> activeRecordingProjectFolder;

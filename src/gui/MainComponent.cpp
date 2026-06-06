@@ -542,6 +542,57 @@ namespace
         return path;
     }
 
+
+    std::string sanitizedAlbumArtFilename(const std::filesystem::path& sourcePath)
+    {
+        auto stem = sourcePath.stem().string();
+        auto ext = sourcePath.extension().string();
+
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        std::string safe;
+        for (char c : stem)
+        {
+            const bool allowed = std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_';
+            safe.push_back(allowed ? c : '_');
+        }
+
+        if (safe.empty())
+            safe = "album_art";
+
+        if (ext != ".jpg" && ext != ".jpeg" && ext != ".png")
+            ext = ".jpg";
+
+        return safe + ext;
+    }
+
+    bool isSupportedAlbumArtImagePath(const std::filesystem::path& path)
+    {
+        auto ext = path.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return ext == ".jpg" || ext == ".jpeg" || ext == ".png";
+    }
+
+    std::filesystem::path makeUniqueAlbumArtDestination(const std::filesystem::path& folder, const std::filesystem::path& sourcePath)
+    {
+        auto filename = sanitizedAlbumArtFilename(sourcePath);
+        auto candidate = folder / filename;
+        std::error_code ec;
+        if (!std::filesystem::exists(candidate, ec))
+            return candidate;
+
+        const auto stem = candidate.stem().string();
+        const auto ext = candidate.extension().string();
+        for (int i = 1; i < 1000; ++i)
+        {
+            auto numbered = folder / (stem + "_" + std::to_string(i) + ext);
+            if (!std::filesystem::exists(numbered, ec))
+                return numbered;
+        }
+
+        return folder / (stem + "_copy" + ext);
+    }
+
     std::string percentEncodeForPreference(const std::string& value)
     {
         static const char* hex = "0123456789ABCDEF";
@@ -8655,6 +8706,7 @@ namespace mw::gui
         outputFormatCombo.onChange = [this]
         {
             updateRenderOutputSummary();
+            refreshAlbumArtControls();
             if (currentProject)
                 setProjectDirty();
         };
@@ -8875,6 +8927,24 @@ namespace mw::gui
         openVstEffectButton.onClick = [this] { openSelectedTrackVstEffectUi(0); };
         openVstEffect2Button.onClick = [this] { openSelectedTrackVstEffectUi(1); };
         editInfoButton.onClick = [this] { openProjectInfoWindow(); };
+        attachAlbumArtToggle.setTooltip("Attach album art to MP3 renders only. Choose Output Format: MP3, then check this box to select a PNG/JPG cover image.");
+        attachAlbumArtToggle.onClick = [this]
+        {
+            if (attachAlbumArtToggle.getToggleState())
+                chooseAlbumArtImage();
+            else
+            {
+                selectedAlbumArtPath.clear();
+                albumArtStatusLabel.setText("Album art: off", juce::dontSendNotification);
+                if (currentProject)
+                    setProjectDirty();
+                refreshAlbumArtControls();
+            }
+        };
+        albumArtStatusLabel.setText("Album art: MP3 only", juce::dontSendNotification);
+        albumArtStatusLabel.setJustificationType(juce::Justification::centredLeft);
+        albumArtStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+        albumArtStatusLabel.setFont(juce::FontOptions(12.0f));
         exportFolderButton.onClick = [this] { chooseExportFolder(); };
         refreshSoundFontsButton.onClick = [this]
         {
@@ -9094,6 +9164,8 @@ namespace mw::gui
         addAndMakeVisible(cleanTempButton);
         addAndMakeVisible(saveSettingsButton);
         addAndMakeVisible(editInfoButton);
+        addAndMakeVisible(attachAlbumArtToggle);
+        addAndMakeVisible(albumArtStatusLabel);
         addAndMakeVisible(exportFolderButton);
         addAndMakeVisible(browseSoundFontButton);
         addAndMakeVisible(refreshSoundFontsButton);
@@ -9126,6 +9198,7 @@ namespace mw::gui
         setDefaultPaths();
         updateVolumeLabels();
         updateOpenVstPluginButtonState();
+        refreshAlbumArtControls();
         configureHelperBubbles();
         helperTooltipWindow = std::make_unique<mw::gui::FreshHoverTooltipWindow>(this, 2000);
         helperTooltipWindow->setLookAndFeel(&helperTooltipLookAndFeel);
@@ -9194,6 +9267,8 @@ namespace mw::gui
         cleanTempButton.setTooltip("Clean old temporary render and preview files created by the app.");
         saveSettingsButton.setTooltip("Save your current paths, render choices, and app preferences.");
         editInfoButton.setTooltip("Edit project metadata such as title, artist, album, track number, and year.");
+        attachAlbumArtToggle.setTooltip("MP3-only render option. When Output Format is MP3, checking this opens an image picker for PNG/JPG album art to embed in the rendered MP3.");
+        albumArtStatusLabel.setTooltip("Shows the selected MP3 album art image. Album art is unavailable for WAV, FLAC, OGG, M4A, and MIDI export in this build.");
         exportFolderButton.setTooltip("Choose the folder where rendered audio and MIDI files will be written.");
         browseSoundFontButton.setTooltip("Choose a SoundFont file or folder for SF2 playback and rendering.");
         refreshSoundFontsButton.setTooltip("Rescan the selected SoundFont location for available presets.");
@@ -9255,7 +9330,7 @@ namespace mw::gui
         labelAndControl(sfzCc1Label, sfzCc1Box, "Optional SFZ CC1 modulation value.");
         labelAndControl(sfzCc11Label, sfzCc11Box, "Optional SFZ CC11 expression value.");
         labelAndControl(baseNameLabel, baseNameBox, "Base filename used for rendered output files.");
-        labelAndControl(outputFormatLabel, outputFormatCombo, "Choose WAV, MP3, FLAC, OGG, M4A, or another available render format.");
+        labelAndControl(outputFormatLabel, outputFormatCombo, "Choose WAV, MP3, FLAC, OGG, M4A, or another available render format. Attach Album Art is enabled only for MP3.");
         labelAndControl(audioClipFormatLabel, audioClipFormatCombo, "Choose the saved media format for imported/recorded AudioClips. WAV and FLAC are lossless; MP3, OGG, and M4A use the Clip Quality setting. External imports are normalized to project-safe WAV for reliable waveform editing.");
         labelAndControl(audioClipQualityLabel, audioClipQualityCombo, "Choose high-quality bitrate for compressed AudioClip files. Lossless formats ignore bitrate.");
         labelAndControl(sampleRateLabel, sampleRateCombo, "Choose the sample rate for audio renders.");
@@ -13250,6 +13325,11 @@ namespace mw::gui
         baseNameLabel.setBounds(baseRow.removeFromLeft(labelWidth));
         editInfoButton.setBounds(baseRow.removeFromRight(95).reduced(4, 2));
         baseNameBox.setBounds(baseRow.reduced(4, 2));
+        leftTop.removeFromTop(4);
+
+        auto albumArtRow = leftTop.removeFromTop(rowHeight);
+        attachAlbumArtToggle.setBounds(albumArtRow.removeFromRight(170).reduced(4, 2));
+        albumArtStatusLabel.setBounds(albumArtRow.reduced(4, 2));
         leftTop.removeFromTop(6);
 
         auto formatRow = leftTop.removeFromTop(rowHeight);
@@ -13483,6 +13563,8 @@ namespace mw::gui
         settings.metadataAlbum = metadataAlbumBox.getText().trim().toStdString();
         settings.metadataTrackNumber = metadataTrackNumberBox.getText().trim().toStdString();
         settings.metadataYear = metadataYearBox.getText().trim().toStdString();
+        settings.albumArtEnabled = attachAlbumArtToggle.getToggleState() && isMp3OutputFormatSelected() && !selectedAlbumArtPath.empty();
+        settings.albumArtPath = settings.albumArtEnabled ? selectedAlbumArtPath : std::filesystem::path{};
 
         settings.backendId = appliedProjectBackendId > 0 ? appliedProjectBackendId : 1;
         settings.outputFormatId = outputFormatCombo.getSelectedId() > 0 ? outputFormatCombo.getSelectedId() : 1;
@@ -13498,6 +13580,7 @@ namespace mw::gui
         try { settings.sfzCc11 = std::stoi(sfzCc11Box.getText().toStdString()); } catch (...) { settings.sfzCc11 = 127; }
 
         settings.masterVolume = static_cast<float>(masterVolumeSlider.getValue());
+        refreshAlbumArtControls();
     }
 
     void MainComponent::applyProjectUserSettingsToGui()
@@ -13537,6 +13620,7 @@ namespace mw::gui
         metadataAlbumBox.setText(settings.metadataAlbum, juce::dontSendNotification);
         metadataTrackNumberBox.setText(settings.metadataTrackNumber, juce::dontSendNotification);
         metadataYearBox.setText(settings.metadataYear, juce::dontSendNotification);
+        selectedAlbumArtPath = settings.albumArtPath;
 
         outputFormatCombo.setSelectedId(settings.outputFormatId > 0 ? settings.outputFormatId : 1, juce::dontSendNotification);
         audioClipFormatCombo.setSelectedId(settings.audioClipFormatId > 0 ? settings.audioClipFormatId : 1, juce::dontSendNotification);
@@ -13544,7 +13628,9 @@ namespace mw::gui
         sampleRateCombo.setSelectedId(settings.sampleRate > 0 ? settings.sampleRate : 48000, juce::dontSendNotification);
         bitrateCombo.setSelectedId(settings.bitrateKbps > 0 ? settings.bitrateKbps : 192, juce::dontSendNotification);
         channelsCombo.setSelectedId(settings.channelCount > 0 ? settings.channelCount : 2, juce::dontSendNotification);
+        attachAlbumArtToggle.setToggleState(settings.albumArtEnabled && settings.outputFormatId == 3 && !selectedAlbumArtPath.empty(), juce::dontSendNotification);
         updateRenderOutputSummary();
+        refreshAlbumArtControls();
 
         sfzKeySwitchBox.setText(juce::String(settings.sfzKeySwitch));
         sfzCc1Box.setText(juce::String(settings.sfzCc1));
@@ -13606,6 +13692,9 @@ namespace mw::gui
 
         musicXmlPathBox.clear();
         baseNameBox.setText(juce::String(), juce::dontSendNotification);
+        selectedAlbumArtPath.clear();
+        attachAlbumArtToggle.setToggleState(false, juce::dontSendNotification);
+        refreshAlbumArtControls();
         renderStatusLabel.setText("Ready", juce::dontSendNotification);
 
         finishProgrammaticProjectLoad();
@@ -13856,6 +13945,7 @@ namespace mw::gui
         std::filesystem::create_directories(projectFolderPath / "input" / "audio" / "imported", projectFolderError);
         std::filesystem::create_directories(projectFolderPath / "input" / "audio" / "recorded", projectFolderError);
         std::filesystem::create_directories(projectFolderPath / "input" / "audio" / "temp", projectFolderError);
+        std::filesystem::create_directories(projectFolderPath / "input" / "album_art", projectFolderError);
         // User-facing exports belong in workspace/exports by default.
         // Project folders keep source/input media only.
 
@@ -13873,6 +13963,9 @@ namespace mw::gui
         currentProjectFolderPath = projectFolderPath;
 
         if (!commitAppliedStagedAudioClipsToProjectFolder(projectFolderPath))
+            return false;
+
+        if (!commitStagedAlbumArtToProjectFolder(projectFolderPath))
             return false;
 
         if (shouldUseWorkspaceExports)
@@ -15201,6 +15294,9 @@ namespace mw::gui
                 metadataAlbumBox.clear();
                 metadataTrackNumberBox.clear();
                 metadataYearBox.clear();
+                selectedAlbumArtPath.clear();
+                attachAlbumArtToggle.setToggleState(false, juce::dontSendNotification);
+                refreshAlbumArtControls();
 
                 clearAudioRecordingSessionStaging(true);
                 currentProject.reset();
@@ -15243,6 +15339,236 @@ namespace mw::gui
                 logMessage("Selected export folder: " + folder.getFullPathName());
 
                 mw::app::UserPreferencesStore::saveValue("lastExportFolder", folder.getFullPathName().toStdString());
+            }
+        );
+    }
+
+    bool MainComponent::isMp3OutputFormatSelected() const
+    {
+        return outputFormatCombo.getSelectedId() == 3;
+    }
+
+    void MainComponent::refreshAlbumArtControls()
+    {
+        const bool available = currentProject.has_value() && isMp3OutputFormatSelected();
+        attachAlbumArtToggle.setEnabled(available);
+
+        if (!available)
+        {
+            if (attachAlbumArtToggle.getToggleState())
+                attachAlbumArtToggle.setToggleState(false, juce::dontSendNotification);
+
+            albumArtStatusLabel.setText(isMp3OutputFormatSelected() ? "Album art: no project" : "Album art: MP3 only", juce::dontSendNotification);
+            attachAlbumArtToggle.setTooltip("Album art is only available when Output Format is MP3.");
+            return;
+        }
+
+        attachAlbumArtToggle.setTooltip("Attach album art to MP3 renders. Checking this box opens a PNG/JPG image picker.");
+
+        if (attachAlbumArtToggle.getToggleState() && !selectedAlbumArtPath.empty())
+            albumArtStatusLabel.setText(juce::String("Album art: ") + juce::String(selectedAlbumArtPath.filename().string()), juce::dontSendNotification);
+        else
+            albumArtStatusLabel.setText("Album art: off", juce::dontSendNotification);
+    }
+
+    std::filesystem::path MainComponent::resolveAlbumArtPathForRender() const
+    {
+        if (!isMp3OutputFormatSelected() || !attachAlbumArtToggle.getToggleState() || selectedAlbumArtPath.empty())
+            return {};
+
+        std::filesystem::path resolved = selectedAlbumArtPath;
+        if (!resolved.is_absolute())
+        {
+            const auto projectFolder = getCurrentProjectFolder();
+            if (projectFolder.empty())
+                return {};
+            resolved = (projectFolder / resolved).lexically_normal();
+        }
+
+        std::error_code ec;
+        if (!std::filesystem::exists(resolved, ec) || !std::filesystem::is_regular_file(resolved, ec))
+            return {};
+
+        return resolved;
+    }
+
+    bool MainComponent::copyAlbumArtImageToManagedFolder(const std::filesystem::path& sourcePath)
+    {
+        if (!currentProject)
+        {
+            logMessage("Album Art: open or create a project before attaching album art.");
+            return false;
+        }
+
+        if (!isMp3OutputFormatSelected())
+        {
+            logMessage("Album Art: Attach Album Art is only available for MP3 output.");
+            return false;
+        }
+
+        if (!isSupportedAlbumArtImagePath(sourcePath))
+        {
+            logMessage("Album Art: choose a PNG, JPG, or JPEG image.");
+            return false;
+        }
+
+        std::error_code ec;
+        if (!std::filesystem::exists(sourcePath, ec) || !std::filesystem::is_regular_file(sourcePath, ec))
+        {
+            logMessage(juce::String("Album Art: selected image was not found: ") + juce::String(sourcePath.string()));
+            return false;
+        }
+
+        const bool projectIsSaved = currentProjectFilePath && !currentProjectFilePath->empty();
+        const auto projectFolder = projectIsSaved ? getCurrentProjectFolder() : std::filesystem::path{};
+        const auto targetRoot = projectIsSaved
+            ? projectFolder / "input" / "album_art"
+            : getAudioRecordingSessionFolder() / "input" / "album_art";
+
+        if (targetRoot.empty())
+        {
+            logMessage("Album Art: could not resolve album_art staging folder.");
+            return false;
+        }
+
+        std::filesystem::create_directories(targetRoot, ec);
+        if (ec)
+        {
+            logMessage(juce::String("Album Art: could not create album_art folder: ") + juce::String(ec.message()));
+            return false;
+        }
+
+        auto targetPath = makeUniqueAlbumArtDestination(targetRoot, sourcePath);
+        if (!pathsReferToSameLocation(sourcePath, targetPath))
+        {
+            std::filesystem::copy_file(sourcePath, targetPath, std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec)
+            {
+                logMessage(juce::String("Album Art: could not copy selected image: ") + juce::String(ec.message()));
+                return false;
+            }
+        }
+        else
+        {
+            targetPath = sourcePath;
+        }
+
+        selectedAlbumArtPath = projectIsSaved
+            ? std::filesystem::path("input") / "album_art" / targetPath.filename()
+            : targetPath;
+
+        logMessage(juce::String("Album Art: selected MP3 cover image: ") + juce::String(targetPath.string()));
+        if (!projectIsSaved)
+            logMessage("Album Art: image staged until Save Project migrates it into input/album_art.");
+
+        return true;
+    }
+
+    bool MainComponent::commitStagedAlbumArtToProjectFolder(const std::filesystem::path& projectFolder)
+    {
+        if (projectFolder.empty() || selectedAlbumArtPath.empty())
+            return true;
+
+        if (!attachAlbumArtToggle.getToggleState())
+            return true;
+
+        if (!selectedAlbumArtPath.is_absolute())
+            return true;
+
+        const auto stagedRoot = mw::app::AppPaths::tempFolder() / "recordings";
+        if (!pathIsInsideFolder(selectedAlbumArtPath, stagedRoot))
+            return true;
+
+        std::error_code ec;
+        if (!std::filesystem::exists(selectedAlbumArtPath, ec) || !std::filesystem::is_regular_file(selectedAlbumArtPath, ec))
+        {
+            logMessage(juce::String("ERROR: Cannot save project because staged album art is missing: ") + juce::String(selectedAlbumArtPath.string()));
+            return false;
+        }
+
+        const auto targetRoot = projectFolder / "input" / "album_art";
+        std::filesystem::create_directories(targetRoot, ec);
+        if (ec)
+        {
+            logMessage(juce::String("ERROR: Could not create project album_art folder: ") + juce::String(ec.message()));
+            return false;
+        }
+
+        const auto targetPath = makeUniqueAlbumArtDestination(targetRoot, selectedAlbumArtPath);
+        std::filesystem::copy_file(selectedAlbumArtPath, targetPath, std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec)
+        {
+            logMessage(juce::String("ERROR: Could not migrate staged album art into project folder: ") + juce::String(ec.message()));
+            return false;
+        }
+
+        const auto stagedPath = selectedAlbumArtPath;
+        selectedAlbumArtPath = std::filesystem::path("input") / "album_art" / targetPath.filename();
+
+        std::error_code removeError;
+        if (!std::filesystem::remove(stagedPath, removeError) && removeError)
+            logMessage(juce::String("WARNING: Migrated album art, but could not remove staged image: ") + juce::String(stagedPath.string()) + " (" + juce::String(removeError.message()) + ")");
+        else
+        {
+            removeEmptyDirectoriesUpTo(stagedPath.parent_path(), stagedRoot);
+            const auto stagedSessionFolder = stagedAudioClipSessionFolderForPath(stagedPath, stagedRoot);
+            if (audioRecordingSessionFolderPath
+                && !stagedSessionFolder.empty()
+                && pathsReferToSameLocation(*audioRecordingSessionFolderPath, stagedSessionFolder)
+                && !folderContainsAnyRegularFile(stagedSessionFolder))
+            {
+                std::filesystem::remove_all(stagedSessionFolder, removeError);
+                audioRecordingSessionFolderPath.reset();
+            }
+        }
+
+        logMessage(juce::String("Album Art: committed MP3 cover image to: ") + juce::String(targetPath.string()));
+        return true;
+    }
+
+    void MainComponent::chooseAlbumArtImage()
+    {
+        if (!currentProject || !isMp3OutputFormatSelected())
+        {
+            attachAlbumArtToggle.setToggleState(false, juce::dontSendNotification);
+            refreshAlbumArtControls();
+            logMessage("Album Art: Attach Album Art is only available for MP3 output.");
+            return;
+        }
+
+        activeFileChooser = std::make_unique<juce::FileChooser>(
+            "Choose MP3 Album Art",
+            juce::File(mw::app::UserPreferencesStore::load().lastInputFolder.string()),
+            "*.png;*.jpg;*.jpeg"
+        );
+
+        activeFileChooser->launchAsync(
+            juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+            [this](const juce::FileChooser& chooser)
+            {
+                const auto file = chooser.getResult();
+                if (file == juce::File{})
+                {
+                    attachAlbumArtToggle.setToggleState(false, juce::dontSendNotification);
+                    refreshAlbumArtControls();
+                    logMessage("Album Art selection cancelled.");
+                    return;
+                }
+
+                const auto sourcePath = std::filesystem::path(file.getFullPathName().toStdString());
+                if (copyAlbumArtImageToManagedFolder(sourcePath))
+                {
+                    attachAlbumArtToggle.setToggleState(true, juce::dontSendNotification);
+                    mw::app::UserPreferencesStore::saveValue("lastInputFolder", file.getParentDirectory().getFullPathName().toStdString());
+                    if (currentProject)
+                        setProjectDirty();
+                }
+                else
+                {
+                    attachAlbumArtToggle.setToggleState(false, juce::dontSendNotification);
+                }
+
+                refreshAlbumArtControls();
             }
         );
     }
@@ -17926,6 +18252,9 @@ mw::audio::RenderJob MainComponent::createRenderJobSnapshot() const
         job.metadataAlbum = metadataAlbumBox.getText().trim().toStdString();
         job.metadataTrackNumber = metadataTrackNumberBox.getText().trim().toStdString();
         job.metadataYear = metadataYearBox.getText().trim().toStdString();
+
+        if (isMp3OutputFormatSelected())
+            job.albumArtPath = resolveAlbumArtPathForRender();
 
         if (!job.metadataTitle.empty())
             job.baseFileName = job.metadataTitle;

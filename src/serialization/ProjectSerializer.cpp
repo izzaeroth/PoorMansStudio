@@ -467,6 +467,8 @@ namespace mw::serialization
         writeStringField(file, "metadataAlbum", settings.metadataAlbum);
         writeStringField(file, "metadataTrackNumber", settings.metadataTrackNumber);
         writeStringField(file, "metadataYear", settings.metadataYear);
+        file << "    \"albumArtEnabled\": " << (settings.albumArtEnabled ? "true" : "false") << ",\n";
+        writeStringField(file, "albumArtPath", settings.albumArtPath.string());
         file << "    \"backendId\": " << settings.backendId << ",\n";
         file << "    \"projectDefaultBackendId\": " << settings.backendId << ",\n";
         file << "    \"outputFormatId\": " << settings.outputFormatId << ",\n";
@@ -698,6 +700,8 @@ namespace mw::serialization
             settings.metadataAlbum = getString(settingsObject, "metadataAlbum");
             settings.metadataTrackNumber = getString(settingsObject, "metadataTrackNumber");
             settings.metadataYear = getString(settingsObject, "metadataYear");
+            settings.albumArtEnabled = getBool(settingsObject, "albumArtEnabled", false);
+            settings.albumArtPath = getString(settingsObject, "albumArtPath");
             settings.backendId = getInt(settingsObject, "backendId", getInt(settingsObject, "projectDefaultBackendId", 1));
             settings.outputFormatId = getInt(settingsObject, "outputFormatId", 1);
             settings.audioClipFormatId = getInt(settingsObject, "audioClipFormatId", 1);

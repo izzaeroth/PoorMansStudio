@@ -43,6 +43,7 @@ namespace mw::audio
         std::string metadataAlbum;
         std::string metadataTrackNumber;
         std::string metadataYear;
+        std::filesystem::path albumArtPath;
     };
 
     struct FfmpegEncodeResult

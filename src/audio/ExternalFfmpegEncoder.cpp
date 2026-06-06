@@ -43,6 +43,12 @@ namespace
             command << " -metadata " << key << "=" << quoteArg(value);
     }
 
+    bool shouldAttachAlbumArt(const mw::audio::FfmpegEncodeRequest& request)
+    {
+        return request.format == mw::audio::EncodedAudioFormat::Mp3
+            && !request.albumArtPath.empty();
+    }
+
     std::string formatSecondsForFfmpeg(double seconds)
     {
         if (!std::isfinite(seconds))
@@ -90,11 +96,16 @@ namespace
     {
         std::wostringstream command;
 
+        const bool attachAlbumArt = shouldAttachAlbumArt(request);
+
         command
             << quotePathW(request.ffmpegExePath)
             << L" -y"
             << L" -i "
             << quotePathW(request.inputWavPath);
+
+        if (attachAlbumArt)
+            command << L" -i " << quotePathW(request.albumArtPath) << L" -map 0:a:0 -map 1:v:0";
 
         appendMetadataW(command, "title", request.metadataTitle);
         appendMetadataW(command, "artist", request.metadataArtist);
@@ -113,6 +124,12 @@ namespace
 
             case mw::audio::EncodedAudioFormat::Mp3:
                 command << L" -c:a libmp3lame -b:a " << request.mp3BitrateKbps << L"k";
+                if (attachAlbumArt)
+                {
+                    command << L" -c:v copy -disposition:v attached_pic -id3v2_version 3";
+                    command << L" -metadata:s:v " << toWide("title") << L"=" << quoteArgW("Album cover");
+                    command << L" -metadata:s:v " << toWide("comment") << L"=" << quoteArgW("Cover (front)");
+                }
                 break;
 
             case mw::audio::EncodedAudioFormat::Ogg:
@@ -411,6 +428,12 @@ namespace mw::audio
             return false;
         }
 
+        if (request.format == EncodedAudioFormat::Mp3 && !request.albumArtPath.empty() && !std::filesystem::exists(request.albumArtPath))
+        {
+            errorMessage = "Album art image file was not found: " + request.albumArtPath.string();
+            return false;
+        }
+
         if (request.outputPath.empty())
         {
             errorMessage = "Encoded output path is empty.";
@@ -424,11 +447,16 @@ namespace mw::audio
     {
         std::ostringstream command;
 
+        const bool attachAlbumArt = shouldAttachAlbumArt(request);
+
         command
             << quotePath(request.ffmpegExePath)
             << " -y"
             << " -i "
             << quotePath(request.inputWavPath);
+
+        if (attachAlbumArt)
+            command << " -i " << quotePath(request.albumArtPath) << " -map 0:a:0 -map 1:v:0";
 
         appendMetadata(command, "title", request.metadataTitle);
         appendMetadata(command, "artist", request.metadataArtist);
@@ -447,6 +475,12 @@ namespace mw::audio
 
             case EncodedAudioFormat::Mp3:
                 command << " -c:a libmp3lame -b:a " << request.mp3BitrateKbps << "k";
+                if (attachAlbumArt)
+                {
+                    command << " -c:v copy -disposition:v attached_pic -id3v2_version 3";
+                    command << " -metadata:s:v title=" << quoteArg("Album cover");
+                    command << " -metadata:s:v comment=" << quoteArg("Cover (front)");
+                }
                 break;
 
             case EncodedAudioFormat::Ogg:
