@@ -147,11 +147,11 @@ namespace
             titleLabel.setJustificationType(juce::Justification::centredLeft);
             titleLabel.setFont(juce::FontOptions(22.0f, juce::Font::bold));
 
-            statusLabel.setText("Phase 5C: trim/arrangement workflow is preserved. Preview Enhanced renders temp audio; Create Enhanced Copy makes a new full-source enhanced AudioClip track.", juce::dontSendNotification);
+            statusLabel.setText("Phase 5C: enhancement is available; arrangement placement now supports Append Clip and selected Clip Start moves.", juce::dontSendNotification);
             statusLabel.setJustificationType(juce::Justification::centredLeft);
             statusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
             statusLabel.setFont(juce::FontOptions(13.0f));
-            statusLabel.setTooltip("AudioClip Editor workflow: trim/arrange as before. Enhancement is full-source and non-destructive: Preview Enhanced is temp-only, while Create Enhanced Copy creates a new AudioClip track.");
+            statusLabel.setTooltip("AudioClip Editor workflow: trim/arrange as before. Append Clip places frozen trims after the last audible arranged clip; Clip Start moves the selected arranged clip precisely. Enhancement remains full-source and non-destructive.");
 
             detailsBox.setMultiLine(true);
             detailsBox.setReadOnly(true);
@@ -248,12 +248,12 @@ namespace
             resetTrimButton.setTooltip("Reset the source trim metadata to the full source range.");
             resetTrimButton.onClick = [this] { resetTrimForCurrentClip(); };
 
-            arrangementHelpLabel.setText("Local arrangement: Freeze the kept trim, click the lane to place/repeat it, use the horizontal scroll bar for longer arrangements, Preview Arrangement, or Render To Track.", juce::dontSendNotification);
+            arrangementHelpLabel.setText("Local arrangement: Freeze trim, click the lane to place/repeat, Append Clip to add after the last clip, or select a highlighted clip and type Clip Start to move it.", juce::dontSendNotification);
             arrangementHelpLabel.setJustificationType(juce::Justification::centredLeft);
             arrangementHelpLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
             arrangementHelpLabel.setFont(juce::FontOptions(12.5f));
-            arrangementHelpLabel.setTooltip("The local arrangement lane places repeated/overlapping copies of the frozen trim. Extend +10s and the horizontal scroll bar expose longer arrangements without changing the final render length.");
-            arrangementView.setTooltip("Arrangement lane. After Freeze Trim, click in the lane to place the frozen section; click again to repeat it. Drag placed clips to move them.");
+            arrangementHelpLabel.setTooltip("Click-to-place remains available for intentional overlaps. Append Clip places the frozen trim at the current audible end. Clip Start moves the selected arranged clip without changing source trim. In overlap areas, the selected/highlighted Clip # gets drag priority when it is under the mouse.");
+            arrangementView.setTooltip("Arrangement lane. After Freeze Trim, click in the lane to place/repeat, use Append Clip to add at the end, or drag placed clips. In overlaps, the selected/highlighted Clip # is drawn on top and gets drag priority. Dragging near the lane edges scrolls the arrangement view.");
 
             freezeClipButton.setButtonText("Freeze Trim");
             freezeClipButton.setTooltip("Lock the current pending trim range so lane clicks can place it into the local arrangement.");
@@ -263,12 +263,16 @@ namespace
             unfreezeClipButton.setTooltip("Unlock the trim controls and clear the frozen drag source. Existing arranged clip blocks remain until deleted.");
             unfreezeClipButton.onClick = [this] { unfreezeArrangementTrim(); };
 
+            appendClipButton.setButtonText("Append Clip");
+            appendClipButton.setTooltip("Place the frozen trim immediately after the last audible arranged clip. This avoids accidental overlaps when building many cuts in a row.");
+            appendClipButton.onClick = [this] { appendFrozenClipToArrangement(); };
+
             clipSelectLabel.setText("Clip #", juce::dontSendNotification);
             clipSelectLabel.setJustificationType(juce::Justification::centredRight);
             clipSelectLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.86f));
-            clipSelectLabel.setTooltip("Selected arranged clip number. Delete Clip affects this selected clip.");
+            clipSelectLabel.setTooltip("Selected arranged clip number. Delete Clip and Clip Start / Move Clip affect this selected clip.");
 
-            clipSelectCombo.setTooltip("Select the arrangement clip targeted by Delete Clip or lane dragging/moving.");
+            clipSelectCombo.setTooltip("Select the arrangement clip targeted by Delete Clip, Clip Start / Move Clip, or lane dragging. If clips overlap, the selected/highlighted Clip # gets drag priority when it is under the mouse.");
             clipSelectCombo.onChange = [this]
             {
                 if (suppressClipSelectChange)
@@ -281,6 +285,19 @@ namespace
             deleteClipButton.setButtonText("Delete Clip");
             deleteClipButton.setTooltip("Delete the currently selected arrangement clip number.");
             deleteClipButton.onClick = [this] { deleteSelectedArrangementClip(); };
+
+            clipStartLabel.setText("Clip Start", juce::dontSendNotification);
+            clipStartLabel.setJustificationType(juce::Justification::centredRight);
+            clipStartLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.86f));
+            clipStartLabel.setTooltip("Arrangement start time for the selected placed clip, in seconds. This does not change the green/red source trim handles.");
+
+            clipStartBox.setInputRestrictions(0, "0123456789.");
+            clipStartBox.setTooltip("Type the selected arranged clip's start time in seconds, then click Move Clip or press Enter. The arrangement timeline auto-extends if needed.");
+            clipStartBox.onReturnKey = [this] { moveSelectedArrangementClipFromStartBox(); };
+
+            moveClipButton.setButtonText("Move Clip");
+            moveClipButton.setTooltip("Move the selected arranged Clip # to the typed Clip Start time. This is useful when dragging cannot reach the desired point.");
+            moveClipButton.onClick = [this] { moveSelectedArrangementClipFromStartBox(); };
 
             extendArrangementButton.setButtonText("Extend +10s");
             extendArrangementButton.setTooltip("Add more free-form timeline space to the local arrangement window. Final render will use actual clip end, not this window length.");
@@ -316,6 +333,10 @@ namespace
             arrangementView.onClipMoved = [this](int clipNumber, double requestedStartSeconds)
             {
                 moveArrangementClip(clipNumber, requestedStartSeconds);
+            };
+            arrangementView.onEdgeScrollRequested = [this](int direction)
+            {
+                scrollArrangementViewByEdgeDrag(direction);
             };
 
             trimStatusLabel.setJustificationType(juce::Justification::centredLeft);
@@ -367,9 +388,13 @@ namespace
             addAndMakeVisible(arrangementView);
             addAndMakeVisible(freezeClipButton);
             addAndMakeVisible(unfreezeClipButton);
+            addAndMakeVisible(appendClipButton);
             addAndMakeVisible(clipSelectLabel);
             addAndMakeVisible(clipSelectCombo);
             addAndMakeVisible(deleteClipButton);
+            addAndMakeVisible(clipStartLabel);
+            addAndMakeVisible(clipStartBox);
+            addAndMakeVisible(moveClipButton);
             addAndMakeVisible(extendArrangementButton);
             addAndMakeVisible(previewArrangementButton);
             addAndMakeVisible(renderArrangementButton);
@@ -438,10 +463,16 @@ namespace
             auto arrangementRow = area.removeFromTop(34);
             freezeClipButton.setBounds(arrangementRow.removeFromLeft(116).reduced(4, 4));
             unfreezeClipButton.setBounds(arrangementRow.removeFromLeft(104).reduced(4, 4));
+            appendClipButton.setBounds(arrangementRow.removeFromLeft(118).reduced(4, 4));
             clipSelectLabel.setBounds(arrangementRow.removeFromLeft(62).reduced(4, 2));
-            clipSelectCombo.setBounds(arrangementRow.removeFromLeft(180).reduced(4, 4));
+            clipSelectCombo.setBounds(arrangementRow.removeFromLeft(168).reduced(4, 4));
             deleteClipButton.setBounds(arrangementRow.removeFromLeft(104).reduced(4, 4));
             extendArrangementButton.setBounds(arrangementRow.removeFromLeft(112).reduced(4, 4));
+
+            auto arrangementMoveRow = area.removeFromTop(34);
+            clipStartLabel.setBounds(arrangementMoveRow.removeFromLeft(92).reduced(4, 2));
+            clipStartBox.setBounds(arrangementMoveRow.removeFromLeft(104).reduced(4, 4));
+            moveClipButton.setBounds(arrangementMoveRow.removeFromLeft(112).reduced(4, 4));
 
             auto arrangementActionRow = area.removeFromTop(34);
             previewArrangementButton.setBounds(arrangementActionRow.removeFromLeft(170).reduced(4, 4));
@@ -932,6 +963,7 @@ namespace
             std::function<void(double)> onFrozenClipDropped;
             std::function<void(int)> onSelectedClipChanged;
             std::function<void(int, double)> onClipMoved;
+            std::function<void(int)> onEdgeScrollRequested;
 
             void setFrozenSource(bool frozen, long long startSamples, long long endSamples, double sampleRate, juce::String sourceName)
             {
@@ -997,7 +1029,13 @@ namespace
                 drawGrid(g, lane);
 
                 for (const auto& clip : clips)
-                    drawArrangementClip(g, lane, clip);
+                {
+                    if (clip.number != selectedClipNumber)
+                        drawArrangementClip(g, lane, clip);
+                }
+
+                if (const auto* selectedClip = findClip(selectedClipNumber))
+                    drawArrangementClip(g, lane, *selectedClip);
 
                 if (draggingFrozenSource && hasFrozenSource)
                 {
@@ -1065,6 +1103,8 @@ namespace
 
                 if (draggingClipNumber > 0 && onClipMoved)
                 {
+                    requestEdgeScrollIfNeeded(event.position);
+
                     const auto* clip = findClip(draggingClipNumber);
                     const double duration = clip != nullptr ? clip->durationSeconds : 0.0;
                     const double requestedStart = xToSeconds(event.position.x, laneBounds()) - dragOffsetSeconds;
@@ -1187,6 +1227,21 @@ namespace
                 return std::clamp(bestStart, 0.0, std::max(0.0, arrangementLengthSeconds - std::max(0.0, durationSeconds)));
             }
 
+            void requestEdgeScrollIfNeeded(juce::Point<float> point)
+            {
+                if (!onEdgeScrollRequested)
+                    return;
+
+                const auto lane = laneBounds();
+                constexpr float edgePixels = 34.0f;
+                constexpr float outsideMargin = 48.0f;
+
+                if (point.x >= lane.getRight() - edgePixels && point.x <= lane.getRight() + outsideMargin)
+                    onEdgeScrollRequested(1);
+                else if (point.x <= lane.getX() + edgePixels && point.x >= lane.getX() - outsideMargin)
+                    onEdgeScrollRequested(-1);
+            }
+
             const ArrangementClipInstance* findClip(int clipNumber) const
             {
                 for (const auto& clip : clips)
@@ -1198,8 +1253,18 @@ namespace
             int hitTestClip(juce::Point<float> point) const
             {
                 const auto lane = laneBounds();
+
+                if (const auto* selectedClip = findClip(selectedClipNumber))
+                {
+                    if (clipRect(lane, *selectedClip).contains(point))
+                        return selectedClip->number;
+                }
+
                 for (auto it = clips.rbegin(); it != clips.rend(); ++it)
                 {
+                    if (it->number == selectedClipNumber)
+                        continue;
+
                     if (clipRect(lane, *it).contains(point))
                         return it->number;
                 }
@@ -1236,10 +1301,17 @@ namespace
                     return;
 
                 const auto clipped = rect.getIntersection(lane);
-                g.setColour(clip.colour.withAlpha(clip.number == selectedClipNumber ? 0.58f : 0.34f));
+                const bool isSelected = clip.number == selectedClipNumber;
+                if (isSelected)
+                {
+                    g.setColour(juce::Colours::white.withAlpha(0.18f));
+                    g.fillRoundedRectangle(clipped.expanded(2.0f, 2.0f).getIntersection(lane), 6.0f);
+                }
+
+                g.setColour(clip.colour.withAlpha(isSelected ? 0.66f : 0.34f));
                 g.fillRoundedRectangle(clipped, 5.0f);
-                g.setColour(clip.number == selectedClipNumber ? juce::Colours::white.withAlpha(0.95f) : clip.colour.withAlpha(0.80f));
-                g.drawRoundedRectangle(clipped, 5.0f, clip.number == selectedClipNumber ? 2.0f : 1.0f);
+                g.setColour(isSelected ? juce::Colours::white.withAlpha(0.98f) : clip.colour.withAlpha(0.80f));
+                g.drawRoundedRectangle(clipped, 5.0f, isSelected ? 2.4f : 1.0f);
 
                 g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
                 g.setColour(juce::Colours::white.withAlpha(0.92f));
@@ -1818,6 +1890,25 @@ namespace
                 arrangementViewStartSeconds = std::clamp(startSeconds, 0.0, maxScroll);
         }
 
+        void appendFrozenClipToArrangement()
+        {
+            if (!trimFrozenForArrangement)
+            {
+                arrangementStatusLabel.setText("Freeze a trim range before appending arrangement clips.", juce::dontSendNotification);
+                return;
+            }
+
+            const double appendStart = actualArrangementEndSeconds();
+            addFrozenClipToArrangement(appendStart);
+            const auto* clip = findArrangementClip(selectedArrangementClipNumber);
+            if (clip != nullptr)
+            {
+                revealArrangementRange(clip->startSeconds, clip->startSeconds + clip->durationSeconds);
+                arrangementStatusLabel.setText("Appended frozen trim after the last audible arrangement clip.", juce::dontSendNotification);
+                refreshArrangementControls();
+            }
+        }
+
         void addFrozenClipToArrangement(double requestedStartSeconds)
         {
             auto* sourceClip = findLocalClip(editableClipId);
@@ -1860,7 +1951,7 @@ namespace
             refreshArrangementControls();
         }
 
-        void moveArrangementClip(int clipNumber, double requestedStartSeconds)
+        void moveArrangementClip(int clipNumber, double requestedStartSeconds, bool allowSnap = true)
         {
             auto* clip = findArrangementClip(clipNumber);
             if (!clip)
@@ -1868,11 +1959,47 @@ namespace
 
             const double requestedStart = std::max(0.0, requestedStartSeconds);
             ensureArrangementLengthIncludes(requestedStart + clip->durationSeconds);
-            clip->startSeconds = snapArrangementStart(requestedStart, clip->durationSeconds, clipNumber);
+            clip->startSeconds = allowSnap
+                ? snapArrangementStart(requestedStart, clip->durationSeconds, clipNumber)
+                : std::clamp(requestedStart, 0.0, std::max(0.0, arrangementLengthSeconds - std::max(0.0, clip->durationSeconds)));
             ensureArrangementLengthIncludes(clip->startSeconds + clip->durationSeconds);
             selectedArrangementClipNumber = clipNumber;
             revealArrangementRange(clip->startSeconds, clip->startSeconds + clip->durationSeconds);
             refreshArrangementControls();
+        }
+
+        void moveSelectedArrangementClipFromStartBox()
+        {
+            auto* clip = findArrangementClip(selectedArrangementClipNumber);
+            if (clip == nullptr)
+            {
+                arrangementStatusLabel.setText("Select an arrangement clip before setting Clip Start.", juce::dontSendNotification);
+                return;
+            }
+
+            const double requestedStart = std::max(0.0, clipStartBox.getText().trim().getDoubleValue());
+            const int clipNumber = clip->number;
+            moveArrangementClip(clipNumber, requestedStart, false);
+
+            const auto* movedClip = findArrangementClip(clipNumber);
+            if (movedClip != nullptr)
+            {
+                juce::String status;
+                status << "Moved Clip " << clipNumber << " to " << juce::String(movedClip->startSeconds, 2) << "s.";
+                arrangementStatusLabel.setText(status, juce::dontSendNotification);
+            }
+        }
+
+        void scrollArrangementViewByEdgeDrag(int direction)
+        {
+            const double maxScroll = arrangementMaxScroll();
+            if (maxScroll <= 0.0 || direction == 0)
+                return;
+
+            const double step = std::max(0.15, arrangementVisibleSeconds * 0.06);
+            arrangementViewStartSeconds = std::clamp(arrangementViewStartSeconds + step * static_cast<double>(direction), 0.0, maxScroll);
+            updateArrangementScrollRange();
+            refreshArrangementView();
         }
 
         void deleteSelectedArrangementClip()
@@ -2000,7 +2127,11 @@ namespace
 
             freezeClipButton.setEnabled(hasEditableClip && !trimFrozenForArrangement);
             unfreezeClipButton.setEnabled(trimFrozenForArrangement);
-            deleteClipButton.setEnabled(findArrangementClip(selectedArrangementClipNumber) != nullptr);
+            const bool hasSelectedArrangementClip = findArrangementClip(selectedArrangementClipNumber) != nullptr;
+            appendClipButton.setEnabled(trimFrozenForArrangement && currentFrozenDurationSeconds() > 0.0 && arrangementClips.size() < maxArrangementClips);
+            deleteClipButton.setEnabled(hasSelectedArrangementClip);
+            clipStartBox.setEnabled(hasSelectedArrangementClip);
+            moveClipButton.setEnabled(hasSelectedArrangementClip);
             extendArrangementButton.setEnabled(arrangementLengthSeconds < 600.0);
             previewArrangementButton.setEnabled(!arrangementClips.empty());
             renderArrangementButton.setEnabled(!arrangementClips.empty());
@@ -2013,6 +2144,7 @@ namespace
                 clipSelectCombo.setSelectedId(1, juce::dontSendNotification);
                 clipSelectCombo.setEnabled(false);
                 selectedArrangementClipNumber = 0;
+                clipStartBox.clear();
             }
             else
             {
@@ -2030,6 +2162,10 @@ namespace
                     selectedArrangementClipNumber = arrangementClips.front().number;
 
                 clipSelectCombo.setSelectedId(selectedArrangementClipNumber, juce::dontSendNotification);
+                if (const auto* selectedClip = findArrangementClip(selectedArrangementClipNumber))
+                    clipStartBox.setText(juce::String(selectedClip->startSeconds, 2), juce::dontSendNotification);
+                else
+                    clipStartBox.clear();
             }
             suppressClipSelectChange = false;
 
@@ -2164,6 +2300,8 @@ namespace
             text << "- Arrangement clips are transparent, editor-local instances capped at 64 clips in this phase.\n";
             text << "- Extend +10s changes the working window only; Preview/Render use actual audible clip end.\n";
             text << "- Repeated lane clicks intentionally place repeated copies of the frozen trim.\n";
+            text << "- Append Clip places the frozen trim at the current audible arrangement end.\n";
+            text << "- Clip Start moves the selected arrangement clip precisely without changing source trim.\n";
             text << "- Preview/export honors the kept source trim range.\n";
             text << "- Original recorded/imported media files are never modified by this editor.\n";
             text << "- Enhancement is full-source and non-destructive; original media, trim handles, and arrangement clips stay untouched.\n";
@@ -2221,9 +2359,13 @@ namespace
         ArrangementLaneView arrangementView;
         juce::TextButton freezeClipButton;
         juce::TextButton unfreezeClipButton;
+        juce::TextButton appendClipButton;
         juce::Label clipSelectLabel;
         juce::ComboBox clipSelectCombo;
         juce::TextButton deleteClipButton;
+        juce::Label clipStartLabel;
+        juce::TextEditor clipStartBox;
+        juce::TextButton moveClipButton;
         juce::TextButton extendArrangementButton;
         juce::TextButton previewArrangementButton;
         juce::TextButton renderArrangementButton;
