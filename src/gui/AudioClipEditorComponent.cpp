@@ -147,11 +147,11 @@ namespace
             titleLabel.setJustificationType(juce::Justification::centredLeft);
             titleLabel.setFont(juce::FontOptions(22.0f, juce::Font::bold));
 
-            statusLabel.setText("Phase 5C: enhancement is available; arrangement placement now supports Append Clip and selected Clip Start moves.", juce::dontSendNotification);
+            statusLabel.setText("Phase 5C: enhancement is available; arrangement placement supports Main clips and editor-only Aux source files.", juce::dontSendNotification);
             statusLabel.setJustificationType(juce::Justification::centredLeft);
             statusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
             statusLabel.setFont(juce::FontOptions(13.0f));
-            statusLabel.setTooltip("AudioClip Editor workflow: trim/arrange as before. Append Clip places frozen trims after the last audible arranged clip; Clip Start moves the selected arranged clip precisely. Enhancement remains full-source and non-destructive.");
+            statusLabel.setTooltip("AudioClip Editor workflow: trim/arrange as before. Aux source files are editor-only inputs for the mixed arrangement; they do not become project tracks. Enhancement remains full-source and non-destructive.");
 
             detailsBox.setMultiLine(true);
             detailsBox.setReadOnly(true);
@@ -248,11 +248,11 @@ namespace
             resetTrimButton.setTooltip("Reset the source trim metadata to the full source range.");
             resetTrimButton.onClick = [this] { resetTrimForCurrentClip(); };
 
-            arrangementHelpLabel.setText("Local arrangement: Freeze trim, click the lane to place/repeat, Append Clip to add after the last clip, or select a highlighted clip and type Clip Start to move it.", juce::dontSendNotification);
+            arrangementHelpLabel.setText("Local arrangement: Freeze/click or Append Clip from Main, or Load Aux Source to trim/freeze an external file and Append to Main.", juce::dontSendNotification);
             arrangementHelpLabel.setJustificationType(juce::Justification::centredLeft);
             arrangementHelpLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
             arrangementHelpLabel.setFont(juce::FontOptions(12.5f));
-            arrangementHelpLabel.setTooltip("Click-to-place remains available for intentional overlaps. Append Clip places the frozen trim at the current audible end. Clip Start moves the selected arranged clip without changing source trim. In overlap areas, the selected/highlighted Clip # gets drag priority when it is under the mouse.");
+            arrangementHelpLabel.setTooltip("Main clips are labeled #n Main. Load Aux Source chooses an external audio file, opens a trim window, and appends frozen Aux trims as #n Aux. The Aux source is not imported as its own project track.");
             arrangementView.setTooltip("Arrangement lane. After Freeze Trim, click in the lane to place/repeat, use Append Clip to add at the end, or drag placed clips. In overlaps, the selected/highlighted Clip # is drawn on top and gets drag priority. Dragging near the lane edges scrolls the arrangement view.");
 
             freezeClipButton.setButtonText("Freeze Trim");
@@ -298,6 +298,16 @@ namespace
             moveClipButton.setButtonText("Move Clip");
             moveClipButton.setTooltip("Move the selected arranged Clip # to the typed Clip Start time. This is useful when dragging cannot reach the desired point.");
             moveClipButton.onClick = [this] { moveSelectedArrangementClipFromStartBox(); };
+
+            loadAuxClipButton.setButtonText("Load Aux Source");
+            loadAuxClipButton.setTooltip("Choose an external audio file to use as an editor-only Aux source, then open its trim window. The Aux source is not added as a project track.");
+            loadAuxClipButton.onClick = [this] { openAuxSourceFilePicker(); };
+
+            auxClipStatusLabel.setJustificationType(juce::Justification::centredLeft);
+            auxClipStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+            auxClipStatusLabel.setFont(juce::FontOptions(12.0f));
+            auxClipStatusLabel.setText("Aux: no source loaded", juce::dontSendNotification);
+            auxClipStatusLabel.setTooltip("Shows the last loaded editor-only Aux source file. Aux sources are used only for the current mixed arrangement, not as project tracks.");
 
             extendArrangementButton.setButtonText("Extend +10s");
             extendArrangementButton.setTooltip("Add more free-form timeline space to the local arrangement window. Final render will use actual clip end, not this window length.");
@@ -395,6 +405,8 @@ namespace
             addAndMakeVisible(clipStartLabel);
             addAndMakeVisible(clipStartBox);
             addAndMakeVisible(moveClipButton);
+            addAndMakeVisible(loadAuxClipButton);
+            addAndMakeVisible(auxClipStatusLabel);
             addAndMakeVisible(extendArrangementButton);
             addAndMakeVisible(previewArrangementButton);
             addAndMakeVisible(renderArrangementButton);
@@ -409,6 +421,7 @@ namespace
 
         ~AudioClipEditorComponentImpl() override
         {
+            closeSecondarySourceWindow();
             arrangementScrollBar.removeListener(this);
 
             if (helperTooltipWindow != nullptr)
@@ -470,9 +483,11 @@ namespace
             extendArrangementButton.setBounds(arrangementRow.removeFromLeft(112).reduced(4, 4));
 
             auto arrangementMoveRow = area.removeFromTop(34);
-            clipStartLabel.setBounds(arrangementMoveRow.removeFromLeft(92).reduced(4, 2));
-            clipStartBox.setBounds(arrangementMoveRow.removeFromLeft(104).reduced(4, 4));
-            moveClipButton.setBounds(arrangementMoveRow.removeFromLeft(112).reduced(4, 4));
+            clipStartLabel.setBounds(arrangementMoveRow.removeFromLeft(90).reduced(4, 2));
+            clipStartBox.setBounds(arrangementMoveRow.removeFromLeft(96).reduced(4, 4));
+            moveClipButton.setBounds(arrangementMoveRow.removeFromLeft(104).reduced(4, 4));
+            loadAuxClipButton.setBounds(arrangementMoveRow.removeFromLeft(146).reduced(4, 4));
+            auxClipStatusLabel.setBounds(arrangementMoveRow.reduced(4, 2));
 
             auto arrangementActionRow = area.removeFromTop(34);
             previewArrangementButton.setBounds(arrangementActionRow.removeFromLeft(170).reduced(4, 4));
@@ -944,15 +959,442 @@ namespace
         };
 
 
+        class SecondarySourceTrimComponent final : public juce::Component,
+                                             public juce::SettableTooltipClient
+        {
+        public:
+            SecondarySourceTrimComponent(
+                std::vector<mw::core::AudioClip> availableClips,
+                std::optional<std::filesystem::path> projectFolderIn,
+                std::function<void(mw::core::AudioClip, long long, long long, bool)> previewCallback,
+                std::function<void(mw::core::AudioClip, long long, long long)> appendToMainCallback,
+                std::function<void()> closeCallback)
+                : auxClips(std::move(availableClips)),
+                  projectFolder(std::move(projectFolderIn)),
+                  onPreviewClip(std::move(previewCallback)),
+                  onAppendToMain(std::move(appendToMainCallback)),
+                  onClose(std::move(closeCallback))
+            {
+                titleLabel.setText("Aux Source File", juce::dontSendNotification);
+                titleLabel.setJustificationType(juce::Justification::centredLeft);
+                titleLabel.setFont(juce::FontOptions(19.0f, juce::Font::bold));
+                titleLabel.setTooltip("Secondary source trimmer. Use this to freeze a trim from an editor-only audio file and append it to the main arrangement lane.");
+
+                helpLabel.setText("Trim/freeze this editor-only Aux source file, then Append to Main. Aux clips use the main arrangement lane and render with the main arrangement.", juce::dontSendNotification);
+                helpLabel.setJustificationType(juce::Justification::centredLeft);
+                helpLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+                helpLabel.setFont(juce::FontOptions(12.5f));
+                helpLabel.setTooltip("The Aux source has no arrangement lane of its own. Append to Main places the frozen Aux trim at the current audible end of the main arrangement.");
+
+                sourceLabel.setText("Aux Source", juce::dontSendNotification);
+                sourceLabel.setJustificationType(juce::Justification::centredRight);
+                sourceLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.86f));
+
+                sourceCombo.setTooltip("The loaded editor-only Aux source file. Use Load Aux Source in the main editor to choose a different file.");
+                for (int i = 0; i < static_cast<int>(auxClips.size()); ++i)
+                    sourceCombo.addItem(displayNameForClip(auxClips[static_cast<std::size_t>(i)]), i + 1);
+                sourceCombo.onChange = [this]
+                {
+                    const auto index = sourceCombo.getSelectedItemIndex();
+                    if (index >= 0 && index < static_cast<int>(auxClips.size()))
+                        selectClip(auxClips[static_cast<std::size_t>(index)].id);
+                };
+
+                trimStartLabel.setText("Trim Start", juce::dontSendNotification);
+                trimStartLabel.setJustificationType(juce::Justification::centredLeft);
+                trimStartLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+                trimStartLabel.setTooltip("Aux source trim start in seconds. This only affects the Aux frozen trim used by Append to Main.");
+
+                trimEndLabel.setText("Trim End", juce::dontSendNotification);
+                trimEndLabel.setJustificationType(juce::Justification::centredLeft);
+                trimEndLabel.setColour(juce::Label::textColourId, juce::Colours::red.withAlpha(0.88f));
+                trimEndLabel.setTooltip("Aux source trim end in seconds. This only affects the Aux frozen trim used by Append to Main.");
+
+                trimStartBox.setInputRestrictions(12, "0123456789.");
+                trimEndBox.setInputRestrictions(12, "0123456789.");
+                trimStartBox.setTooltip("Trim start in seconds from the beginning of the selected Aux source.");
+                trimEndBox.setTooltip("Trim end in seconds from the beginning of the selected Aux source.");
+                trimStartBox.onTextChange = [this] { updatePendingTrimFromTextBoxes(); };
+                trimEndBox.onTextChange = [this] { updatePendingTrimFromTextBoxes(); };
+
+                previewTrimButton.setButtonText("Preview Trim");
+                previewTrimButton.setTooltip("Preview the pending Aux trim without appending it to the main arrangement.");
+                previewTrimButton.onClick = [this] { previewPendingTrim(); };
+
+                playFullSourceButton.setButtonText("Play Full Source");
+                playFullSourceButton.setTooltip("Preview the full selected Aux source without changing trim values.");
+                playFullSourceButton.onClick = [this] { previewFullSource(); };
+
+                freezeButton.setButtonText("Freeze");
+                freezeButton.setTooltip("Freeze the current Aux trim so it can be appended to the main arrangement.");
+                freezeButton.onClick = [this] { freezeCurrentTrim(); };
+
+                unfreezeButton.setButtonText("Unfreeze");
+                unfreezeButton.setTooltip("Unlock Aux trim editing again. This does not remove clips already appended to the main arrangement.");
+                unfreezeButton.onClick = [this] { unfreezeTrim(); };
+
+                appendToMainButton.setButtonText("Append to Main");
+                appendToMainButton.setTooltip("Append the frozen Aux trim to the end of the main arrangement lane. The new main-lane clip will be labeled Aux. The source file is not imported as a separate project track.");
+                appendToMainButton.onClick = [this] { appendFrozenTrimToMain(); };
+
+                closeButton.setButtonText("Close");
+                closeButton.setTooltip("Close the Aux source trimmer window.");
+                closeButton.onClick = [this]
+                {
+                    if (onClose)
+                        onClose();
+                };
+
+                waveformView.setTooltip("Aux source waveform. Drag the green START or red END handle, or type seconds, then Freeze and Append to Main.");
+                waveformView.onTrimRangeChanged = [this](long long startSamples, long long endSamples)
+                {
+                    pendingTrimStartSamples = startSamples;
+                    pendingTrimEndSamples = endSamples;
+                    refreshTrimTextBoxesFromPending();
+                    updateStatus(false);
+                };
+
+                statusLabel.setJustificationType(juce::Justification::centredLeft);
+                statusLabel.setColour(juce::Label::textColourId, juce::Colours::yellow.withAlpha(0.92f));
+                statusLabel.setFont(juce::FontOptions(12.0f));
+
+                addAndMakeVisible(titleLabel);
+                addAndMakeVisible(helpLabel);
+                addAndMakeVisible(sourceLabel);
+                addAndMakeVisible(sourceCombo);
+                addAndMakeVisible(waveformView);
+                addAndMakeVisible(trimStartLabel);
+                addAndMakeVisible(trimStartBox);
+                addAndMakeVisible(trimEndLabel);
+                addAndMakeVisible(trimEndBox);
+                addAndMakeVisible(previewTrimButton);
+                addAndMakeVisible(playFullSourceButton);
+                addAndMakeVisible(freezeButton);
+                addAndMakeVisible(unfreezeButton);
+                addAndMakeVisible(appendToMainButton);
+                addAndMakeVisible(statusLabel);
+                addAndMakeVisible(closeButton);
+
+                if (!auxClips.empty())
+                    sourceCombo.setSelectedItemIndex(0, juce::sendNotificationSync);
+                else
+                    updateStatus(true);
+
+                refreshControls();
+            }
+
+            void resized() override
+            {
+                auto area = getLocalBounds().reduced(14);
+                auto top = area.removeFromTop(30);
+                closeButton.setBounds(top.removeFromRight(90).reduced(4, 2));
+                titleLabel.setBounds(top.reduced(4, 2));
+
+                helpLabel.setBounds(area.removeFromTop(26).reduced(4, 2));
+
+                auto sourceRow = area.removeFromTop(34);
+                sourceLabel.setBounds(sourceRow.removeFromLeft(70).reduced(4, 2));
+                sourceCombo.setBounds(sourceRow.removeFromLeft(420).reduced(4, 4));
+                statusLabel.setBounds(sourceRow.reduced(4, 2));
+
+                area.removeFromTop(6);
+                waveformView.setBounds(area.removeFromTop(142));
+                area.removeFromTop(8);
+
+                auto trimRow = area.removeFromTop(34);
+                trimStartLabel.setBounds(trimRow.removeFromLeft(78).reduced(4, 2));
+                trimStartBox.setBounds(trimRow.removeFromLeft(92).reduced(4, 4));
+                trimEndLabel.setBounds(trimRow.removeFromLeft(68).reduced(4, 2));
+                trimEndBox.setBounds(trimRow.removeFromLeft(92).reduced(4, 4));
+                previewTrimButton.setBounds(trimRow.removeFromLeft(120).reduced(4, 4));
+                playFullSourceButton.setBounds(trimRow.removeFromLeft(136).reduced(4, 4));
+
+                auto actionRow = area.removeFromTop(34);
+                freezeButton.setBounds(actionRow.removeFromLeft(104).reduced(4, 4));
+                unfreezeButton.setBounds(actionRow.removeFromLeft(104).reduced(4, 4));
+                appendToMainButton.setBounds(actionRow.removeFromLeft(142).reduced(4, 4));
+            }
+
+        private:
+            static juce::String displayNameForClip(const mw::core::AudioClip& clip)
+            {
+                juce::String name = clip.name.empty() ? juce::String("Aux Source") : juce::String(clip.name);
+                name << "  (" << formatSecondsFromSamples(clip.durationSamples, clip.sampleRate) << ")";
+                return name;
+            }
+
+            static juce::String secondsTextForAuxSamples(long long samples, double sampleRate)
+            {
+                if (sampleRate <= 0.0 || samples <= 0)
+                    return "0.00";
+                return juce::String(static_cast<double>(samples) / sampleRate, 2);
+            }
+
+            static long long samplesFromAuxSecondsText(const juce::TextEditor& editor, double sampleRate)
+            {
+                if (sampleRate <= 0.0)
+                    return 0;
+
+                const auto seconds = std::max(0.0, editor.getText().trim().getDoubleValue());
+                return static_cast<long long>(std::llround(seconds * sampleRate));
+            }
+
+            mw::core::AudioClip* findSelectedClip()
+            {
+                for (auto& clip : auxClips)
+                    if (clip.id == selectedClipId)
+                        return &clip;
+                return nullptr;
+            }
+
+            const mw::core::AudioClip* findSelectedClip() const
+            {
+                for (const auto& clip : auxClips)
+                    if (clip.id == selectedClipId)
+                        return &clip;
+                return nullptr;
+            }
+
+            void selectClip(int clipId)
+            {
+                selectedClipId = clipId;
+                frozen = false;
+                frozenStartSamples = 0;
+                frozenEndSamples = 0;
+
+                const auto* clip = findSelectedClip();
+                waveformView.setClip(clip, projectFolder);
+                if (clip == nullptr)
+                {
+                    pendingTrimStartSamples = 0;
+                    pendingTrimEndSamples = 0;
+                    trimStartBox.clear();
+                    trimEndBox.clear();
+                    refreshControls();
+                    updateStatus(true);
+                    return;
+                }
+
+                pendingTrimStartSamples = mw::core::audioClipTrimStartSamples(*clip);
+                pendingTrimEndSamples = mw::core::audioClipTrimEndSamples(*clip);
+                waveformView.setPendingTrim(pendingTrimStartSamples, pendingTrimEndSamples);
+                refreshTrimTextBoxesFromPending();
+                updateStatus(true);
+                refreshControls();
+            }
+
+            void refreshTrimTextBoxesFromPending()
+            {
+                const auto* clip = findSelectedClip();
+                if (clip == nullptr)
+                    return;
+
+                suppressTrimTextChange = true;
+                trimStartBox.setText(secondsTextForAuxSamples(pendingTrimStartSamples, clip->sampleRate), juce::dontSendNotification);
+                trimEndBox.setText(secondsTextForAuxSamples(pendingTrimEndSamples, clip->sampleRate), juce::dontSendNotification);
+                suppressTrimTextChange = false;
+            }
+
+            void updatePendingTrimFromTextBoxes()
+            {
+                if (suppressTrimTextChange || frozen)
+                    return;
+
+                auto* clip = findSelectedClip();
+                if (clip == nullptr || clip->durationSamples <= 0 || clip->sampleRate <= 0.0)
+                    return;
+
+                auto requestedStart = samplesFromAuxSecondsText(trimStartBox, clip->sampleRate);
+                auto requestedEnd = samplesFromAuxSecondsText(trimEndBox, clip->sampleRate);
+                requestedStart = std::clamp<long long>(requestedStart, 0, clip->durationSamples);
+                requestedEnd = std::clamp<long long>(requestedEnd, 0, clip->durationSamples);
+
+                if (requestedEnd <= requestedStart)
+                    requestedEnd = std::min<long long>(clip->durationSamples, requestedStart + 1);
+
+                if (requestedEnd <= requestedStart)
+                    requestedStart = std::max<long long>(0, requestedEnd - 1);
+
+                pendingTrimStartSamples = requestedStart;
+                pendingTrimEndSamples = requestedEnd;
+                waveformView.setPendingTrim(pendingTrimStartSamples, pendingTrimEndSamples);
+                updateStatus(false);
+            }
+
+            void updateStatus(bool committed)
+            {
+                const auto* clip = findSelectedClip();
+                if (clip == nullptr)
+                {
+                    statusLabel.setText(auxClips.empty() ? "No Aux source file loaded." : "No Aux source selected.", juce::dontSendNotification);
+                    return;
+                }
+
+                const auto keptSamples = std::max<long long>(0, (frozen ? frozenEndSamples : pendingTrimEndSamples) - (frozen ? frozenStartSamples : pendingTrimStartSamples));
+                juce::String status;
+                status << (frozen ? "Frozen Aux: " : committed ? "Aux kept: " : "Pending Aux: ")
+                       << formatSecondsFromSamples(keptSamples, clip->sampleRate);
+                if (frozen)
+                    status << " | Append to Main ready";
+                statusLabel.setText(status, juce::dontSendNotification);
+            }
+
+            void refreshControls()
+            {
+                const auto* clip = findSelectedClip();
+                const bool hasClip = clip != nullptr && clip->durationSamples > 0 && clip->sampleRate > 0.0;
+                sourceCombo.setEnabled(false);
+                trimStartBox.setEnabled(hasClip && !frozen);
+                trimEndBox.setEnabled(hasClip && !frozen);
+                waveformView.setTrimInteractionEnabled(hasClip && !frozen);
+                previewTrimButton.setEnabled(hasClip);
+                playFullSourceButton.setEnabled(hasClip);
+                freezeButton.setEnabled(hasClip && !frozen);
+                unfreezeButton.setEnabled(hasClip && frozen);
+                appendToMainButton.setEnabled(hasClip && frozen && frozenEndSamples > frozenStartSamples);
+            }
+
+            void previewPendingTrim()
+            {
+                const auto* clip = findSelectedClip();
+                if (clip == nullptr || !onPreviewClip)
+                    return;
+
+                updatePendingTrimFromTextBoxes();
+                if (pendingTrimEndSamples <= pendingTrimStartSamples)
+                {
+                    statusLabel.setText("Aux preview range must be longer than zero.", juce::dontSendNotification);
+                    return;
+                }
+
+                onPreviewClip(*clip, pendingTrimStartSamples, pendingTrimEndSamples, false);
+                statusLabel.setText("Previewing pending Aux trim from workspace/temp.", juce::dontSendNotification);
+            }
+
+            void previewFullSource()
+            {
+                const auto* clip = findSelectedClip();
+                if (clip == nullptr || !onPreviewClip)
+                    return;
+
+                onPreviewClip(*clip, 0, clip->durationSamples, true);
+                statusLabel.setText("Previewing full Aux source from workspace/temp.", juce::dontSendNotification);
+            }
+
+            void freezeCurrentTrim()
+            {
+                const auto* clip = findSelectedClip();
+                if (clip == nullptr || clip->sampleRate <= 0.0 || clip->durationSamples <= 0)
+                    return;
+
+                updatePendingTrimFromTextBoxes();
+                if (pendingTrimEndSamples <= pendingTrimStartSamples)
+                {
+                    statusLabel.setText("Cannot freeze an empty Aux trim range.", juce::dontSendNotification);
+                    return;
+                }
+
+                frozen = true;
+                frozenStartSamples = pendingTrimStartSamples;
+                frozenEndSamples = pendingTrimEndSamples;
+                waveformView.setTrimInteractionEnabled(false);
+                updateStatus(false);
+                refreshControls();
+            }
+
+            void unfreezeTrim()
+            {
+                frozen = false;
+                frozenStartSamples = 0;
+                frozenEndSamples = 0;
+                updateStatus(false);
+                refreshControls();
+            }
+
+            void appendFrozenTrimToMain()
+            {
+                const auto* clip = findSelectedClip();
+                if (clip == nullptr || !frozen || frozenEndSamples <= frozenStartSamples)
+                {
+                    statusLabel.setText("Freeze an Aux trim before appending to the main arrangement.", juce::dontSendNotification);
+                    return;
+                }
+
+                if (onAppendToMain)
+                    onAppendToMain(*clip, frozenStartSamples, frozenEndSamples);
+
+                statusLabel.setText("Frozen Aux trim appended to the main arrangement.", juce::dontSendNotification);
+            }
+
+            std::vector<mw::core::AudioClip> auxClips;
+            std::optional<std::filesystem::path> projectFolder;
+            int selectedClipId = 0;
+            long long pendingTrimStartSamples = 0;
+            long long pendingTrimEndSamples = 0;
+            bool suppressTrimTextChange = false;
+            bool frozen = false;
+            long long frozenStartSamples = 0;
+            long long frozenEndSamples = 0;
+
+            WaveformTrimView waveformView;
+            juce::Label titleLabel;
+            juce::Label helpLabel;
+            juce::Label sourceLabel;
+            juce::ComboBox sourceCombo;
+            juce::Label trimStartLabel;
+            juce::TextEditor trimStartBox;
+            juce::Label trimEndLabel;
+            juce::TextEditor trimEndBox;
+            juce::TextButton previewTrimButton;
+            juce::TextButton playFullSourceButton;
+            juce::TextButton freezeButton;
+            juce::TextButton unfreezeButton;
+            juce::TextButton appendToMainButton;
+            juce::Label statusLabel;
+            juce::TextButton closeButton;
+
+            std::function<void(mw::core::AudioClip, long long, long long, bool)> onPreviewClip;
+            std::function<void(mw::core::AudioClip, long long, long long)> onAppendToMain;
+            std::function<void()> onClose;
+        };
+
+        class SecondarySourceDocumentWindow final : public juce::DocumentWindow
+        {
+        public:
+            SecondarySourceDocumentWindow(juce::String name, std::function<void()> closeCallback)
+                : juce::DocumentWindow(std::move(name), juce::Colour(0xff121820), juce::DocumentWindow::closeButton),
+                  onClose(std::move(closeCallback))
+            {
+                setUsingNativeTitleBar(true);
+                setResizable(true, true);
+                setResizeLimits(720, 360, 1200, 760);
+            }
+
+            void closeButtonPressed() override
+            {
+                if (onClose)
+                    onClose();
+            }
+
+        private:
+            std::function<void()> onClose;
+        };
+
+
         struct ArrangementClipInstance
         {
             int number = 0;
             int sourceClipId = 0;
+            std::filesystem::path sourcePath;
             long long sourceStartSamples = 0;
             long long sourceEndSamples = 0;
+            long long sourceDurationSamples = 0;
             double sourceSampleRate = 48000.0;
+            int sourceChannelCount = 0;
+            int sourceBitDepth = 0;
             double startSeconds = 0.0;
             double durationSeconds = 0.0;
+            bool mainSource = true;
             juce::Colour colour = juce::Colour(0xff87ceeb);
         };
 
@@ -1316,7 +1758,7 @@ namespace
                 g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
                 g.setColour(juce::Colours::white.withAlpha(0.92f));
                 juce::String label;
-                label << "Clip " << clip.number << "  " << juce::String(clip.startSeconds, 2) << "s";
+                label << "#" << clip.number << " " << (clip.mainSource ? "Main" : "Aux");
                 g.drawFittedText(label, clipped.toNearestInt().reduced(6, 0), juce::Justification::centredLeft, 1);
             }
 
@@ -1774,6 +2216,84 @@ namespace
             return nullptr;
         }
 
+        const mw::core::AudioClip* findProjectAudioClip(int clipId) const
+        {
+            for (const auto& clip : projectSnapshot.getAudioClips())
+                if (clip.id == clipId)
+                    return &clip;
+            return nullptr;
+        }
+
+        static juce::String auxDisplayNameForClip(const mw::core::AudioClip& clip)
+        {
+            juce::String name = clip.name.empty() ? "Aux Source" : juce::String(clip.name);
+            if (clip.sampleRate > 0.0 && clip.durationSamples > 0)
+            {
+                const double seconds = static_cast<double>(clip.durationSamples) / clip.sampleRate;
+                name << " (" << juce::String(seconds, 2) << "s)";
+            }
+            return name;
+        }
+
+        static mw::core::AudioClipSavedFormat savedFormatForAudioPath(const std::filesystem::path& path)
+        {
+            auto ext = path.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+            if (ext == ".flac") return mw::core::AudioClipSavedFormat::Flac;
+            if (ext == ".mp3") return mw::core::AudioClipSavedFormat::Mp3;
+            if (ext == ".ogg") return mw::core::AudioClipSavedFormat::Ogg;
+            if (ext == ".m4a" || ext == ".aac") return mw::core::AudioClipSavedFormat::M4a;
+            return mw::core::AudioClipSavedFormat::Wav;
+        }
+
+        std::optional<mw::core::AudioClip> createEditorOnlyAuxClipFromFile(const std::filesystem::path& sourcePath)
+        {
+            std::error_code ec;
+            if (sourcePath.empty() || !std::filesystem::exists(sourcePath, ec) || ec)
+            {
+                arrangementStatusLabel.setText("Aux source file could not be found.", juce::dontSendNotification);
+                return std::nullopt;
+            }
+
+            juce::AudioFormatManager formatManager;
+            formatManager.registerBasicFormats();
+            std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(juce::File(sourcePath.string())));
+            if (!reader || reader->lengthInSamples <= 0 || reader->sampleRate <= 0.0)
+            {
+                arrangementStatusLabel.setText("Aux source file could not be read by the editor. Try WAV/MP3/FLAC/OGG or import/convert it first.", juce::dontSendNotification);
+                return std::nullopt;
+            }
+
+            mw::core::AudioClip clip;
+            clip.id = nextEditorOnlyAuxSourceId--;
+            clip.name = sourcePath.stem().string();
+            clip.sourceType = mw::core::AudioClipSourceType::Imported;
+            clip.savedFormat = savedFormatForAudioPath(sourcePath);
+            clip.projectRelativePath = sourcePath;
+            clip.originalSourcePath = sourcePath;
+            clip.startTick = 0;
+            clip.durationSamples = static_cast<long long>(reader->lengthInSamples);
+            clip.sampleRate = reader->sampleRate;
+            clip.channelCount = static_cast<int>(reader->numChannels);
+            clip.bitDepth = reader->bitsPerSample > 0 ? reader->bitsPerSample : 16;
+            clip.sizeBytes = static_cast<std::uintmax_t>(std::filesystem::file_size(sourcePath, ec));
+            clip.sourceTrimStartSamples = 0;
+            clip.sourceTrimEndSamples = clip.durationSamples;
+            mw::core::normalizeAudioClipTrim(clip);
+            return clip;
+        }
+
+        void setLoadedAuxSourceStatus(const mw::core::AudioClip& clip)
+        {
+            lastLoadedAuxSourceName = auxDisplayNameForClip(clip);
+            auxClipStatusLabel.setText("Aux: " + lastLoadedAuxSourceName, juce::dontSendNotification);
+            auxClipStatusLabel.setTooltip("Loaded editor-only Aux source file: " + lastLoadedAuxSourceName + ". It is used only for this arrangement until rendered.");
+            arrangementStatusLabel.setText("Loaded Aux source file: " + lastLoadedAuxSourceName, juce::dontSendNotification);
+        }
+
+
+
         double currentFrozenDurationSeconds() const
         {
             if (!trimFrozenForArrangement || frozenTrimSampleRate <= 0.0 || frozenTrimEndSamples <= frozenTrimStartSamples)
@@ -1811,6 +2331,7 @@ namespace
             {
                 if (clip.number == movingClipNumber)
                     continue;
+
                 considerMarker(clip.startSeconds);
                 considerMarker(clip.startSeconds + clip.durationSeconds);
             }
@@ -1890,6 +2411,8 @@ namespace
                 arrangementViewStartSeconds = std::clamp(startSeconds, 0.0, maxScroll);
         }
 
+
+
         void appendFrozenClipToArrangement()
         {
             if (!trimFrozenForArrangement)
@@ -1907,6 +2430,55 @@ namespace
                 arrangementStatusLabel.setText("Appended frozen trim after the last audible arrangement clip.", juce::dontSendNotification);
                 refreshArrangementControls();
             }
+        }
+
+        void appendAuxTrimToMainArrangement(mw::core::AudioClip source, long long startSamples, long long endSamples)
+        {
+            mw::core::normalizeAudioClipTrim(source);
+            if (source.durationSamples <= 0 || source.sampleRate <= 0.0)
+            {
+                arrangementStatusLabel.setText("Aux source file is no longer valid.", juce::dontSendNotification);
+                return;
+            }
+
+            if (arrangementClips.size() >= maxArrangementClips)
+            {
+                arrangementStatusLabel.setText("Arrangement clip limit reached; delete a clip before appending more.", juce::dontSendNotification);
+                return;
+            }
+
+            const auto safeStart = std::clamp<long long>(startSamples, 0, std::max<long long>(0, source.durationSamples - 1));
+            const auto safeEnd = std::clamp<long long>(endSamples, safeStart + 1, source.durationSamples);
+            if (safeEnd <= safeStart)
+            {
+                arrangementStatusLabel.setText("Cannot append an empty Aux trim range.", juce::dontSendNotification);
+                return;
+            }
+
+            const double duration = static_cast<double>(safeEnd - safeStart) / source.sampleRate;
+            const double start = actualArrangementEndSeconds();
+            ensureArrangementLengthIncludes(start + duration);
+
+            ArrangementClipInstance instance;
+            instance.number = nextArrangementClipNumber++;
+            instance.sourceClipId = source.id;
+            instance.sourcePath = !source.projectRelativePath.empty() ? source.projectRelativePath : source.originalSourcePath;
+            instance.sourceStartSamples = safeStart;
+            instance.sourceEndSamples = safeEnd;
+            instance.sourceDurationSamples = source.durationSamples;
+            instance.sourceSampleRate = source.sampleRate;
+            instance.sourceChannelCount = source.channelCount;
+            instance.sourceBitDepth = source.bitDepth;
+            instance.startSeconds = start;
+            instance.durationSeconds = duration;
+            instance.mainSource = false;
+            instance.colour = arrangementColourForIndex(instance.number + 3);
+            arrangementClips.push_back(instance);
+            selectedArrangementClipNumber = instance.number;
+            revealArrangementRange(instance.startSeconds, instance.startSeconds + instance.durationSeconds);
+            refreshArrangementControls();
+
+            arrangementStatusLabel.setText("Appended editor-only Aux trim to the main arrangement end.", juce::dontSendNotification);
         }
 
         void addFrozenClipToArrangement(double requestedStartSeconds)
@@ -1936,8 +2508,12 @@ namespace
             instance.sourceClipId = sourceClip->id;
             instance.sourceStartSamples = frozenTrimStartSamples;
             instance.sourceEndSamples = frozenTrimEndSamples;
+            instance.sourceDurationSamples = sourceClip->durationSamples;
             instance.sourceSampleRate = frozenTrimSampleRate;
+            instance.sourceChannelCount = sourceClip->channelCount;
+            instance.sourceBitDepth = sourceClip->bitDepth;
             instance.durationSeconds = durationSeconds;
+            instance.mainSource = true;
 
             const double requestedStart = std::max(0.0, requestedStartSeconds);
             ensureArrangementLengthIncludes(requestedStart + durationSeconds);
@@ -2002,6 +2578,116 @@ namespace
             refreshArrangementView();
         }
 
+        void previewEditorOnlyAuxSource(mw::core::AudioClip source, long long startSamples, long long endSamples, bool fullSource)
+        {
+            if (!onPreviewArrangement)
+                return;
+
+            mw::core::normalizeAudioClipTrim(source);
+            AudioClipArrangementRenderClip previewClip;
+            previewClip.number = 1;
+            previewClip.sourceClipId = source.id;
+            previewClip.sourcePath = !source.projectRelativePath.empty() ? source.projectRelativePath : source.originalSourcePath;
+            previewClip.sourceDurationSamples = source.durationSamples;
+            previewClip.sourceSampleRate = source.sampleRate;
+            previewClip.sourceChannelCount = source.channelCount;
+            previewClip.sourceBitDepth = source.bitDepth;
+            previewClip.sourceStartSamples = fullSource ? 0 : startSamples;
+            previewClip.sourceEndSamples = fullSource ? source.durationSamples : endSamples;
+            previewClip.arrangementStartSeconds = 0.0;
+            previewClip.editorOnlyAuxSource = true;
+            onPreviewArrangement({ previewClip });
+        }
+
+        void openAuxSourceFilePicker()
+        {
+            auxSourceFileChooser = std::make_unique<juce::FileChooser>(
+                "Load Aux Source",
+                juce::File{},
+                "*.wav;*.mp3;*.flac;*.ogg;*.aif;*.aiff;*.m4a;*.aac"
+            );
+
+            juce::Component::SafePointer<AudioClipEditorComponentImpl> safeThis(this);
+            auxSourceFileChooser->launchAsync(
+                juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                [safeThis](const juce::FileChooser& chooser)
+                {
+                    if (safeThis == nullptr)
+                        return;
+
+                    const auto file = chooser.getResult();
+                    if (!file.existsAsFile())
+                    {
+                        safeThis->arrangementStatusLabel.setText("Aux source load cancelled.", juce::dontSendNotification);
+                        safeThis->auxSourceFileChooser.reset();
+                        return;
+                    }
+
+                    const auto sourcePath = std::filesystem::path(file.getFullPathName().toStdString());
+                    auto auxClip = safeThis->createEditorOnlyAuxClipFromFile(sourcePath);
+                    if (!auxClip.has_value())
+                    {
+                        safeThis->auxSourceFileChooser.reset();
+                        return;
+                    }
+
+                    safeThis->setLoadedAuxSourceStatus(*auxClip);
+                    safeThis->openSecondarySourceWindowForClip(*auxClip);
+                    safeThis->auxSourceFileChooser.reset();
+                }
+            );
+        }
+
+        void openSecondarySourceWindowForClip(mw::core::AudioClip selectedClip)
+        {
+            if (secondarySourceWindow != nullptr)
+                closeSecondarySourceWindow();
+
+            std::vector<mw::core::AudioClip> selectedAuxClip;
+            selectedAuxClip.push_back(std::move(selectedClip));
+
+            juce::Component::SafePointer<AudioClipEditorComponentImpl> safeThis(this);
+            auto closeAuxWindow = [safeThis]
+            {
+                juce::MessageManager::callAsync([safeThis]
+                {
+                    if (safeThis != nullptr)
+                        safeThis->closeSecondarySourceWindow();
+                });
+            };
+
+            auto* content = new SecondarySourceTrimComponent(
+                std::move(selectedAuxClip),
+                std::nullopt,
+                [this](mw::core::AudioClip clip, long long startSamples, long long endSamples, bool fullSource)
+                {
+                    previewEditorOnlyAuxSource(std::move(clip), startSamples, endSamples, fullSource);
+                },
+                [this](mw::core::AudioClip clip, long long startSamples, long long endSamples)
+                {
+                    appendAuxTrimToMainArrangement(std::move(clip), startSamples, endSamples);
+                },
+                closeAuxWindow);
+
+            auto window = std::make_unique<SecondarySourceDocumentWindow>("Aux Source File", closeAuxWindow);
+            window->setContentOwned(content, true);
+            window->centreWithSize(860, 390);
+            window->addToDesktop();
+            window->setVisible(true);
+            secondarySourceWindow = std::move(window);
+
+            arrangementStatusLabel.setText("Opened editor-only Aux source trim window.", juce::dontSendNotification);
+        }
+
+        void closeSecondarySourceWindow()
+        {
+            if (secondarySourceWindow != nullptr)
+            {
+                secondarySourceWindow->setVisible(false);
+                secondarySourceWindow.reset();
+            }
+        }
+
         void deleteSelectedArrangementClip()
         {
             const auto oldSize = arrangementClips.size();
@@ -2045,9 +2731,15 @@ namespace
                 AudioClipArrangementRenderClip renderClip;
                 renderClip.number = clip.number;
                 renderClip.sourceClipId = clip.sourceClipId;
+                renderClip.sourcePath = clip.sourcePath;
                 renderClip.sourceStartSamples = clip.sourceStartSamples;
                 renderClip.sourceEndSamples = clip.sourceEndSamples;
+                renderClip.sourceDurationSamples = clip.sourceDurationSamples;
+                renderClip.sourceSampleRate = clip.sourceSampleRate;
+                renderClip.sourceChannelCount = clip.sourceChannelCount;
+                renderClip.sourceBitDepth = clip.sourceBitDepth;
                 renderClip.arrangementStartSeconds = clip.startSeconds;
+                renderClip.editorOnlyAuxSource = !clip.mainSource;
                 renderClips.push_back(renderClip);
             }
 
@@ -2132,6 +2824,7 @@ namespace
             deleteClipButton.setEnabled(hasSelectedArrangementClip);
             clipStartBox.setEnabled(hasSelectedArrangementClip);
             moveClipButton.setEnabled(hasSelectedArrangementClip);
+            loadAuxClipButton.setEnabled(hasEditableClip);
             extendArrangementButton.setEnabled(arrangementLengthSeconds < 600.0);
             previewArrangementButton.setEnabled(!arrangementClips.empty());
             renderArrangementButton.setEnabled(!arrangementClips.empty());
@@ -2153,7 +2846,7 @@ namespace
                 for (const auto& instance : arrangementClips)
                 {
                     juce::String item;
-                    item << "Clip " << instance.number << " @ " << juce::String(instance.startSeconds, 2) << "s";
+                    item << "#" << instance.number << " " << (instance.mainSource ? "Main" : "Aux") << " @ " << juce::String(instance.startSeconds, 2) << "s";
                     clipSelectCombo.addItem(item, instance.number);
                     selectedStillExists = selectedStillExists || instance.number == selectedArrangementClipNumber;
                 }
@@ -2300,7 +2993,11 @@ namespace
             text << "- Arrangement clips are transparent, editor-local instances capped at 64 clips in this phase.\n";
             text << "- Extend +10s changes the working window only; Preview/Render use actual audible clip end.\n";
             text << "- Repeated lane clicks intentionally place repeated copies of the frozen trim.\n";
-            text << "- Append Clip places the frozen trim at the current audible arrangement end.\n";
+            text << "- Append Clip places the frozen Main trim at the current audible arrangement end.\n";
+            text << "- Load Aux Source chooses an external editor-only audio file and opens its Aux trim window.\n";
+            text << "- Aux source files are not imported as project tracks; only the final rendered arrangement becomes project media.\n";
+            text << "- Append to Main adds the frozen Aux trim to this arrangement at the audible end.\n";
+            text << "- Arrangement labels use #n Main or #n Aux so mixed-source cuts remain clear.\n";
             text << "- Clip Start moves the selected arrangement clip precisely without changing source trim.\n";
             text << "- Preview/export honors the kept source trim range.\n";
             text << "- Original recorded/imported media files are never modified by this editor.\n";
@@ -2366,6 +3063,8 @@ namespace
         juce::Label clipStartLabel;
         juce::TextEditor clipStartBox;
         juce::TextButton moveClipButton;
+        juce::TextButton loadAuxClipButton;
+        juce::Label auxClipStatusLabel;
         juce::TextButton extendArrangementButton;
         juce::TextButton previewArrangementButton;
         juce::TextButton renderArrangementButton;
@@ -2376,6 +3075,10 @@ namespace
 
         mw::gui::HelperTooltipLookAndFeel helperTooltipLookAndFeel;
         std::unique_ptr<mw::gui::FreshHoverTooltipWindow> helperTooltipWindow;
+        std::unique_ptr<SecondarySourceDocumentWindow> secondarySourceWindow;
+        int nextEditorOnlyAuxSourceId = -1000;
+        juce::String lastLoadedAuxSourceName;
+        std::unique_ptr<juce::FileChooser> auxSourceFileChooser;
 
         std::function<bool(int, long long, long long)> onApplyTrim;
         std::function<bool(int)> onResetTrim;

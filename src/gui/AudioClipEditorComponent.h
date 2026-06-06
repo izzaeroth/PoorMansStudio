@@ -16,9 +16,15 @@ namespace mw::gui
     {
         int number = 0;
         int sourceClipId = 0;
+        std::filesystem::path sourcePath;
         long long sourceStartSamples = 0;
         long long sourceEndSamples = 0;
+        long long sourceDurationSamples = 0;
+        double sourceSampleRate = 0.0;
+        int sourceChannelCount = 0;
+        int sourceBitDepth = 0;
         double arrangementStartSeconds = 0.0;
+        bool editorOnlyAuxSource = false;
     };
 
     struct WindowPendingCloseHandler

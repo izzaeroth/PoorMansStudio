@@ -87,6 +87,7 @@ namespace
         std::filesystem::path path;
         double startOffsetSeconds = 0.0;
         double intendedDurationSeconds = 0.0;
+        double gain = 1.0;
     };
 
     double ticksToSeconds(std::int64_t ticks, int tempoBpm)
@@ -235,6 +236,35 @@ namespace
         }
     }
 
+    bool shouldRenderAudioClipForTrack(const mw::audio::RenderJob& job, const mw::core::Track* track)
+    {
+        const bool anySolo = std::any_of(
+            job.project.getTracks().begin(),
+            job.project.getTracks().end(),
+            [](const auto& t) { return t.getSolo(); });
+
+        if (track == nullptr)
+            return !anySolo;
+
+        if (track->getMuted())
+            return false;
+
+        if (anySolo && !track->getSolo())
+            return false;
+
+        return true;
+    }
+
+    double audioClipRenderGainForTrack(const mw::audio::RenderJob& job, const mw::core::AudioClip& clip, const mw::core::Track* track)
+    {
+        const double trackVolume = track != nullptr ? static_cast<double>(track->getMixerSettings().volume) : 1.0;
+        const double clipGain = std::isfinite(static_cast<double>(clip.gain)) ? static_cast<double>(clip.gain) : 1.0;
+        const double masterVolume = std::isfinite(static_cast<double>(job.masterVolume)) ? static_cast<double>(job.masterVolume) : 1.0;
+        // Match the existing MIDI render convention: track volume and master volume
+        // combine into one final render gain capped at the app's 1.5 slider ceiling.
+        return std::clamp(trackVolume * clipGain * masterVolume, 0.0, 1.5);
+    }
+
     std::vector<AudioClipRenderInput> collectAudioClipInputs(
         const mw::audio::RenderJob& job,
         std::atomic<bool>& cancelRequested,
@@ -277,6 +307,20 @@ namespace
             const auto& tracks = job.project.getTracks();
             const bool hasEffectTrack = clip.trackIndex >= 0 && clip.trackIndex < static_cast<int>(tracks.size());
             const auto* track = hasEffectTrack ? &tracks[static_cast<std::size_t>(clip.trackIndex)] : nullptr;
+
+            if (!shouldRenderAudioClipForTrack(job, track))
+            {
+                ++clipIndex;
+                continue;
+            }
+
+            const auto renderGain = audioClipRenderGainForTrack(job, clip, track);
+            if (renderGain <= 0.000001)
+            {
+                ++clipIndex;
+                continue;
+            }
+
             const auto sourceKind = mw::core::audioClipSourceTypeToString(clip.sourceType);
             const auto sourceKindTitle = sourceKind.empty()
                 ? std::string("AudioClip")
@@ -342,7 +386,7 @@ namespace
                     && !capAudioClipPreparedWavToIntendedDuration(job, preparedSource, intendedDurationSeconds, callbacks, errorMessage))
                     return {};
 
-                inputs.push_back({ preparedSource, startOffsetSeconds, intendedDurationSeconds });
+                inputs.push_back({ preparedSource, startOffsetSeconds, intendedDurationSeconds, renderGain });
                 ++clipIndex;
                 continue;
             }
@@ -407,7 +451,7 @@ namespace
                 && !capAudioClipPreparedWavToIntendedDuration(job, processedWav, intendedDurationSeconds, callbacks, errorMessage))
                 return {};
 
-            inputs.push_back({ processedWav, startOffsetSeconds, intendedDurationSeconds });
+            inputs.push_back({ processedWav, startOffsetSeconds, intendedDurationSeconds, renderGain });
             log(callbacks, sourceKindTitle + " AudioClip VST3 effect processed for track: " + track->getName() + " -> " + processedWav.string());
             ++clipIndex;
         }
@@ -428,7 +472,7 @@ namespace
             return false;
         }
 
-        if (audioInputs.size() == 1 && !hasAnyAudioClipStartOffset(audioInputs))
+        if (audioInputs.size() == 1 && !hasAnyAudioClipStartOffset(audioInputs) && std::abs(audioInputs.front().gain - 1.0) <= 0.0005)
         {
             mw::audio::FfmpegEncodeRequest encodeRequest;
             encodeRequest.ffmpegExePath = job.ffmpegPath;
@@ -461,6 +505,7 @@ namespace
         {
             mixRequest.inputWavPaths.push_back(input.path);
             mixRequest.inputStartOffsetsSeconds.push_back(input.startOffsetSeconds);
+            mixRequest.inputGains.push_back(input.gain);
         }
         mixRequest.outputWavPath = outputWav;
 
@@ -501,10 +546,12 @@ namespace
         mixRequest.ffmpegExePath = job.ffmpegPath;
         mixRequest.inputWavPaths.push_back(renderedWav);
         mixRequest.inputStartOffsetsSeconds.push_back(0.0);
+        mixRequest.inputGains.push_back(1.0);
         for (const auto& input : audioInputs)
         {
             mixRequest.inputWavPaths.push_back(input.path);
             mixRequest.inputStartOffsetsSeconds.push_back(input.startOffsetSeconds);
+            mixRequest.inputGains.push_back(input.gain);
         }
         mixRequest.outputWavPath = mixedPath;
 
@@ -1180,11 +1227,13 @@ namespace mw::audio
                 return result;
             }
             std::vector<double> stemStartOffsetsSeconds(stemWavs.size(), 0.0);
+            std::vector<double> stemInputGains(stemWavs.size(), 1.0);
             for (const auto& audioClipInput : stemAudioClipInputs)
             {
                 stemWavs.push_back(audioClipInput.path);
                 stemStartOffsetsSeconds.push_back(audioClipInput.startOffsetSeconds);
-                log(callbacks, "Added AudioClip media to stem mix: " + audioClipInput.path.string());
+                stemInputGains.push_back(audioClipInput.gain);
+                log(callbacks, "Added AudioClip media to stem mix with track/master volume: " + audioClipInput.path.string());
             }
 
             for (int i = static_cast<int>(stemWavs.size()) - 1; i >= 0; --i)
@@ -1193,6 +1242,7 @@ namespace mw::audio
                 {
                     stemWavs.erase(stemWavs.begin() + i);
                     stemStartOffsetsSeconds.erase(stemStartOffsetsSeconds.begin() + i);
+                    stemInputGains.erase(stemInputGains.begin() + i);
                 }
             }
 
@@ -1212,7 +1262,8 @@ namespace mw::audio
             status(callbacks, "Mixing stems and AudioClips...");
 
             const bool singleStemCanCopy = stemWavs.size() == 1
-                && (stemStartOffsetsSeconds.empty() || stemStartOffsetsSeconds.front() <= 0.0005);
+                && (stemStartOffsetsSeconds.empty() || stemStartOffsetsSeconds.front() <= 0.0005)
+                && (stemInputGains.empty() || std::abs(stemInputGains.front() - 1.0) <= 0.0005);
 
             if (singleStemCanCopy)
             {
@@ -1225,6 +1276,7 @@ namespace mw::audio
                 mixRequest.ffmpegExePath = job.ffmpegPath;
                 mixRequest.inputWavPaths = stemWavs;
                 mixRequest.inputStartOffsetsSeconds = stemStartOffsetsSeconds;
+                mixRequest.inputGains = stemInputGains;
                 mixRequest.outputWavPath = result.wavPath;
 
                 const auto mixResult = mw::audio::ExternalFfmpegMixer::mixWavFiles(mixRequest);

@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <sstream>
 #include <string>
+#include <iomanip>
 #include <cmath>
 
 #ifdef _WIN32
@@ -41,6 +42,33 @@ namespace
         return false;
     }
 
+    double inputGainAt(const mw::audio::FfmpegMixRequest& request, std::size_t index)
+    {
+        if (index >= request.inputGains.size())
+            return 1.0;
+
+        const auto gain = request.inputGains[index];
+        return std::isfinite(gain) ? std::clamp(gain, 0.0, 8.0) : 1.0;
+    }
+
+    bool hasAnyInputGain(const mw::audio::FfmpegMixRequest& request)
+    {
+        for (std::size_t i = 0; i < request.inputWavPaths.size(); ++i)
+        {
+            if (std::abs(inputGainAt(request, i) - 1.0) > 0.0005)
+                return true;
+        }
+
+        return false;
+    }
+
+    std::string formatGain(double gain)
+    {
+        std::ostringstream text;
+        text << std::fixed << std::setprecision(6) << std::clamp(gain, 0.0, 8.0);
+        return text.str();
+    }
+
     long long inputStartOffsetMillisecondsAt(const mw::audio::FfmpegMixRequest& request, std::size_t index)
     {
         return static_cast<long long>(std::llround(inputStartOffsetSecondsAt(request, index) * 1000.0));
@@ -50,18 +78,33 @@ namespace
     {
         const auto inputCount = request.inputWavPaths.size();
 
-        if (!hasAnyInputOffset(request))
+        if (!hasAnyInputOffset(request) && !hasAnyInputGain(request))
             return "amix=inputs=" + std::to_string(inputCount) + ":duration=longest:normalize=0";
 
         std::ostringstream filter;
         for (std::size_t i = 0; i < inputCount; ++i)
         {
             const auto delayMs = inputStartOffsetMillisecondsAt(request, i);
+            const auto gain = inputGainAt(request, i);
+
             filter << "[" << i << ":a]";
 
+            bool wroteFilter = false;
+            if (std::abs(gain - 1.0) > 0.0005)
+            {
+                filter << "volume=" << formatGain(gain);
+                wroteFilter = true;
+            }
+
             if (delayMs > 0)
+            {
+                if (wroteFilter)
+                    filter << ",";
                 filter << "adelay=" << delayMs << ":all=1";
-            else
+                wroteFilter = true;
+            }
+
+            if (!wroteFilter)
                 filter << "anull";
 
             filter << "[a" << i << "];";

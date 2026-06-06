@@ -13,6 +13,9 @@ namespace mw::audio
         // Optional per-input timeline offsets in seconds.  Empty means all inputs
         // start at 0.0, matching the original mixer behavior.
         std::vector<double> inputStartOffsetsSeconds;
+        // Optional per-input linear gain values. Empty or missing entries mean 1.0.
+        // Used by AudioClip render paths so track/master volume affects clips.
+        std::vector<double> inputGains;
         std::filesystem::path outputWavPath;
         int timeoutSeconds = 600;
     };

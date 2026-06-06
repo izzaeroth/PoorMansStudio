@@ -24766,38 +24766,74 @@ void MainComponent::selectTrackFromManagerPage()
 
         for (const auto& request : arrangementClips)
         {
-            if (request.sourceClipId <= 0 || request.sourceEndSamples <= request.sourceStartSamples)
+            if (request.sourceEndSamples <= request.sourceStartSamples)
             {
                 logMessage("AudioClip Editor Arrangement Preview: skipped invalid arrangement clip request.");
                 continue;
             }
 
-            const mw::core::AudioClip* sourceClip = nullptr;
-            for (const auto& clip : currentProject->getAudioClips())
+            mw::core::AudioClip resolvedSourceClip;
+            std::filesystem::path sourcePath;
+
+            if (!request.editorOnlyAuxSource && request.sourceClipId > 0)
             {
-                if (clip.id == request.sourceClipId)
+                const mw::core::AudioClip* sourceClip = nullptr;
+                for (const auto& clip : currentProject->getAudioClips())
                 {
-                    sourceClip = &clip;
-                    break;
+                    if (clip.id == request.sourceClipId)
+                    {
+                        sourceClip = &clip;
+                        break;
+                    }
                 }
-            }
 
-            if (sourceClip == nullptr || sourceClip->durationSamples <= 0 || sourceClip->sampleRate <= 0.0)
-            {
-                logMessage("AudioClip Editor Arrangement Preview: source AudioClip media for an arrangement clip could not be found or has no valid duration.");
-                return false;
-            }
+                if (sourceClip == nullptr || sourceClip->durationSamples <= 0 || sourceClip->sampleRate <= 0.0)
+                {
+                    logMessage("AudioClip Editor Arrangement Preview: source AudioClip media for an arrangement clip could not be found or has no valid duration.");
+                    return false;
+                }
 
-            const auto sourcePath = resolveSourcePath(*sourceClip);
-            if (sourcePath.empty())
+                sourcePath = resolveSourcePath(*sourceClip);
+                if (sourcePath.empty())
+                {
+                    logMessage("AudioClip Editor Arrangement Preview: source media file could not be resolved for AudioClip media #" + juce::String(sourceClip->id) + ".");
+                    return false;
+                }
+
+                resolvedSourceClip = *sourceClip;
+            }
+            else
             {
-                logMessage("AudioClip Editor Arrangement Preview: source media file could not be resolved for AudioClip media #" + juce::String(sourceClip->id) + ".");
-                return false;
+                std::error_code ec;
+                if (request.sourcePath.empty() || !std::filesystem::exists(request.sourcePath, ec) || ec)
+                {
+                    logMessage("AudioClip Editor Arrangement Preview: editor-only Aux source file could not be resolved.");
+                    return false;
+                }
+
+                if (request.sourceDurationSamples <= 0 || request.sourceSampleRate <= 0.0)
+                {
+                    logMessage("AudioClip Editor Arrangement Preview: editor-only Aux source has no valid duration.");
+                    return false;
+                }
+
+                sourcePath = request.sourcePath;
+                resolvedSourceClip.id = request.sourceClipId;
+                resolvedSourceClip.name = sourcePath.stem().string();
+                resolvedSourceClip.projectRelativePath = sourcePath;
+                resolvedSourceClip.originalSourcePath = sourcePath;
+                resolvedSourceClip.durationSamples = request.sourceDurationSamples;
+                resolvedSourceClip.sampleRate = request.sourceSampleRate;
+                resolvedSourceClip.channelCount = request.sourceChannelCount;
+                resolvedSourceClip.bitDepth = request.sourceBitDepth;
+                resolvedSourceClip.sourceTrimStartSamples = 0;
+                resolvedSourceClip.sourceTrimEndSamples = resolvedSourceClip.durationSamples;
+                mw::core::normalizeAudioClipTrim(resolvedSourceClip);
             }
 
             PreparedArrangementClip prepared;
             prepared.request = request;
-            prepared.sourceClip = *sourceClip;
+            prepared.sourceClip = std::move(resolvedSourceClip);
             prepared.sourcePath = sourcePath;
             preparedClips.push_back(std::move(prepared));
         }
@@ -24823,7 +24859,13 @@ void MainComponent::selectTrackFromManagerPage()
         const auto scratchFolder = mw::app::AppPaths::tempFolder() / "audioclip_render" / ("arrangement_preview_" + now);
         const auto previewFolder = mw::app::AppPaths::previewFolder();
         const auto outputPath = previewFolder / "acea.wav";
-        const auto placementSourceClip = preparedClips.front().sourceClip;
+        const auto placementSourceIt = std::find_if(preparedClips.begin(), preparedClips.end(), [](const auto& prepared)
+        {
+            return prepared.sourceClip.id > 0;
+        });
+        const auto placementSourceClip = placementSourceIt != preparedClips.end()
+            ? placementSourceIt->sourceClip
+            : preparedClips.front().sourceClip;
         const auto tempo = pianoRollBpmBox.getText().getDoubleValue() > 0.0
             ? pianoRollBpmBox.getText().getDoubleValue()
             : static_cast<double>(std::max(1, currentProject->getTempoBpm()));
@@ -24831,9 +24873,19 @@ void MainComponent::selectTrackFromManagerPage()
         if (renderThread.joinable())
             renderThread.join();
 
+        const auto previewMainClipCount = static_cast<int>(std::count_if(preparedClips.begin(), preparedClips.end(), [](const auto& prepared)
+        {
+            return !prepared.request.editorOnlyAuxSource;
+        }));
+        const auto previewAuxClipCount = static_cast<int>(preparedClips.size()) - previewMainClipCount;
+
         cancelRenderRequested = false;
         setRenderingState(true);
-        logMessage("AudioClip Editor Arrangement Preview started: rendering current placed clips to workspace/temp preview audio.");
+        logMessage("AudioClip Editor Arrangement Preview started: rendering "
+            + juce::String(previewMainClipCount)
+            + " Main clip(s) and "
+            + juce::String(previewAuxClipCount)
+            + " Aux clip(s) to workspace/temp preview audio.");
 
         renderThread = std::thread(
             [this,
@@ -25079,38 +25131,74 @@ void MainComponent::selectTrackFromManagerPage()
 
         for (const auto& request : arrangementClips)
         {
-            if (request.sourceClipId <= 0 || request.sourceEndSamples <= request.sourceStartSamples)
+            if (request.sourceEndSamples <= request.sourceStartSamples)
             {
                 logMessage("AudioClip Editor Arrangement: skipped invalid arrangement clip request.");
                 continue;
             }
 
-            const mw::core::AudioClip* sourceClip = nullptr;
-            for (const auto& clip : currentProject->getAudioClips())
+            mw::core::AudioClip resolvedSourceClip;
+            std::filesystem::path sourcePath;
+
+            if (!request.editorOnlyAuxSource && request.sourceClipId > 0)
             {
-                if (clip.id == request.sourceClipId)
+                const mw::core::AudioClip* sourceClip = nullptr;
+                for (const auto& clip : currentProject->getAudioClips())
                 {
-                    sourceClip = &clip;
-                    break;
+                    if (clip.id == request.sourceClipId)
+                    {
+                        sourceClip = &clip;
+                        break;
+                    }
                 }
-            }
 
-            if (sourceClip == nullptr || sourceClip->durationSamples <= 0 || sourceClip->sampleRate <= 0.0)
-            {
-                logMessage("AudioClip Editor Arrangement: source AudioClip media for an arrangement clip could not be found or has no valid duration.");
-                return false;
-            }
+                if (sourceClip == nullptr || sourceClip->durationSamples <= 0 || sourceClip->sampleRate <= 0.0)
+                {
+                    logMessage("AudioClip Editor Arrangement: source AudioClip media for an arrangement clip could not be found or has no valid duration.");
+                    return false;
+                }
 
-            const auto sourcePath = resolveSourcePath(*sourceClip);
-            if (sourcePath.empty())
+                sourcePath = resolveSourcePath(*sourceClip);
+                if (sourcePath.empty())
+                {
+                    logMessage("AudioClip Editor Arrangement: source media file could not be resolved for AudioClip media #" + juce::String(sourceClip->id) + ".");
+                    return false;
+                }
+
+                resolvedSourceClip = *sourceClip;
+            }
+            else
             {
-                logMessage("AudioClip Editor Arrangement: source media file could not be resolved for AudioClip media #" + juce::String(sourceClip->id) + ".");
-                return false;
+                std::error_code ec;
+                if (request.sourcePath.empty() || !std::filesystem::exists(request.sourcePath, ec) || ec)
+                {
+                    logMessage("AudioClip Editor Arrangement: editor-only Aux source file could not be resolved.");
+                    return false;
+                }
+
+                if (request.sourceDurationSamples <= 0 || request.sourceSampleRate <= 0.0)
+                {
+                    logMessage("AudioClip Editor Arrangement: editor-only Aux source has no valid duration.");
+                    return false;
+                }
+
+                sourcePath = request.sourcePath;
+                resolvedSourceClip.id = request.sourceClipId;
+                resolvedSourceClip.name = sourcePath.stem().string();
+                resolvedSourceClip.projectRelativePath = sourcePath;
+                resolvedSourceClip.originalSourcePath = sourcePath;
+                resolvedSourceClip.durationSamples = request.sourceDurationSamples;
+                resolvedSourceClip.sampleRate = request.sourceSampleRate;
+                resolvedSourceClip.channelCount = request.sourceChannelCount;
+                resolvedSourceClip.bitDepth = request.sourceBitDepth;
+                resolvedSourceClip.sourceTrimStartSamples = 0;
+                resolvedSourceClip.sourceTrimEndSamples = resolvedSourceClip.durationSamples;
+                mw::core::normalizeAudioClipTrim(resolvedSourceClip);
             }
 
             PreparedArrangementClip prepared;
             prepared.request = request;
-            prepared.sourceClip = *sourceClip;
+            prepared.sourceClip = std::move(resolvedSourceClip);
             prepared.sourcePath = sourcePath;
             preparedClips.push_back(std::move(prepared));
         }
@@ -25121,7 +25209,13 @@ void MainComponent::selectTrackFromManagerPage()
             return false;
         }
 
-        const auto placementSourceClip = preparedClips.front().sourceClip;
+        const auto placementSourceIt = std::find_if(preparedClips.begin(), preparedClips.end(), [](const auto& prepared)
+        {
+            return prepared.sourceClip.id > 0;
+        });
+        const auto placementSourceClip = placementSourceIt != preparedClips.end()
+            ? placementSourceIt->sourceClip
+            : preparedClips.front().sourceClip;
         const auto requestedFormat = placementSourceClip.savedFormat;
         const auto outputChannels = channelsCombo.getSelectedId() == 1 ? 1 : 2;
         const auto qualityKbps = getSelectedAudioClipQualityKbps();
@@ -25135,9 +25229,19 @@ void MainComponent::selectTrackFromManagerPage()
         if (renderThread.joinable())
             renderThread.join();
 
+        const auto renderMainClipCount = static_cast<int>(std::count_if(preparedClips.begin(), preparedClips.end(), [](const auto& prepared)
+        {
+            return !prepared.request.editorOnlyAuxSource;
+        }));
+        const auto renderAuxClipCount = static_cast<int>(preparedClips.size()) - renderMainClipCount;
+
         cancelRenderRequested = false;
         setRenderingState(true);
-        logMessage("AudioClip Editor Arrangement: rendering " + juce::String(static_cast<int>(preparedClips.size())) + " arranged clip(s) to a new AudioClip track.");
+        logMessage("AudioClip Editor Arrangement: rendering "
+            + juce::String(renderMainClipCount)
+            + " Main clip(s) and "
+            + juce::String(renderAuxClipCount)
+            + " Aux clip(s) to a new AudioClip track.");
 
         renderThread = std::thread(
             [this,
