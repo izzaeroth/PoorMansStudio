@@ -12,7 +12,8 @@ namespace mw::core
         SF2,
         SFZ,
         WAV,
-        VST3
+        VST3,
+        CLAP
     };
 
     inline std::string sampleBackendTypeToString(SampleBackendType type)
@@ -23,6 +24,24 @@ namespace mw::core
             case SampleBackendType::SFZ: return "SFZ";
             case SampleBackendType::WAV: return "WAV";
             case SampleBackendType::VST3: return "VST3";
+            case SampleBackendType::CLAP: return "CLAP";
+            default: return "None";
+        }
+    }
+
+    enum class EffectSlotBackendType
+    {
+        None,
+        VST3,
+        CLAP
+    };
+
+    inline std::string effectSlotBackendTypeToString(EffectSlotBackendType type)
+    {
+        switch (type)
+        {
+            case EffectSlotBackendType::VST3: return "VST3";
+            case EffectSlotBackendType::CLAP: return "CLAP";
             default: return "None";
         }
     }
@@ -46,12 +65,24 @@ namespace mw::core
         }
     };
 
-    inline constexpr std::size_t maxVstEffectSlots = 2;
+    inline constexpr std::size_t maxEffectSlots = 2;
+    inline constexpr std::size_t maxVstEffectSlots = maxEffectSlots;
 
     struct VstEffectSlotAssignment
     {
         bool enabled = false;
+        EffectSlotBackendType backendType = EffectSlotBackendType::VST3;
         VstPluginAssignment plugin;
+
+        bool isVst3Plugin() const
+        {
+            return backendType == EffectSlotBackendType::VST3 && plugin.hasPluginIdentity();
+        }
+
+        bool isClapPlugin() const
+        {
+            return backendType == EffectSlotBackendType::CLAP && plugin.hasPluginIdentity();
+        }
     };
 
     struct VstEffectsAssignment

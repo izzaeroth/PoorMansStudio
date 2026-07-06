@@ -56,11 +56,17 @@ release/
 releases/
 dist/
 
-# Local/user VST3 plugins and future external host binaries
+# Local/user VST3 plugins and external host binaries
 workspace/vst3/*
 !workspace/vst3/README.md
 workspace/vst_host/*
 !workspace/vst_host/README.md
+
+# Local/user CLAP plugins and external CLAP host binaries
+workspace/clap/*
+!workspace/clap/README.md
+workspace/clap_host/*
+!workspace/clap_host/README.md
 
 # OS/editor noise
 .DS_Store

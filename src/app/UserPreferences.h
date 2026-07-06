@@ -39,6 +39,10 @@ namespace mw::app
         int vstMaxOpenPluginWindows = 4;
         std::string vstGraphicsProfileSummary;
         bool vstExperimentalWarningAcknowledged = false;
+
+        bool clapCompatibilityWarningsEnabled = true;
+        bool clapSafePluginUiMode = false;
+        int clapMaxOpenPluginWindows = 4;
     };
 
     class UserPreferencesStore

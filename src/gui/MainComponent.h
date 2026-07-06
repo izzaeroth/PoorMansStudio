@@ -14,12 +14,17 @@
 #include <utility>
 #include <vector>
 #include <map>
+#include <mutex>
 
 #include "core/Project.h"
 #include "audio/SoundFontPresetReader.h"
 #include "audio/RenderJob.h"
 #include "audio/AudioClipRecorder.h"
 #include "vst/VstPluginTypes.h"
+#include "clap/ClapPluginTypes.h"
+#include "clap/ClapLiveInstrumentSession.h"
+#include "clap/ClapLiveEffectSession.h"
+#include "clap/ClapLiveDirectPreviewEngine.h"
 #include "gui/AudioClipEditorComponent.h"
 #include "gui/PianoRollComponent.h"
 
@@ -424,6 +429,9 @@ namespace mw::gui
     };
     struct VstHostHelperStatusSnapshot
     {
+        juce::String displayName = "VST Host Helper";
+        juce::String helperFolderHint = "workspace\\vst_host";
+        juce::String helperExecutableName = "PoorMansStudioVstHost.exe";
         bool checked = false;
         bool executableFound = false;
         bool versionOk = false;
@@ -455,9 +463,19 @@ namespace mw::gui
         juce::StringArray getMenuBarNames() override;
         juce::PopupMenu getMenuForIndex(int topLevelMenuIndex, const juce::String& menuName) override;
         void menuItemSelected(int menuItemID, int topLevelMenuIndex) override;
+
         void requestCloseWithSaveAsPrompt(std::function<void()> exitCallback);
 
     private:
+        juce::PopupMenu buildWindowMenu();
+        juce::PopupMenu buildVstPluginMenu() const;
+        juce::PopupMenu buildClapPluginMenu() const;
+        bool hasOpenAuxiliaryWindows() const;
+        bool hasOpenPluginWindows() const;
+        juce::String makePluginWindowTrackMenuLabel(int trackIndex) const;
+        juce::String makePluginWindowInstrumentMenuLabel(int trackIndex) const;
+        juce::String makePluginWindowEffectMenuLabel(int effectWindowKey) const;
+
         void chooseMusicXml();
         void chooseMusicXmlAfterUnsavedCheck();
         void openProjectFile();
@@ -563,8 +581,11 @@ namespace mw::gui
         mw::core::SampleBackendType getProjectDefaultBackendType() const;
         std::filesystem::path getProjectDefaultLibraryPath(mw::core::SampleBackendType backendType) const;
         std::optional<mw::vst::VstPluginDescriptor> getProjectDefaultVstPluginDescriptor();
+        std::optional<mw::clap::ClapPluginDescriptor> getProjectDefaultClapPluginDescriptor();
         void applyVstPluginDescriptorToAssignment(mw::core::InstrumentAssignment& assignment, const mw::vst::VstPluginDescriptor& descriptor) const;
+        void applyClapPluginDescriptorToAssignment(mw::core::InstrumentAssignment& assignment, const mw::clap::ClapPluginDescriptor& descriptor) const;
         void captureProjectDefaultVstPluginSelection();
+        void captureProjectDefaultClapPluginSelection();
         void seedTrackSoundLibraryFromProjectDefaults(mw::core::Track& track);
         void seedMissingTrackSoundLibrariesFromProjectDefaults(mw::core::Project& project);
         void refreshTrackSoundLibraryDisplay();
@@ -574,15 +595,27 @@ namespace mw::gui
         void showScannedVstInstrumentChooserDialog(const juce::String& title,
                                                   const juce::String& message,
                                                   std::function<void(const mw::vst::VstPluginDescriptor&)> onChoose);
+        void showScannedClapInstrumentChooserDialog(const juce::String& title,
+                                                   const juce::String& message,
+                                                   std::function<void(const mw::clap::ClapPluginDescriptor&)> onChoose);
         void scanVstPlugins(bool showSummary);
         void openVstPluginManagerWindow();
         void openVstSettingsWindow();
+        void openClapSettingsWindow();
+        void scanClapPlugins(bool showSummary);
+        void validateClapPluginCandidatesWithHelper();
+        void openClapPluginManagerWindow();
+        void refreshClapHostHelperStatusCache();
+        void showClapHostHelperStatusWindow();
+        void closeAllClapPluginWindows();
         void refreshVstGraphicsProfile(bool firstLaunchAutoDetect);
         juce::String runVstHostHelperCommandForStatus(const juce::File& helperFile, const juce::String& argument, int timeoutMs, int& exitCode);
         void refreshVstHostHelperStatusCache();
         void showVstHostHelperStatusWindow();
         void assignSelectedTrackVstPlugin(const mw::vst::VstPluginDescriptor& descriptor);
-        void applyVstPluginDescriptorToEffectSlot(mw::core::VstPluginAssignment& slot, const mw::vst::VstPluginDescriptor& descriptor) const;
+        void assignSelectedTrackClapPlugin(const mw::clap::ClapPluginDescriptor& descriptor);
+        void applyVstPluginDescriptorToEffectSlot(mw::core::VstEffectSlotAssignment& slot, const mw::vst::VstPluginDescriptor& descriptor) const;
+        void applyClapPluginDescriptorToEffectSlot(mw::core::VstEffectSlotAssignment& slot, const mw::clap::ClapPluginDescriptor& descriptor) const;
         void populateVstEffectCombo();
         void syncVstEffectControlsFromSelection();
         void applySelectedTrackVstEffectSlots();
@@ -592,13 +625,34 @@ namespace mw::gui
         void openSelectedTrackVstPluginUi();
         void openSelectedTrackVstEffectUi(int effectSlotIndex = 0);
         void renderSelectedTrackVstEffectTestSample(int effectSlotIndex = 0);
+        void renderVstInstrumentTestNoteForTrack(int trackIndex);
         void renderVstEffectTestSampleForTrack(int trackIndex, int effectSlotIndex);
+        void renderClapInstrumentTestNoteForTrack(int trackIndex, bool playAudition = true, bool useLiveAuditionTransport = false, bool useSelectedTrackNotes = false);
+        void preflightSelectedTrackClapInstrumentLiveReadiness();
+        void armSelectedTrackClapLiveEngineSession();
+        void disarmClapLiveEngineSession(bool logIfInactive = true);
+        void showClapLiveEngineSessionStatus();
+        void probeArmedClapLiveProcessBridge();
+        void renderSelectedTrackWithArmedClapLiveBridgeForAudition(int trackIndex);
+        bool startSelectedTrackClapDirectAudition(int trackIndex);
+        bool tryStartSelectedTrackClapMainTransportPreview(int trackIndex);
+        bool tryStartMultiTrackClapProjectPreview();
+        void closeClapProjectPreviewTrackSessions();
+        void startSelectedTrackClapInstrumentLiveAudition();
+        void startClapInstrumentLiveAuditionPlayback(const std::filesystem::path& wavPath, int trackIndex);
+        void stopClapInstrumentLiveAudition(bool deleteTempFile = true);
+        void beginClapDirectPreviewCompletionPolling();
+        void cancelClapDirectPreviewCompletionPolling();
+        void scheduleClapDirectPreviewCompletionPoll(int generation);
+        void handleClapDirectPreviewCompletionPoll(int generation);
         juce::String captureOpenVstPluginStateForTrack(int trackIndex, bool updateTrackAssignment, bool logCapture);
         juce::String captureOpenVstEffectStateForTrack(int trackIndex, int effectSlotIndex, bool updateTrackAssignment, bool logCapture);
         int captureOpenVstPluginStatesForPreview(const juce::String& contextLabel);
         int captureOpenVstPluginStatesForProjectSave();
         bool closeVstPluginWindowForTrack(int trackIndex, const juce::String& reason = {});
         void closeAllVstPluginWindows();
+        int closePluginEditorWindowGroups(bool includeVst, bool includeClap);
+        void closeAllPluginWindows();
         void closeAllOpenWindows();
         void finishClosingAllOpenWindows();
 
@@ -727,6 +781,7 @@ namespace mw::gui
         void setVstCompatibilityWarningsEnabled(bool enabled);
         void showVstExperimentalWarningIfNeeded();
         bool selectedTrackHasAppliedVstPlugin() const;
+        bool selectedTrackHasAppliedClapInstrument() const;
         bool selectedTrackHasOpenableVstEffect(int effectSlotIndex) const;
         void updateOpenVstPluginButtonState();
         bool areHelperBubblesEnabled() const { return helperBubblesEnabled; }
@@ -814,7 +869,7 @@ namespace mw::gui
         juce::TextButton applyBackendButton {"Apply Project Defaults"};
         juce::TextButton applyTrackButton {"Apply Track Settings"};
         juce::TextButton changeTrackLibraryButton {"Change Library"};
-        juce::TextButton openVstPluginButton {"Open VST Instrument"};
+        juce::TextButton openVstPluginButton {"Open Plugin Instrument"};
         juce::TextButton openVstEffectButton {"Open Slot 1"};
         juce::TextButton openVstEffect2Button {"Open Slot 2"};
         juce::TextButton trackSfzButton {"Track SFZ"};
@@ -1054,9 +1109,14 @@ namespace mw::gui
         std::unique_ptr<juce::DocumentWindow> audioClipEditorWindow;
         std::unique_ptr<juce::DocumentWindow> vstPluginManagerWindow;
         std::unique_ptr<juce::DocumentWindow> vstSettingsWindow;
+        std::unique_ptr<juce::DocumentWindow> clapSettingsWindow;
+        std::unique_ptr<juce::DocumentWindow> clapPluginManagerWindow;
         std::unique_ptr<juce::DocumentWindow> vstHostHelperStatusWindow;
+        std::unique_ptr<juce::DocumentWindow> clapHostHelperStatusWindow;
         std::map<int, std::unique_ptr<juce::DocumentWindow>> vstPluginEditorWindows;
         std::map<int, std::unique_ptr<juce::DocumentWindow>> vstEffectEditorWindows;
+        std::map<int, std::unique_ptr<juce::DocumentWindow>> clapEffectEditorWindows;
+        std::map<int, std::unique_ptr<juce::DocumentWindow>> clapInstrumentEditorWindows;
         std::map<int, int> windowMenuVstInstrumentCommandToTrack;
         std::map<int, int> windowMenuVstEffectCommandToKey;
         std::unique_ptr<juce::DocumentWindow> projectInfoWindow;
@@ -1086,6 +1146,74 @@ namespace mw::gui
         std::filesystem::path audioRecorderTestTempWavPath;
         bool audioRecorderTestActive = false;
         bool audioRecorderTestPlaybackActive = false;
+
+        struct ClapLiveEngineArmedSession
+        {
+            int trackIndex = -1;
+            juce::String trackName;
+            std::filesystem::path pluginPath;
+            juce::String pluginName;
+            juce::String pluginUid;
+            std::string stateBase64;
+            bool capturedOpenEditorState = false;
+            bool liveInstanceOpen = false;
+            bool liveStateRestored = false;
+            bool liveAudioPortsAvailable = false;
+            bool liveStartedProcessing = false;
+            int liveProcessedBlocks = 0;
+            int liveLastProcessStatus = -1;
+            juce::String liveLastProcessStatusText;
+            juce::String liveNoteDialectSummary;
+            juce::String liveInstanceMessage;
+            bool callbackBridgePrepared = false;
+            bool callbackDirectOutputEnabled = false;
+            int callbackBridgeScheduledEvents = 0;
+            int callbackBridgeMaxEventsPerBlock = 0;
+            std::int64_t callbackBridgeTotalSamples = 0;
+            juce::String callbackBridgeMessage;
+            int sampleRate = 48000;
+            int channelCount = 2;
+            int blockSize = 512;
+            int midiNoteCount = 0;
+            std::int64_t armedAtMillis = 0;
+        };
+
+        std::optional<ClapLiveEngineArmedSession> clapLiveEngineArmedSession;
+        std::unique_ptr<mw::clap::ClapLiveInstrumentSession> clapLiveInstrumentSession;
+        std::mutex clapLiveSessionProcessMutex;
+
+        struct ClapLiveProjectPreviewEffectSession
+        {
+            int slotIndex = -1;
+            juce::String displayName;
+            std::unique_ptr<mw::clap::ClapLiveEffectSession> session;
+            std::mutex processMutex;
+        };
+
+        struct ClapLiveProjectPreviewTrackSession
+        {
+            int trackIndex = -1;
+            juce::String trackName;
+            std::unique_ptr<mw::clap::ClapLiveInstrumentSession> session;
+            std::mutex processMutex;
+            std::vector<std::unique_ptr<ClapLiveProjectPreviewEffectSession>> effectSessions;
+        };
+
+        std::vector<std::unique_ptr<ClapLiveProjectPreviewEffectSession>> clapLiveSelectedTrackPreviewEffectSessions;
+        std::vector<std::unique_ptr<ClapLiveProjectPreviewTrackSession>> clapLiveProjectPreviewTrackSessions;
+
+        juce::AudioFormatManager clapLiveAuditionFormatManager;
+        juce::AudioDeviceManager clapLiveAuditionDeviceManager;
+        juce::AudioSourcePlayer clapLiveAuditionSourcePlayer;
+        juce::AudioTransportSource clapLiveAuditionTransport;
+        std::unique_ptr<juce::AudioFormatReaderSource> clapLiveAuditionReaderSource;
+        std::filesystem::path clapLiveAuditionTempWavPath;
+        int clapLiveAuditionTrackIndex = -1;
+        bool clapLiveAuditionPlaybackActive = false;
+        mw::clap::ClapLiveDirectPreviewEngine clapLiveDirectPreviewEngine;
+        bool clapLiveDirectPreviewProjectMode = false;
+        bool clapLiveDirectPreviewCompletionPollActive = false;
+        int clapLiveDirectPreviewCompletionPollGeneration = 0;
         double audioRecorderMicGainDb = 0.0;
         bool audioRecorderTrackLiveEffectEnabled = false;
         std::optional<std::filesystem::path> audioRecordingSessionFolderPath;
@@ -1175,14 +1303,19 @@ namespace mw::gui
         int vstWarningStyleId = 1;
         int vstMaxOpenPluginWindows = 4;
         bool vstExperimentalWarningAcknowledged = false;
+        bool clapCompatibilityWarningsEnabled = true;
+        bool clapSafePluginUiMode = false;
+        int clapMaxOpenPluginWindows = 4;
         mw::vst::GraphicsProfile vstGraphicsProfile;
         VstHostHelperStatusSnapshot vstHostHelperStatus;
+        VstHostHelperStatusSnapshot clapHostHelperStatus;
         HelperTooltipLookAndFeel helperTooltipLookAndFeel;
         std::unique_ptr<juce::TooltipWindow> helperTooltipWindow;
 
         std::vector<std::filesystem::path> detectedSoundFonts;
         std::vector<std::filesystem::path> detectedSfzFiles;
         std::vector<mw::vst::VstPluginDescriptor> detectedVstPlugins;
+        std::vector<mw::clap::ClapPluginDescriptor> detectedClapPlugins;
         std::vector<mw::audio::SoundFontPreset> detectedPresets;
         std::optional<mw::core::Project> currentProject;
         std::optional<std::filesystem::path> currentProjectFilePath;

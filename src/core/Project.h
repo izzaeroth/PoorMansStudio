@@ -49,9 +49,9 @@ namespace mw::core
         std::filesystem::path sfzPath;
         std::filesystem::path sfizzRenderPath;
 
-        // Project-level VST3 default. This is the source used when the project
-        // backend is set to VST3 before importing/adding tracks. Each track still
-        // receives its own independent plugin assignment and state after seeding.
+        // Project-level plugin defaults. These are the sources used when the project
+        // backend is set to VST3 or CLAP before importing/adding tracks. Each track
+        // still receives its own independent plugin assignment and state after seeding.
         std::filesystem::path vst3PluginPath;
         std::string vst3PluginName;
         std::string vst3PluginVendor;
@@ -59,6 +59,14 @@ namespace mw::core
         std::string vst3PluginCategory;
         std::string vst3PluginUid;
         std::string vst3PluginCompatibilitySummary;
+
+        std::filesystem::path clapPluginPath;
+        std::string clapPluginName;
+        std::string clapPluginVendor;
+        std::string clapPluginVersion;
+        std::string clapPluginCategory;
+        std::string clapPluginUid;
+        std::string clapPluginCompatibilitySummary;
 
         std::string baseFileName = "rendered_score";
 
@@ -71,7 +79,7 @@ namespace mw::core
         bool albumArtEnabled = false;
         std::filesystem::path albumArtPath;
 
-        int backendId = 1;      // 1 = SF2/FluidSynth, 2 = SFZ/sfizz-render, 3 = VST3 Plugin
+        int backendId = 1;      // 1 = SF2/FluidSynth, 2 = SFZ/sfizz-render, 3 = VST3 Plugin, 4 = CLAP Plugin
         int outputFormatId = 1; // 1 = WAV, 2 = FLAC, 3 = MP3, 4 = OGG, 5 = M4A
         int audioClipFormatId = 1; // 1 = WAV, 2 = FLAC, 3 = MP3, 4 = OGG, 5 = M4A
         int audioClipQualityKbps = 320;

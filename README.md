@@ -12,7 +12,7 @@ It is intentionally practical: bring in MIDI or score material, clean up tracks,
 - Create MIDI tracks from score/MIDI files.
 - Create AudioClip tracks from imported, recorded, or rendered AudioClip arrangement audio.
 - Edit notes in the main editor and in dedicated Piano Roll windows.
-- Edit AudioClip source trim non-destructively, enhance the full AudioClip source into a new generated copy, freeze a kept range, arrange repeated or overlapping local clips, preview the arrangement, and render it into a new AudioClip track.
+- Edit AudioClip source trim non-destructively, enhance the full AudioClip source into a new generated copy, freeze a kept range, arrange repeated or overlapping local clips, add editor-only Aux source trims into the arrangement, preview the arrangement, and render it into a new mixed AudioClip track.
 - Keep one Piano Roll window per track so track edits stay understandable.
 - Organize track groups, song sections, sequence assignments, ordering, names, and track layout through the Track Manager.
 - Save projects as `.mwproj` files with project-relative media paths.
@@ -22,9 +22,10 @@ It is intentionally practical: bring in MIDI or score material, clean up tracks,
 - Use SF2/SF3 SoundFonts through FluidSynth.
 - Use SFZ instruments through sfizz-render.
 - Use experimental VST3 instrument plugins through JUCE VST3 hosting.
+- Use experimental CLAP instruments and effects through the CLAP scanner/manager, editor windows, snapshots, offline render paths, and guarded direct/live preview paths.
 - Set project defaults for future imported/new MIDI tracks.
 - Apply per-track settings intentionally so existing tracks are not overwritten accidentally.
-- Switch a track between SF2/SF3/SFZ/VST3 without deleting its MIDI notes.
+- Switch a track between SF2/SF3/SFZ/VST3/CLAP without deleting its MIDI notes.
 - Preserve notes when changing libraries; the instrument assignment changes, the music stays.
 
 ### VST3 Plugin Support
@@ -40,7 +41,7 @@ Current VST3 support includes:
 - VST editor host windows use a small toolbar under the title bar for **Apply Changes**; tiny plugin UIs get a wider minimum host size while remaining resizable.
 - Manual override for plugins that are safe instruments or effect candidates but detected as unknown/unsupported.
 - One VST plugin editor window per track instrument assignment and one VST effect editor window per track/effect slot.
-- Track-owned VST editor toolbar with **Apply Changes**, a compact target label such as `Track #1 - S1 - Reverb`, and **Test Effect** for effect editors.
+- Track-owned VST editor toolbar with **Apply Changes**, **Test Instrument** for instrument editors, a compact target label such as `Track #1 - S1 - Reverb`, and **Test Effect** for effect editors.
 - Per-track VST state save/restore so two tracks using the same plugin can keep different sounds.
 - VST state excluded from normal host-side note/edit undo-redo history.
 - VST Host Helper Status from the VST Plugins menu, backed by the helper executable.
@@ -48,16 +49,41 @@ Current VST3 support includes:
 
 Normal VST3 instrument hosting is still mostly in-process, so a plugin crash can still close the main app. The helper executable provides isolated checks and groundwork for future risky plugin work.
 
+### CLAP Plugin Support
+
+CLAP support is experimental and newer than the VST3 path. It is designed to preserve the existing offline render/export workflow while adding guarded direct/live preview when the project is safe for it.
+
+Current CLAP support includes:
+
+- CLAP scanning from `workspace/clap` and standard CLAP locations where available.
+- CLAP Plugin Manager with instrument/effect cataloging and user-facing **CLAP Instrument** / **CLAP Effect** labels.
+- CLAP Settings / Compatibility for plugin graphics adapter choice, maximum open CLAP windows, Safe CLAP Plugin UI Mode, and **Refresh Adapter List**.
+- CLAP Host Helper Status from the CLAP Plugins menu, backed by the helper foundation under `workspace/clap_host`.
+- CLAP instrument editor windows with **Apply Changes**, **Test Instrument**, snapshots, and explicit state capture.
+- CLAP effect editor windows for track Effect Slot 1 / Slot 2 with **Apply Changes**, **Test Effect**, snapshots, and explicit state capture.
+- Offline CLAP instrument rendering and CLAP effect processing for render/export and fallback preview paths.
+- Direct CLAP preview for compatible selected-track and CLAP-only multi-track projects through the live scheduler/callback bridge.
+- Guarded live CLAP Effect Slot 1 / Slot 2 routing during direct CLAP preview when the selected effects are CLAP effects.
+- Fallback to the existing rendered/temp-WAV preview path for mixed projects, unsupported routing, audio clips, non-CLAP effects, or unsafe live-preview situations.
+
+Direct CLAP preview is not the same as final export. Render/export paths still use the saved project state and offline processing so output remains repeatable and compatible with the existing render workflow.
+
 ### Preview, Render, And Export
 
 - Preview a selected track, selected sequence, Piano Roll area, enhanced AudioClip source preview, AudioClip arrangement, or the full project.
+- Compatible CLAP selected-track and CLAP-only project previews may play through the guarded direct/live CLAP preview path; mixed or unsupported cases use the rendered/temp-WAV fallback.
 - Render the full project, selected track, selected sequence, or stems depending on render settings.
 - Export WAV, FLAC, MP3, and OGG audio.
+- Attach album art to MP3 renders when Output Format is MP3.
 - Export MIDI for use in other tools.
-- Configure sample rate, bitrate, channels, output format, and render metadata.
+- Configure sample rate, bitrate, channels, output format, render metadata, and MP3 album art where supported.
 - Use FFmpeg for audio conversion/mixing/compressed output support.
 - Use `workspace/exports` as the default user-facing render/export destination.
 
+
+### MP3 Album Art For Renders
+
+The main window includes **Attach Album Art** under **Edit Info** for final MP3 renders. The option is enabled only when **Output Format** is **MP3**. Checking it opens an image picker for PNG, JPG, or JPEG artwork. Saved projects keep the selected image under `input/album_art`; unsaved projects stage the image temporarily until Save Project or Save As commits it into the saved project folder. The option is for final MP3 renders only, not temporary previews, Render To Track outputs, MIDI export, or non-MP3 audio. Non-MP3 formats keep the album-art checkbox unavailable, so WAV, FLAC, OGG, and MIDI renders do not attempt to embed cover art.
 
 ### Export Folder Behavior
 
@@ -78,7 +104,7 @@ Render Settings retention applies consistently to non-WAV exports too. When **Ke
 ## Normal User Workflow
 
 1. Choose a project backend in Project Defaults.
-2. Choose the matching library, preset, SFZ file, or VST3 plugin.
+2. Choose the matching library, preset, SFZ file, VST3 plugin, or CLAP plugin.
 3. Click **Apply Project Defaults** before importing or adding new MIDI tracks.
 4. Import MusicXML, MXL, MIDI, audio, or open an existing `.mwproj` project.
 5. Organize tracks and sequences.
@@ -101,12 +127,17 @@ PoorMansStudio/
   THIRD_PARTY_NOTICES.txt
   resources/
   src/
+    audio/
+    clap/
+    clap_host_helper/
+    gui/
   workspace/
     docs/
     exports/
     ffmpeg/
     fluidsynth/
     input/
+      album_art/
     projects/
     settings/
     sfizz/
@@ -115,6 +146,9 @@ PoorMansStudio/
     temp/
     themes/
     vst3/
+    vst_host/
+    clap/
+    clap_host/
   external/
     JUCE/
 ```
@@ -125,14 +159,17 @@ The `external/JUCE` folder is required for building from source. It is not bundl
 
 ```text
 workspace/
-  input/        import staging area
+  input/        import staging area, including project album_art metadata images when used
   exports/      default render/export destination for audio, MIDI, and kept WAV sidecars/stems
   projects/     .mwproj project folders
   soundfonts/   user SF2/SF3 files
   fluidsynth/   optional FluidSynth runtime/tool folder
   ffmpeg/       optional FFmpeg runtime/tool folder
   sfz/          user SFZ instruments and sample packs
-  vst3/         portable/test VST3 bundles
+  vst3/         portable/test VST3 bundles and shared plugin test WAV
+  vst_host/     built VST helper executable/runtime helper location
+  clap/         portable/test CLAP bundles and CLAP notes
+  clap_host/    built CLAP helper executable/runtime helper location
   sfizz/        optional sfizz-render runtime/tool folder
   settings/     user settings
   temp/         temporary render/cache files
@@ -146,7 +183,7 @@ Projects should live under:
 workspace/projects/<Project Name>/
 ```
 
-AudioClip media is not embedded into the `.mwproj` file. Newly imported files, Save / Apply recorded takes, enhanced AudioClip copies, and rendered AudioClip arrangements for unsaved projects stage first under the active `workspace/temp/recordings/rec_...` session. **Save Project** is the commit point that moves attached staged media into the saved project folder under `input/audio/imported` or `input/audio/recorded`. Import Audio and Render To Track should not create a new folder under `workspace/projects` until the project is actually saved, and they should not leave unreferenced media inside an already saved project folder if the user later discards changes. Choosing **Discard** from New/Open/Start From File/Exit unsaved-change prompts removes the active staged AudioClip session so abandoned imports, takes, enhanced copies, and unsaved arrangement renders do not carry into the next project. Move or share the whole saved project folder, not just the `.mwproj` file.
+AudioClip media and album-art image files are not embedded into the `.mwproj` file. Newly imported files, Save / Apply recorded takes, enhanced AudioClip copies, and rendered AudioClip arrangements for unsaved projects stage first under the active `workspace/temp/recordings/rec_...` session. **Save Project** is the commit point that moves attached staged media into the saved project folder under `input/audio/imported` or `input/audio/recorded`. Import Audio and Render To Track should not create a new folder under `workspace/projects` until the project is actually saved, and they should not leave unreferenced media inside an already saved project folder if the user later discards changes. Choosing **Discard** from New/Open/Start From File/Exit unsaved-change prompts removes the active staged AudioClip session so abandoned imports, takes, enhanced copies, and unsaved arrangement renders do not carry into the next project. Move or share the whole saved project folder, not just the `.mwproj` file.
 
 ## Build Environment Overview
 
@@ -161,9 +198,9 @@ Recommended build environment:
 - Windows 10 or Windows 11 SDK.
 - MSBuild.
 - C++ CMake tools for Windows.
-- CMake 3.24 or newer.
+- CMake 3.24 or newer; current local validation uses CMake 4.4.0-rc3.
 - Git for Windows, recommended for obtaining/updating JUCE.
-- JUCE source tree at `external/JUCE`.
+- JUCE source tree at `external/JUCE`; current local validation uses JUCE 8.0.14.
 - C++20-capable compiler.
 
 The project CMake file currently requires:
@@ -173,7 +210,7 @@ cmake_minimum_required(VERSION 3.24)
 set(CMAKE_CXX_STANDARD 20)
 ```
 
-JUCE's own CMake support requires CMake 3.22 or newer, but this project requires 3.24 or newer.
+JUCE's own CMake support requires CMake 3.22 or newer, but this project requires 3.24 or newer. The current development setup is using JUCE 8.0.14 and CMake 4.4.0-rc3.
 
 ## Visual Studio Community Setup
 
@@ -229,9 +266,9 @@ These are needed to build the app from source:
 | MSVC C++ build tools | C++ compiler/linker | Required for compiling the JUCE/C++ app. |
 | Windows SDK | Windows headers/libraries | Installed through the C++ workload/components. |
 | MSBuild | Visual Studio build engine | Used by Visual Studio CMake generators. |
-| CMake 3.24+ | Configures/generates builds | The project uses CMake directly. |
+| CMake 3.24+ | Configures/generates builds | The project uses CMake directly. Current local setup uses CMake 4.4.0-rc3. |
 | Git | Cloning/updating source and JUCE | Optional if JUCE is copied manually, recommended otherwise. |
-| JUCE source tree | C++ app framework | Must exist at `external/JUCE`. Build-time source dependency, not a separate runtime install. |
+| JUCE source tree | C++ app framework | Must exist at `external/JUCE`. Current local setup uses JUCE 8.0.14. Build-time source dependency, not a separate runtime install. |
 
 ## Runtime Dependencies And Resources
 
@@ -239,12 +276,13 @@ These are used when running the built app or rendering projects:
 
 | Runtime item | Purpose | Bundled? |
 | --- | --- | --- |
-| FluidSynth | SF2/SF3 SoundFont rendering | May be placed/configured in workspace; not a JUCE dependency. |
-| FFmpeg | Audio conversion, mixing, compressed exports | May be placed/configured in workspace. |
+| FluidSynth | SF2/SF3 SoundFont rendering | Current local setup uses FluidSynth 2.5.6. May be placed/configured in workspace; not a JUCE dependency. |
+| FFmpeg | Audio conversion, mixing, compressed exports | Current local setup uses a latest Windows FFmpeg build. May be placed/configured in workspace. |
 | sfizz-render | SFZ rendering | May be placed/configured in workspace. |
 | SoundFonts / SF3 files | User instrument libraries | User supplied. |
 | SFZ sample packs | User instrument libraries | User supplied. |
-| VST3 plugins | Experimental plugin instruments | User supplied or installed system-wide. |
+| VST3 plugins | Experimental plugin instruments/effects | User supplied or installed system-wide. |
+| CLAP plugins | Experimental plugin instruments/effects | User supplied or installed system-wide; direct preview support is guarded and falls back when unsafe. |
 | Audio/MIDI drivers/devices | Playback, input, preview | Provided by the OS/audio interface. |
 
 **JUCE is not a runtime dependency for users of the compiled app.** JUCE code is compiled into the application binary during the build.
@@ -464,6 +502,18 @@ C:\Program Files\Common Files\VST3
 
 A VST3 plugin may be a `.vst3` bundle folder. Keep the bundle intact. Do not point the app at inner DLLs under `Contents\x86_64-win`.
 
+### CLAP Plugins
+
+CLAP support is experimental.
+
+Portable/test CLAP bundles can live under:
+
+```text
+workspace/clap/
+```
+
+System CLAP install locations vary by plugin vendor. Keep `.clap` bundles intact and scan the folder that contains the plugin bundle. Use the CLAP Plugin Manager to scan, review supported instruments/effects, and open compatible editor windows. Use **CLAP Settings...** for graphics adapter and Safe CLAP Plugin UI Mode choices. Use **CLAP Plugins > CLAP Host Helper Status...** to check the helper foundation status.
+
 ## Troubleshooting Build Problems
 
 ### CMake says JUCE was not found
@@ -510,6 +560,10 @@ The app built correctly, but runtime tools are missing or not configured. Check 
 
 The VST3 feature is experimental and hosted in-process. Save projects before testing unfamiliar plugins. Use **Apply Changes** after editing plugin UI state. If a plugin repeatedly crashes, remove it from the active assignment or mark it unavailable in the VST3 Plugin Manager.
 
+### CLAP plugin crashes, freezes, or does not preview live
+
+CLAP support is experimental. Save projects before testing unfamiliar plugins. Use **Apply Changes** after editing plugin UI state; direct CLAP preview uses the current saved/applied track state except for the explicit Test Instrument button, which captures the open editor state for the test. If direct CLAP preview cannot start, if the project contains unsupported routing, or if the plugin is unsafe for the guarded live path, Poor Man's Studio falls back to the rendered/temp-WAV preview path where possible.
+
 ### VST Host Helper Foundation
 
 The source tree includes a small out-of-process helper target named `PoorMansStudioVstHost`. A local build copies it to:
@@ -529,6 +583,16 @@ The helper currently provides conservative command-line groundwork for isolated 
 
 Normal VST3 instrument hosting and the Track Live Effect recorder monitor path remain in-process. The helper is groundwork for risky scanning, plugin editor isolation, state capture, offline helper rendering, and later shared-memory live processing. The app checks the helper once at startup and exposes the cached result through **VST Plugins > VST Host Helper Status...**.
 
+### CLAP Host Helper Foundation
+
+The source tree also includes CLAP host/helper groundwork under `src/clap_host_helper`. A local build may copy helper output to:
+
+```text
+workspace/clap_host/
+```
+
+The app exposes the cached helper status through **CLAP Plugins > CLAP Host Helper Status...**. CLAP plugin editor windows, scan/manager workflows, offline render fallback, and guarded direct preview are kept separate from the visible helper status command so the normal CLAP menu stays focused on user-facing actions.
+
 ## Documentation
 
 - Comprehensive PDF user guide: `workspace/docs/PoorMansStudio_User_Guide.pdf`
@@ -536,6 +600,26 @@ Normal VST3 instrument hosting and the Track Live Effect recorder monitor path r
 - Detailed setup/build guide: `workspace/docs/SETUP_AND_BUILD_GUIDE.txt`
 
 Use the in-app Help menu to open the guides when running the app.
+
+### Current Plugin Menus And Window Menu
+
+The top-level plugin menus are intentionally compact:
+
+```text
+VST Plugins
+  Scan VST3 Plugins
+  VST3 Plugin Manager...
+  VST3 Settings...
+  VST Host Helper Status...
+
+CLAP Plugins
+  Scan CLAP Plugins
+  CLAP Plugin Manager...
+  CLAP Settings...
+  CLAP Host Helper Status...
+```
+
+Plugin editor cleanup lives in the **Window** menu as **Close All Plugin Windows**, near the regular **Close All Open Windows** command. **Refresh Adapter List** lives inside VST3 Settings and CLAP Settings, not as a top-level plugin-menu command.
 
 ### VST3 Plugin Manager Categories
 
@@ -564,7 +648,7 @@ Unassigned, disabled, or bypassed slots are skipped. Open Slot 1/2 is unavailabl
 
 Use **Apply Track Settings** as the clear commit point for track-level effect choices: slot assignments, Enable, Bypass, mute/solo, volume, and other track controls. Use **Apply Changes** inside a VST editor only after changing plugin parameters; that editor button saves the plugin state for the owning track and slot.
 
-Imported AudioClip source media stays dry. Recorded AudioClip media can be dry or wet depending on the selected track's enabled VST effect state at recording time. During offline preview/export, enabled non-bypassed slots are applied to temporary processed WAV files and those temporary files are mixed into the render without rewriting the source media. AudioClip Enhancement / Repair creates temporary previews or generated enhanced copies without overwriting the original source. New AudioClip media stages in the active `workspace/temp/recordings/rec_...` session when the project is unsaved; **Save Project** moves only applied/attached staged clips into the saved project folder, while **Discard** removes the current staging session instead of leaving abandoned media for a later project.
+Imported AudioClip source media stays dry. Recorded AudioClip media can be dry or wet depending on the selected track's enabled VST effect state at recording time. During offline preview/export, enabled non-bypassed slots are applied to temporary processed WAV files and those temporary files are mixed into the render without rewriting the source media. AudioClip Enhancement / Repair creates temporary previews or generated enhanced copies without overwriting the original source. New AudioClip media and selected MP3 album-art images stage in the active `workspace/temp/recordings/rec_...` session when the project is unsaved; **Save Project** moves only applied/attached staged clips into the saved project folder, while **Discard** removes the current staging session instead of leaving abandoned media for a later project.
 
 ### AudioClip Editor Arrangement Workflow
 
@@ -572,9 +656,11 @@ The AudioClip Editor provides non-destructive source trimming and a local arrang
 
 Use the top waveform to set the kept range. Drag only the green Start handle or red End handle, or type trim values directly, then use **Apply Trim** to commit source trim metadata. The close warning in the AudioClip Editor applies only to pending source-trim edits. Applying or discarding pending trim does not delete or roll back any new arrangement track already created with **Render To Track**.
 
-Use **Freeze Trim** to lock the current kept range for arrangement. Then click in the arrangement lane to place it. Clicking again places another copy of the same frozen range, which is the intended loop/repeat workflow. Transparent colored clips make overlaps visible. Use **Clip #** and **Delete Clip** to remove a selected placed clip. **Extend +10s** adds workspace; the horizontal scroll is free-form.
+Use **Freeze Trim** to lock the current kept range for arrangement. Then click in the arrangement lane to place it. Clicking again places another copy of the same frozen Main range, which is the intended loop/repeat workflow. **Append Clip** places the frozen Main trim at the current audible arrangement end. Use **Clip #**, **Clip Start**, **Move Clip**, and **Delete Clip** to place, move, and remove selected clips. Transparent colored clips make overlaps visible, and the selected clip is drawn on top so overlapping clips remain editable. **Extend +10s** adds workspace; the horizontal scroll is free-form.
 
-**Preview Arrangement** auditions the local arrangement without creating a new track. **Render To Track** creates a new imported-style AudioClip track from the arrangement. The rendered file length follows the last audible placed clip, not the visible arrangement-window length, so extra empty workspace does not add dead air. Saved projects write the generated media under `input/audio/imported`; unsaved projects stage it in temp and migrate it into `input/audio/imported` when the project is saved.
+**Load Aux Source** opens an editor-only Aux audio file trimmer. The Aux source is not added as a project track and is not saved as its own project media. Freeze a range in the Aux window and click **Append to Main** to add it to the main arrangement at the current audible end. Main clips are labeled like `#1 Main`; Aux clips are labeled like `#3 Aux`. Closing the Aux window does not remove appended Aux blocks, and loading another Aux file later does not overwrite earlier Aux blocks. Keep the original Aux source file available until Preview Arrangement or Render To Track completes.
+
+**Preview Arrangement** auditions the local Main/Aux arrangement without creating a new track. **Render To Track** creates one new imported-style AudioClip track from the mixed arrangement. The rendered file length follows the last audible placed clip, not the visible arrangement-window length, so extra empty workspace does not add dead air. Track Volume and Master Volume apply to AudioClip material during preview/render/mix. Saved projects write the generated media under `input/audio/imported`; unsaved projects stage it in temp and migrate it into `input/audio/imported` when the project is saved.
 
 ### AudioClip Enhancement / Repair
 
@@ -599,3 +685,16 @@ The editor toolbar also includes **Snapshot** slots. Each VST instrument and VST
 Poor Man's Studio can list the graphics adapters reported by Windows for VST plugin editor windows. The default choice is **System Default / Auto**, which lets Windows and the plugin choose the rendering path.
 
 If multiple adapters are available, you may choose one manually. The selected adapter is a preferred graphics adapter for VST plugin editor windows, not a guarantee; some plugins, drivers, or Windows graphics settings may still choose a different rendering path. This setting does not affect audio render quality. Adapters are labeled as **Hardware** or **Software** when that information is available. Poor Man's Studio does not classify adapters as integrated or dedicated, and it does not use video memory size to make that decision. The adapter list is cached from the last manual refresh and reused on future launches; it is only replaced when you use **Refresh Adapter List** again. The cached adapter rows are stored separately in `workspace/settings/vst_graphics_adapters.txt`; the normal user preferences file keeps only the compact numeric preferred adapter option.
+
+### CLAP Plugin Graphics Adapter And Compatibility
+
+CLAP Settings mirrors the VST3 graphics-adapter pattern where practical. The default choice is **System Default / Auto**, which lets Windows and the plugin decide. **Refresh Adapter List** updates the cached adapter list. **Max Open CLAP Windows** limits how many CLAP editor windows can be open at once, and **Safe CLAP Plugin UI Mode** is available as a compatibility option for fragile plugin editors.
+
+Open CLAP editor tweaks are not silently committed during arming or preview. Use **Apply Changes** in the CLAP editor when you want the plugin state saved to the project. **Test Instrument** captures the current open editor state for its one-off test without applying it to the project, while **Test Effect** processes the shared bundled test sample through the effect.
+
+### Track And Master Gain Range
+
+The main **Track Vol** and **Master Vol** sliders range from `0.00` to `3.00`. `1.00` is normal unity gain. Values above `1.00` boost the signal and may clip, especially when several tracks are mixed together. Render/export and guarded CLAP direct preview use the same shared gain limit so the UI, render path, and live-preview path agree.
+
+
+Comprehensive user guide: https://github.com/izzaeroth/PoorMansStudio/blob/main/workspace/docs/PoorMansStudio_User_Guide.pdf

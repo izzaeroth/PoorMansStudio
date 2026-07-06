@@ -417,7 +417,15 @@ namespace
         if (value == "SFZ") return mw::core::SampleBackendType::SFZ;
         if (value == "WAV") return mw::core::SampleBackendType::WAV;
         if (value == "VST3") return mw::core::SampleBackendType::VST3;
+        if (value == "CLAP") return mw::core::SampleBackendType::CLAP;
         return mw::core::SampleBackendType::None;
+    }
+
+    mw::core::EffectSlotBackendType effectSlotBackendFromString(const std::string& value)
+    {
+        if (value == "VST3" || value == "vst3") return mw::core::EffectSlotBackendType::VST3;
+        if (value == "CLAP" || value == "clap") return mw::core::EffectSlotBackendType::CLAP;
+        return mw::core::EffectSlotBackendType::None;
     }
 
     void writeStringField(std::ofstream& file, const std::string& key, const std::string& value, bool comma = true)
@@ -461,6 +469,13 @@ namespace mw::serialization
         writeStringField(file, "projectDefaultVST3Category", settings.vst3PluginCategory);
         writeStringField(file, "projectDefaultVST3Uid", settings.vst3PluginUid);
         writeStringField(file, "projectDefaultVST3Compatibility", settings.vst3PluginCompatibilitySummary);
+        writeStringField(file, "projectDefaultCLAPPath", settings.clapPluginPath.string());
+        writeStringField(file, "projectDefaultCLAPName", settings.clapPluginName);
+        writeStringField(file, "projectDefaultCLAPVendor", settings.clapPluginVendor);
+        writeStringField(file, "projectDefaultCLAPVersion", settings.clapPluginVersion);
+        writeStringField(file, "projectDefaultCLAPCategory", settings.clapPluginCategory);
+        writeStringField(file, "projectDefaultCLAPUid", settings.clapPluginUid);
+        writeStringField(file, "projectDefaultCLAPCompatibility", settings.clapPluginCompatibilitySummary);
         writeStringField(file, "baseFileName", settings.baseFileName);
         writeStringField(file, "metadataTitle", settings.metadataTitle);
         writeStringField(file, "metadataArtist", settings.metadataArtist);
@@ -561,7 +576,8 @@ namespace mw::serialization
             const auto& instrument = t.getInstrument();
             const auto& mixer = t.getMixerSettings();
             auto serializedVst3 = instrument.vst3;
-            if (instrument.backendType != mw::core::SampleBackendType::VST3)
+            if (instrument.backendType != mw::core::SampleBackendType::VST3
+                && instrument.backendType != mw::core::SampleBackendType::CLAP)
                 serializedVst3 = {};
             file << "    {\n";
             file << "      \"name\": \"" << escapeJsonString(t.getName()) << "\",\n";
@@ -620,6 +636,7 @@ namespace mw::serialization
                 const auto& effectSlot = vstEffects.slots[effectSlotIndex];
                 file << "          {\n";
                 file << "            \"enabled\": " << (effectSlot.enabled ? "true" : "false") << ",\n";
+                file << "            \"backendType\": \"" << mw::core::effectSlotBackendTypeToString(effectSlot.backendType) << "\",\n";
                 file << "            \"plugin\": ";
                 writeVstPluginAssignmentObject(file, effectSlot.plugin, "            ");
                 file << "\n";
@@ -694,6 +711,13 @@ namespace mw::serialization
             settings.vst3PluginCategory = getString(settingsObject, "projectDefaultVST3Category");
             settings.vst3PluginUid = getString(settingsObject, "projectDefaultVST3Uid");
             settings.vst3PluginCompatibilitySummary = getString(settingsObject, "projectDefaultVST3Compatibility");
+            settings.clapPluginPath = getString(settingsObject, "projectDefaultCLAPPath");
+            settings.clapPluginName = getString(settingsObject, "projectDefaultCLAPName");
+            settings.clapPluginVendor = getString(settingsObject, "projectDefaultCLAPVendor");
+            settings.clapPluginVersion = getString(settingsObject, "projectDefaultCLAPVersion");
+            settings.clapPluginCategory = getString(settingsObject, "projectDefaultCLAPCategory");
+            settings.clapPluginUid = getString(settingsObject, "projectDefaultCLAPUid");
+            settings.clapPluginCompatibilitySummary = getString(settingsObject, "projectDefaultCLAPCompatibility");
             settings.baseFileName = getString(settingsObject, "baseFileName", project.getName());
             settings.metadataTitle = getString(settingsObject, "metadataTitle");
             settings.metadataArtist = getString(settingsObject, "metadataArtist");
@@ -830,7 +854,8 @@ namespace mw::serialization
                 if (!vstObject.empty())
                     instrument.vst3 = parseVstPluginAssignmentObject(vstObject);
 
-                if (instrument.backendType != mw::core::SampleBackendType::VST3)
+                if (instrument.backendType != mw::core::SampleBackendType::VST3
+                    && instrument.backendType != mw::core::SampleBackendType::CLAP)
                     instrument.vst3 = {};
 
                 track.setInstrumentAssignment(instrument);
@@ -852,9 +877,12 @@ namespace mw::serialization
                     mw::core::VstEffectSlotAssignment slot;
                     const bool legacyEnabled = vstEffects.enabled && vstEffects.slots.empty();
                     slot.enabled = getBool(effectSlotObject, "enabled", legacyEnabled);
+                    slot.backendType = effectSlotBackendFromString(getString(effectSlotObject, "backendType", "VST3"));
                     const auto effectPluginObject = extractObject(effectSlotObject, "plugin");
                     if (!effectPluginObject.empty())
                         slot.plugin = parseVstPluginAssignmentObject(effectPluginObject);
+                    if (slot.backendType == mw::core::EffectSlotBackendType::None && slot.plugin.hasPluginIdentity())
+                        slot.backendType = mw::core::EffectSlotBackendType::VST3;
                     vstEffects.slots.push_back(std::move(slot));
                 }
 

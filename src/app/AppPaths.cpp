@@ -142,6 +142,16 @@ namespace mw::app
         return workspaceFolder() / "vst_host";
     }
 
+    std::filesystem::path AppPaths::clapFolder()
+    {
+        return workspaceFolder() / "clap";
+    }
+
+    std::filesystem::path AppPaths::clapHostFolder()
+    {
+        return workspaceFolder() / "clap_host";
+    }
+
     std::filesystem::path AppPaths::projectsFolder()
     {
         return workspaceFolder() / "projects";

@@ -27,9 +27,23 @@ Contents
 23. Final Documentation Production Notes
 24. Glossary
 
+Current UI screenshot update
+============================
+The guide PDF has been refreshed with current screenshots for the main window, VST Plugins menu, CLAP Plugins menu, Window menu, and CLAP Settings / Compatibility window.
+
+Current top-level plugin menus are intentionally compact:
+
+Menu | Current user-facing entries
+--- | ---
+VST Plugins | Scan VST3 Plugins; VST3 Plugin Manager; VST3 Settings; VST Host Helper Status
+CLAP Plugins | Scan CLAP Plugins; CLAP Plugin Manager; CLAP Settings; CLAP Host Helper Status
+Window | Main UI; Close All Open Windows; Close All Plugin Windows; tool-window status or open editor switchers
+
+Refresh Adapter List is kept inside VST3 Settings and CLAP Settings. Close All Plugin Windows lives under the Window menu.
+
 1. Quick Start
 ==============
-Poor Man's Studio is a local Windows desktop music workstation for building and rendering small to medium music projects without requiring a full commercial DAW. It focuses on practical import, edit, preview, record, and render workflows using local tools such as FluidSynth, sfizz, FFmpeg, and optional VST3 plugins.
+Poor Man's Studio is a local Windows desktop music workstation for building and rendering small to medium music projects without requiring a full commercial DAW. It focuses on practical import, edit, preview, record, and render workflows using local tools such as FluidSynth, sfizz, FFmpeg, and optional VST3 and CLAP plugins.
 NOTE: The most important workflow rule is simple: Project Defaults affect new/imported MIDI tracks; Apply Track Settings commits changes to the selected track; Save Project commits project metadata and attached staged AudioClip media.
 
 Fastest path from import to rendered audio
@@ -60,7 +74,7 @@ Unwanted temporary previews or abandoned staging sessions | Clean Temp | Deletin
 
 Project
 -------
-A project is the full song/session state: tracks, sequences, note data, AudioClip references, instrument assignments, VST effect-slot assignments, render settings, and user-visible metadata. Saved projects use a .mwproj file plus media folders beside it.
+A project is the full song/session state: tracks, sequences, note data, AudioClip references, instrument assignments, VST effect-slot assignments, render settings, album-art selection for MP3 renders, and user-visible metadata. Saved projects use a .mwproj file plus media folders beside it.
 
 Track
 -----
@@ -72,7 +86,11 @@ A sequence is an arrangement view or working region for a project. Sequence cont
 
 Staged media
 ------------
-Staged media is audio that belongs to the current unsaved session but has not yet been committed to a saved project folder. Imported audio and applied recording takes can both stage under workspace\temp\recordings\rec_... until Save Project commits them.
+Staged media is audio that belongs to the current unsaved session but has not yet been committed to a saved project folder. Imported audio, applied recording takes, generated enhanced copies, rendered AudioClip arrangements, and MP3 album art can stage under workspace\temp\recordings\rec_... until Save Project commits them.
+
+Editor-only Aux source
+----------------------
+An Aux source is an external audio file loaded only inside the AudioClip Editor to help build a mixed Main/Aux arrangement. It is not added as a project track and is not saved as its own project media. After an Aux trim is appended to the main arrangement, the arranged Aux block keeps its own source path and trim range for preview and Render To Track. Keep the original Aux file available until you render the arrangement.
 
 Dry and wet AudioClip audio
 ---------------------------
@@ -80,7 +98,7 @@ Imported AudioClip files remain dry. Recorded AudioClip files can be dry or wet 
 
 Offline processing
 ------------------
-Preview, Test Effect, selected-track render, selected-sequence render, AudioClip enhancement preview, AudioClip arrangement preview, and final export use offline render paths. Track Live Effect monitoring is separate from whether recording is printed wet; it controls whether you hear the wet track effect while recording.
+Preview, Test Effect, selected-track render, selected-sequence render, AudioClip enhancement preview, AudioClip arrangement preview, and final export use offline render paths. Track Live Effect monitoring is separate from whether recording is printed wet; it controls whether you hear the wet track effect while recording. Final MP3 renders can embed selected album art; non-MP3 outputs leave album art unavailable.
 
 3. Main Window Reference
 ========================
@@ -94,8 +112,9 @@ Start From File | Create a project from MusicXML, MXL, MIDI, audio, or an existi
 Open .mwproj | Open an existing saved Poor Man's Studio project. | Open the .mwproj from inside the saved project folder so relative media paths resolve.
 Save Project | Save metadata and commit attached staged AudioClip media. | Use this after importing/recording audio if you want to keep the media with the project.
 Base Name | Sets the base filename for rendered output. | Use a clean song or cue name; avoid characters that are awkward in file paths.
-Output Format | Chooses WAV, FLAC, MP3, OGG, or another available format. | Use WAV for high-quality intermediates and MP3/OGG for smaller sharing copies.
+Output Format | Chooses WAV, FLAC, MP3, OGG, or another available format. | Use WAV for high-quality intermediates and MP3/OGG for smaller sharing copies. Attach Album Art is available only when MP3 is selected.
 Export Folder | Chooses where final renders are written. | Defaulting to workspace\exports keeps rendered files away from project source media.
+Edit Info / Attach Album Art | Edit visible render metadata and optionally choose cover art for MP3 output. | Attach Album Art opens an image picker only for MP3 renders; other output formats keep it unavailable.
 
 Project Defaults controls
 -------------------------
@@ -123,8 +142,8 @@ VST Effect 2 dropdown | Assign slot 2 of the selected track's VST Effect chain. 
 VST Effect 2 Enable | Turn slot 2 processing on/off for preview/export. | Slot 2 can be used by itself or after slot 1.
 VST Effect 2 Bypass | Temporarily skip slot 2 while keeping assignment/state. | Bypass is different from disabling because the slot remains configured.
 Open Slot 2 | Open the editor for VST Effect Slot 2. | Available only after slot 2 has an assigned plugin and Enable is checked; the custom title bar uses fuller wording such as Track: #1 - Lead Vocal | S2 | Plugin: Compressor.
-Track Volume | Adjust selected-track volume. | Use Apply Track Settings.
-Master Volume | Adjust overall project output volume. | Preview/render uses the saved value.
+Track Volume | Adjust selected-track volume. | Use Apply Track Settings. AudioClip tracks use this value during preview/render/mix.
+Master Volume | Adjust overall project output volume. | Preview/render uses the saved value for MIDI and AudioClip output.
 Mute / Solo | Control selected-track participation in preview/render. | Use Apply Track Settings.
 
 Preview and render controls
@@ -212,6 +231,7 @@ Imported AudioClip | workspace\temp\recordings\rec_...\input\audio\imported | in
 Applied recording take | workspace\temp\recordings\rec_... | input\audio\recorded | Save Project
 Rendered AudioClip arrangement before first project save | workspace\temp\recordings\rec_...\input\audio\imported | input\audio\imported | Save Project
 Enhanced AudioClip copy before first project save | workspace\temp\recordings\rec_...\input\audio\imported | input\audio\imported | Save Project
+MP3 album-art image before first project save | workspace\temp\recordings\rec_...\input\album_art | input\album_art | Save Project
 Preview files, including enhanced AudioClip previews | workspace\temp or render temp folders | Not committed | Clean Temp or automatic cleanup
 VST test-effect WAV output | temporary effect/test location | Not committed | Automatic or Clean Temp cleanup
 Final exports | Chosen export folder | Usually workspace\exports | Render/export
@@ -279,7 +299,7 @@ Select a track, open Piano Roll, make note edits, preview a small region, adjust
 
 9. AudioClip Import And Editor Workflow
 =======================================
-AudioClip import lets you bring external audio into a project as a track. Imported audio can be used dry, processed through the two-slot VST Effect chain during preview/export, edited non-destructively in the AudioClip Editor, enhanced into a new full-source generated copy, arranged into repeated or overlapping local clips, or mixed with MIDI-rendered tracks.
+AudioClip import lets you bring external audio into a project as a track. Imported audio can be used dry, processed through the two-slot VST Effect chain during preview/export, edited non-destructively in the AudioClip Editor, enhanced into a new full-source generated copy, arranged into repeated or overlapping local clips, combined with editor-only Aux source trims, or mixed with MIDI-rendered tracks.
 
 Import behavior by project state
 --------------------------------
@@ -319,15 +339,24 @@ This feature is enhancement and repair, not true restoration. A poor low-bitrate
 
 AudioClip Editor local arrangement lane
 ---------------------------------------
-The lower arrangement lane is a local sketch area for building a new AudioClip from the currently frozen kept range. Click Freeze Trim to lock the current kept range for placement. Then click in the arrangement lane to place the frozen clip. Click again in another position to place another copy of the same frozen clip. This repeat-click behavior is intentional and is the normal way to build loops or repeated phrases.
+The lower arrangement lane is a local sketch area for building a new AudioClip from frozen Main and Aux trims. Click Freeze Trim to lock the current Main kept range for placement. Then click in the arrangement lane to place the frozen Main clip. Click again in another position to place another copy of the same frozen Main clip. This repeat-click behavior is intentional and is the normal way to build loops or repeated phrases. Blank-lane clicks place the frozen Main trim; Aux trims are added intentionally from the Aux Source File window with Append to Main.
 
-Placed clips are shown as transparent colored blocks so overlaps remain visible. Use the Clip # selector to choose an arranged clip. Delete Clip removes the selected clip number. Extend +10s increases the available arrangement workspace. Horizontal movement is free-form rather than page-based. The arrangement workspace length is only editing space; it is not the final render length.
+Append Clip places the frozen Main trim at the current audible end of the arrangement. Clip Start and Move Clip let you type an exact start time for the selected arranged clip. Placed clips are shown as transparent colored blocks so overlaps remain visible. Use the Clip # selector to choose an arranged clip. The selected clip is drawn on top and gets drag priority in overlap areas. Delete Clip removes the selected clip number. Extend +10s increases the available arrangement workspace. Horizontal movement is free-form rather than page-based. The arrangement workspace length is only editing space; it is not the final render length.
+
+
+AudioClip Editor Aux source workflow
+------------------------------------
+Load Aux Source opens a normal audio-file picker for an editor-only secondary source. The Aux source is used only inside the currently open AudioClip Editor arrangement workflow; it is not added as a project track and is not saved as its own project media.
+
+The Aux Source File window provides trim handles, Trim Start / Trim End fields, Preview Trim, Play Full Source, Freeze / Unfreeze, and Append to Main. It does not have its own arrangement lane. Freeze a range in the Aux window, then click Append to Main to add that frozen Aux trim to the end of the main arrangement. Closing the Aux window does not remove Aux clips already appended to the main arrangement.
+
+Main arrangement clips are labeled with their source role, such as #1 Main, #2 Main, #3 Aux, and #4 Aux. Preview Arrangement and Render To Track mix Main and Aux clips together. Loading another Aux source later does not overwrite earlier Aux blocks; each appended Aux block keeps the source file path and trim range it had when it was appended. Only the final Render To Track result becomes a new project AudioClip track.
 
 Preview Arrangement and Render To Track
 ---------------------------------------
-Preview Arrangement renders a temporary preview of the current local arrangement. It lets you hear repeated and overlapping clips without creating a new track, changing the original source file, or committing new project media.
+Preview Arrangement renders a temporary preview of the current local arrangement. It lets you hear repeated, overlapping, Main, and Aux clips without creating a new track, changing the original source file, or committing new project media.
 
-Render To Track renders the local arrangement into a new imported-style AudioClip track. The rendered file length follows the last audible placed clip, not the visible arrangement-window length. If the arrangement window extends to a later time but the last clip ends earlier, the exported arrangement stops at the last clip end to avoid trailing dead air.
+Render To Track renders the local Main/Aux arrangement into one new imported-style AudioClip track. The rendered file length follows the last audible placed clip, not the visible arrangement-window length. If the arrangement window extends to a later time but the last clip ends earlier, the exported arrangement stops at the last clip end to avoid trailing dead air. Track Volume and Master Volume are applied when AudioClip material is mixed during preview/render.
 
 If the project is already saved, the new rendered arrangement media is written under the project input audio imported folder. If the project has not been saved yet, the new rendered arrangement is staged in the current temporary AudioClip session and is migrated into the saved project's input audio imported folder when Save Project or Save As completes. The original source media stays untouched and remains where it was.
 
@@ -491,6 +520,12 @@ Keep WAV stems | Preserve per-track audio stems. | Use when you want to inspect 
 Keep MIDI stems | Preserve per-track MIDI stem files. | Use for debugging instrument/render problems.
 Cleanup rendered output | Remove temporary render sidecars when appropriate. | Use to keep workspace tidy after exports.
 
+MP3 album art for renders
+-------------------------
+Attach Album Art is a render/export option in the main window near Edit Info. It is available only when Output Format is MP3. Checking it opens an image picker for PNG, JPG, or JPEG artwork. It is for final MP3 renders, not temporary previews, Render To Track outputs, MIDI export, or non-MP3 audio formats.
+
+Saved projects store selected artwork under input\album_art. Unsaved projects stage the selected image temporarily and migrate it into input\album_art when Save Project or Save As completes. WAV, FLAC, OGG, MIDI, and other non-MP3 outputs keep Attach Album Art unavailable and do not attempt to embed cover art.
+
 How effects are applied during render
 -------------------------------------
 Track type | First stage | Effect stage | Output stage
@@ -522,6 +557,9 @@ New Project, Open Project, Start From File, and Exit discard paths should remove
 
 16. Settings, Themes, And Helper Bubbles
 ========================================
+
+CLAP Settings / Compatibility includes Plugin Graphics Adapter, Refresh Adapter List, Max Open CLAP Windows, Safe CLAP Plugin UI Mode, and compatibility/details text for detected graphics adapters.
+
 
 Helper bubbles
 --------------
@@ -678,6 +716,7 @@ Extend +10s | AudioClip Editor arrangement lane | Add more visible local arrange
 Freeze Trim | AudioClip Editor | Lock the current kept source range so lane clicks place it as arranged clips.
 Helper Bubbles | Help menu | Toggle delayed tooltips/help bubbles.
 Import Audio | Start From File/import workflow | Create an AudioClip track from audio media.
+Attach Album Art | Main window render metadata controls | Pick artwork for MP3 renders only; unavailable for non-MP3 output formats.
 Load | VST editor snapshots | Load selected snapshot into the current editor.
 Mute | Track Controls | Mute selected track.
 Open Slot 1 | VST Effect 1 row | Open effect slot 1 editor after a plugin is assigned and Enable is checked.
@@ -690,8 +729,10 @@ Preview Arrangement | AudioClip Editor | Temporary preview of the local AudioCli
 Preview Project | Render controls | Temporary full-project preview.
 Record Test | AudioClip Recorder | Record/play/delete a short test.
 Render | Render controls | Final project export.
-Render To Track | AudioClip Editor | Render the local AudioClip arrangement into a new imported-style AudioClip track.
+Render To Track | AudioClip Editor | Render the local Main/Aux AudioClip arrangement into a new imported-style AudioClip track.
 Create Enhanced Copy | AudioClip Editor | Render the full AudioClip source through the selected enhancement preset and create a new imported-style AudioClip track.
+Load Aux Source | AudioClip Editor | Choose an editor-only secondary audio file for trimming and Append to Main placement; the Aux file does not become a project track.
+Append to Main | Aux Source File window | Add the frozen Aux trim to the end of the main AudioClip Editor arrangement; closing the Aux window does not remove appended Aux blocks.
 Render Selected Sequence | Render controls | Export active sequence only.
 Render Selected Track | Render controls | Export selected track only.
 Save | VST editor snapshots | Save current plugin state as a host snapshot.
@@ -725,10 +766,10 @@ Area | Purpose | Workflow notes
 Source waveform | Shows the original AudioClip source and kept range. | Drag only the green Start or red End handle to change source trim.
 Trim controls | Preview Trim, Play Full Source, Apply Trim, and Reset Trim. | Apply Trim commits source trim metadata; it does not rewrite the source file.
 Enhancement controls | Preset, Strength, Preview Enhanced, and Create Enhanced Copy. | Enhancement works on the full source and creates temp previews or a new enhanced AudioClip track without overwriting the original.
-Arrangement lane | Local placement area for repeated or overlapping frozen trim clips. | Freeze Trim, then click the lane to place or repeat the frozen range.
-Clip selector | Chooses the currently selected arranged clip number. | Delete Clip removes the selected clip.
+Arrangement lane | Local placement area for repeated or overlapping Main and Aux frozen trim clips. | Freeze Trim and click the lane for Main clips, use Append Clip for Main-at-end, or use Append to Main from an Aux Source File window for Aux clips.
+Clip selector | Chooses the currently selected arranged clip number. | Delete Clip removes the selected clip. Selected overlapping clips are drawn on top and get drag priority.
 Preview Arrangement | Auditions the current local arrangement. | Creates temporary preview audio only.
-Render To Track | Creates a new imported-style AudioClip track from the local arrangement. | Uses actual last audible clip end and ignores extra empty window space.
+Render To Track | Creates a new imported-style AudioClip track from the local Main/Aux arrangement. | Uses actual last audible clip end and ignores extra empty window space.
 
 AudioClip Recorder window
 -------------------------
@@ -781,7 +822,8 @@ Enhanced AudioClip copies that should become tracks have been created with Creat
 Recorded takes have been Save / Applied or discarded. | Avoids losing a wanted take or keeping an unwanted one.
 Track settings have been applied after changes. | Ensures dropdowns, Enable, Bypass, mute/solo, and volume are saved.
 Open VST editors have had Apply Changes clicked after parameter edits. | Captures plugin state into the project.
-Preview sounds correct. | Catches missing tools, muted tracks, or wrong effect states before saving/exporting.
+Preview sounds correct. | Catches missing tools, muted tracks, wrong effect states, missing Aux arrangement clips, missing Aux source files, or unexpected track/master volume before saving/exporting.
+If exporting MP3 with cover art, Attach Album Art points to the intended image. | Ensures the selected artwork is embedded only in MP3 renders.
 
 Before rendering final audio
 ----------------------------

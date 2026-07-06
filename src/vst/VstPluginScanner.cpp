@@ -311,6 +311,48 @@ namespace
 
         return result;
     }
+
+    std::vector<std::filesystem::path> discoverOuterVst3Bundles(const std::filesystem::path& root)
+    {
+        std::vector<std::filesystem::path> results;
+        std::error_code ec;
+
+        if (root.empty() || !std::filesystem::exists(root, ec))
+            return results;
+
+        if (hasVst3Extension(root) && !pathHasVst3Parent(root))
+        {
+            results.push_back(root);
+            return results;
+        }
+
+        if (!std::filesystem::is_directory(root, ec))
+            return results;
+
+        const auto options = std::filesystem::directory_options::skip_permission_denied;
+        std::filesystem::recursive_directory_iterator it(root, options, ec);
+        std::filesystem::recursive_directory_iterator end;
+
+        while (!ec && it != end)
+        {
+            const auto path = it->path();
+
+            if (hasVst3Extension(path))
+            {
+                if (!pathHasVst3Parent(path))
+                    results.push_back(path);
+
+                if (it->is_directory(ec))
+                    it.disable_recursion_pending();
+            }
+
+            it.increment(ec);
+            if (ec)
+                ec.clear();
+        }
+
+        return results;
+    }
 }
 
 namespace mw::vst
@@ -419,18 +461,14 @@ namespace mw::vst
             if (folder.empty() || !std::filesystem::exists(folder, ec))
                 continue;
 
-            for (const auto& entry : std::filesystem::directory_iterator(folder, ec))
+            for (const auto& path : discoverOuterVst3Bundles(folder))
             {
-                if (ec)
-                    break;
-
-                const auto path = entry.path();
-                if (!isOuterVst3Bundle(path))
-                    continue;
-
                 auto canonical = std::filesystem::weakly_canonical(path, ec);
                 if (ec)
+                {
                     canonical = path.lexically_normal();
+                    ec.clear();
+                }
 
                 const auto key = lowerCopy(canonical.string());
                 if (!seen.insert(key).second)

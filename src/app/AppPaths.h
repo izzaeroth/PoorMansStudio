@@ -19,6 +19,8 @@ namespace mw::app
         static std::filesystem::path sfzFolder();
         static std::filesystem::path vst3Folder();
         static std::filesystem::path vstHostFolder();
+        static std::filesystem::path clapFolder();
+        static std::filesystem::path clapHostFolder();
         static std::filesystem::path sfizzFolder();
         static std::filesystem::path projectsFolder();
         static std::filesystem::path projectFolderForName(const std::string& projectName);

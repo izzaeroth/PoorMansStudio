@@ -13,6 +13,7 @@
 #include "audio/AudioClipImporter.h"
 #include "audio/RenderPlan.h"
 #include "audio/RenderJob.h"
+#include "audio/GainLimits.h"
 #include "audio/RenderSettings.h"
 #include "audio/SoundFontPresetReader.h"
 #include "audio/SfzValidator.h"
@@ -21,6 +22,12 @@
 #include "import_export/MidiImporter.h"
 #include "midi/MidiExporter.h"
 #include "serialization/ProjectSerializer.h"
+#include "clap/ClapPluginScanner.h"
+#include "clap/ClapEffectEditorHost.h"
+#include "clap/ClapInstrumentHost.h"
+#include "clap/ClapLiveInstrumentSession.h"
+#include "clap/ClapLiveCallbackBridge.h"
+#include "clap/ClapSnapshotStore.h"
 #include "vst/VstPluginScanner.h"
 #include "vst/VstGraphicsProfile.h"
 #include "vst/VstInstrumentHost.h"
@@ -28,6 +35,7 @@
 #include "BinaryData.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -38,6 +46,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -57,6 +66,7 @@
 
 namespace
 {
+    constexpr double kEffectSlotPreviewTailOverscanSeconds = 12.0;
     constexpr int kDefaultMaxOpenVstPluginWindows = 4;
     constexpr int kHardMaxOpenVstPluginWindows = 12;
     constexpr int kMinimumVstEditorHostWidth = 1020;
@@ -66,8 +76,60 @@ namespace
 
     using mw::gui::WindowPendingCloseHandler;
 
+    void setSinglePluginInstrumentTestNote(mw::core::Track& track, int midiChannel)
+    {
+        track.getNotes().clear();
+        const auto quarter = mw::core::Project::ticksPerQuarterNote;
+        const int safeMidiChannel = juce::jlimit(1, 16, midiChannel <= 0 ? 1 : midiChannel);
+        track.addNote(mw::core::NoteEvent(60, 104, 0, quarter, safeMidiChannel));
+    }
+
+    std::filesystem::path sharedPluginTestSamplePath()
+    {
+        return mw::app::AppPaths::vst3Folder() / "test" / "pms_vst_effect_test_sample.wav";
+    }
+
 
 #if JUCE_WINDOWS
+    const wchar_t* clapGuiViewportWindowClassName()
+    {
+        return L"PoorMansStudioClapGuiViewport";
+    }
+
+    LRESULT CALLBACK clapGuiViewportWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        switch (message)
+        {
+            case WM_ERASEBKGND:
+                return 1;
+            default:
+                break;
+        }
+
+        return ::DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+
+    bool ensureClapGuiViewportWindowClassRegistered()
+    {
+        static ATOM atom = 0;
+        if (atom != 0)
+            return true;
+
+        WNDCLASSEXW windowClass {};
+        windowClass.cbSize = sizeof(windowClass);
+        windowClass.style = CS_HREDRAW | CS_VREDRAW;
+        windowClass.lpfnWndProc = clapGuiViewportWindowProc;
+        windowClass.hInstance = ::GetModuleHandleW(nullptr);
+        windowClass.hCursor = ::LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+        windowClass.lpszClassName = clapGuiViewportWindowClassName();
+
+        atom = ::RegisterClassExW(&windowClass);
+        if (atom != 0)
+            return true;
+
+        return ::GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    }
+
     juce::String formatMciErrorMessage(MCIERROR errorCode)
     {
         if (errorCode == 0)
@@ -121,6 +183,13 @@ namespace
         if (mb < 1024.0)
             return juce::String(mb, 1) + " MB";
         return juce::String(mb / 1024.0, 2) + " GB";
+    }
+
+    juce::String quoteCommandArgument(const juce::String& value)
+    {
+        auto escaped = value;
+        escaped = escaped.replace("\"", "\\\"");
+        return "\"" + escaped + "\"";
     }
 
     juce::String formatSecondsFromSamples(long long samples, double sampleRate)
@@ -709,7 +778,7 @@ namespace
 
     std::filesystem::path graphicsAdapterCacheFilePath()
     {
-        return mw::app::AppPaths::settingsFolder() / "vst_graphics_adapters.txt";
+        return mw::app::AppPaths::settingsFolder() / "plugin_graphics_adapters.txt";
     }
 
     bool saveGraphicsAdaptersToCacheFile(const std::vector<mw::vst::GraphicsAdapterInfo>& adapters)
@@ -722,8 +791,8 @@ namespace
         if (!output)
             return false;
 
-        output << "# Poor Man's Studio VST graphics adapter cache\n";
-        output << "# Refreshed manually from VST3 Settings. Each row is id|name|vendor|type|videoMemoryMb.\n";
+        output << "# Poor Man's Studio plugin graphics adapter cache\n";
+        output << "# Refreshed manually from Plugin Graphics Adapter settings. Each row is id|name|vendor|type|videoMemoryMb.\n";
         for (const auto& adapter : adapters)
         {
             output << percentEncodeForPreference(adapter.id) << "|"
@@ -824,6 +893,14 @@ namespace
         return juce::String(path.extension().string()).equalsIgnoreCase(".vst3");
     }
 
+    bool isLikelyClapPluginPath(const std::filesystem::path& path)
+    {
+        if (path.empty())
+            return false;
+
+        return juce::String(path.extension().string()).equalsIgnoreCase(".clap");
+    }
+
     std::filesystem::path resolveVst3BundlePath(const mw::core::InstrumentAssignment& assignment)
     {
         if (!assignment.vst3.bundlePath.empty())
@@ -837,10 +914,78 @@ namespace
         return {};
     }
 
+    std::filesystem::path resolveClapPluginPath(const mw::core::InstrumentAssignment& assignment)
+    {
+        if (!assignment.vst3.bundlePath.empty())
+            return assignment.vst3.bundlePath;
+
+        if (isLikelyClapPluginPath(assignment.sampleLibraryPath))
+            return assignment.sampleLibraryPath;
+
+        return {};
+    }
+
+    std::filesystem::path resolveClapEffectPluginPath(const mw::core::VstPluginAssignment& plugin)
+    {
+        if (isLikelyClapPluginPath(plugin.bundlePath))
+            return plugin.bundlePath;
+
+        return {};
+    }
+
+    bool hasEnabledNonClapEffectSlots(const mw::core::Track& track)
+    {
+        const auto& effects = track.getVstEffects();
+        for (std::size_t slotIndex = 0; slotIndex < mw::core::maxEffectSlots; ++slotIndex)
+        {
+            if (!effects.slotEnabled(slotIndex))
+                continue;
+
+            const auto* slot = effects.slot(slotIndex);
+            if (slot == nullptr || !slot->plugin.hasPluginIdentity())
+                continue;
+
+            if (!slot->isClapPlugin())
+                return true;
+        }
+
+        return false;
+    }
+
+    int countEnabledClapEffectSlots(const mw::core::Track& track)
+    {
+        int count = 0;
+        const auto& effects = track.getVstEffects();
+        for (std::size_t slotIndex = 0; slotIndex < mw::core::maxEffectSlots; ++slotIndex)
+        {
+            const auto* slot = effects.slot(slotIndex);
+            if (slot != nullptr && effects.slotEnabled(slotIndex) && slot->isClapPlugin())
+                ++count;
+        }
+
+        return count;
+    }
+
+    juce::String clapEffectSlotDisplayName(const mw::core::VstEffectSlotAssignment& slot, std::size_t slotIndex)
+    {
+        auto name = juce::String(slot.plugin.name).trim();
+        if (name.isEmpty() && !slot.plugin.bundlePath.empty())
+            name = juce::String(slot.plugin.bundlePath.stem().string()).trim();
+        if (name.isEmpty())
+            name = juce::String("CLAP Effect Slot ") + juce::String(static_cast<int>(slotIndex) + 1);
+        return name;
+    }
+
     bool hasResolvableVst3BundlePath(const mw::core::InstrumentAssignment& assignment)
     {
         return assignment.backendType == mw::core::SampleBackendType::VST3
             && !resolveVst3BundlePath(assignment).empty();
+    }
+
+    bool hasResolvableClapPluginPath(const mw::core::InstrumentAssignment& assignment)
+    {
+        return assignment.backendType == mw::core::SampleBackendType::CLAP
+            && !resolveClapPluginPath(assignment).empty();
     }
 
     bool repairVst3BundlePathIfPossible(mw::core::InstrumentAssignment& assignment)
@@ -862,6 +1007,25 @@ namespace
         return true;
     }
 
+    bool repairClapPluginPathIfPossible(mw::core::InstrumentAssignment& assignment)
+    {
+        if (assignment.backendType != mw::core::SampleBackendType::CLAP
+            || !assignment.vst3.bundlePath.empty())
+            return false;
+
+        const auto resolved = resolveClapPluginPath(assignment);
+        if (resolved.empty())
+            return false;
+
+        assignment.vst3.bundlePath = resolved;
+        if (assignment.sampleLibraryPath.empty())
+            assignment.sampleLibraryPath = resolved;
+        if (assignment.sampleLibraryDisplayName.empty())
+            assignment.sampleLibraryDisplayName = resolved.filename().string();
+
+        return true;
+    }
+
     juce::String getVst3TrackLibraryLabel(const mw::core::InstrumentAssignment& assignment)
     {
         juce::String label("VST3");
@@ -871,10 +1035,21 @@ namespace
         return label.isNotEmpty() ? label : juce::String("VST3");
     }
 
+    juce::String getClapTrackLibraryLabel(const mw::core::InstrumentAssignment& assignment)
+    {
+        juce::String label("CLAP");
+        const auto vendor = juce::String(assignment.vst3.vendor).trim();
+        if (vendor.isNotEmpty())
+            label << ": " << vendor;
+        return label;
+    }
+
     juce::String getTrackLibrarySummaryLabel(const mw::core::InstrumentAssignment& assignment)
     {
         if (assignment.backendType == mw::core::SampleBackendType::VST3)
             return getVst3TrackLibraryLabel(assignment);
+        if (assignment.backendType == mw::core::SampleBackendType::CLAP)
+            return getClapTrackLibraryLabel(assignment);
 
         juce::String label;
         label << mw::core::sampleBackendTypeToString(assignment.backendType) << ": ";
@@ -1061,6 +1236,463 @@ namespace
         return saveVstPluginCatalogRecords(records);
     }
 
+
+    struct ClapCatalogRecord
+    {
+        mw::clap::ClapPluginUserOverride userOverride = mw::clap::ClapPluginUserOverride::None;
+    };
+
+    std::filesystem::path clapPluginCatalogFilePath()
+    {
+        return mw::app::AppPaths::settingsFolder() / "clap_plugin_catalog.txt";
+    }
+
+    mw::clap::ClapPluginUserOverride parseClapUserOverride(const std::string& value)
+    {
+        if (value == "instrument")
+            return mw::clap::ClapPluginUserOverride::TreatAsInstrument;
+        if (value == "effect")
+            return mw::clap::ClapPluginUserOverride::TreatAsEffect;
+        if (value == "unsupported")
+            return mw::clap::ClapPluginUserOverride::TreatAsUnsupported;
+        return mw::clap::ClapPluginUserOverride::None;
+    }
+
+    std::string formatClapUserOverride(mw::clap::ClapPluginUserOverride value)
+    {
+        switch (value)
+        {
+            case mw::clap::ClapPluginUserOverride::TreatAsInstrument: return "instrument";
+            case mw::clap::ClapPluginUserOverride::TreatAsEffect: return "effect";
+            case mw::clap::ClapPluginUserOverride::TreatAsUnsupported: return "unsupported";
+            default: return "none";
+        }
+    }
+
+    std::string clapPluginCatalogKey(const mw::clap::ClapPluginDescriptor& plugin)
+    {
+        if (!plugin.uid.empty())
+            return "uid:" + sanitizeCatalogField(plugin.uid);
+
+        const auto normalized = normalizedPathForCompare(plugin.pluginPath);
+        if (!normalized.empty())
+            return "path:" + sanitizeCatalogField(normalized.string());
+
+        return "name:" + sanitizeCatalogField(plugin.vendor + ":" + plugin.displayName());
+    }
+
+    std::map<std::string, ClapCatalogRecord> loadClapPluginCatalogRecords()
+    {
+        std::map<std::string, ClapCatalogRecord> records;
+        std::ifstream file(clapPluginCatalogFilePath());
+        if (!file)
+            return records;
+
+        std::string line;
+        while (std::getline(file, line))
+        {
+            if (line.empty() || line[0] == '#')
+                continue;
+
+            std::vector<std::string> fields;
+            std::stringstream stream(line);
+            std::string field;
+            while (std::getline(stream, field, '\t'))
+                fields.push_back(field);
+
+            if (fields.empty() || fields[0].empty())
+                continue;
+
+            ClapCatalogRecord record;
+            if (fields.size() > 1)
+                record.userOverride = parseClapUserOverride(fields[1]);
+
+            records[fields[0]] = record;
+        }
+
+        return records;
+    }
+
+    bool saveClapPluginCatalogRecords(const std::map<std::string, ClapCatalogRecord>& records)
+    {
+        std::error_code ignored;
+        std::filesystem::create_directories(mw::app::AppPaths::settingsFolder(), ignored);
+
+        std::ofstream file(clapPluginCatalogFilePath());
+        if (!file)
+            return false;
+
+        file << "# Poor Man's Studio CLAP plugin catalog overrides\n";
+        file << "# key<TAB>override\n";
+
+        for (const auto& [key, record] : records)
+        {
+            if (record.userOverride == mw::clap::ClapPluginUserOverride::None)
+                continue;
+
+            file << sanitizeCatalogField(key) << '\t'
+                 << formatClapUserOverride(record.userOverride) << '\n';
+        }
+
+        return file.good();
+    }
+
+    void applyClapPluginCatalogRecords(std::vector<mw::clap::ClapPluginDescriptor>& plugins)
+    {
+        const auto records = loadClapPluginCatalogRecords();
+        for (auto& plugin : plugins)
+        {
+            plugin.kind = plugin.detectedKind;
+
+            const auto key = clapPluginCatalogKey(plugin);
+            const auto it = records.find(key);
+            if (it == records.end())
+                continue;
+
+            plugin.userOverride = it->second.userOverride;
+            if (plugin.userOverride == mw::clap::ClapPluginUserOverride::TreatAsInstrument)
+            {
+                plugin.kind = mw::clap::ClapPluginKind::Instrument;
+                plugin.classificationReason += " User override: Treat as Instrument.";
+            }
+            else if (plugin.userOverride == mw::clap::ClapPluginUserOverride::TreatAsEffect)
+            {
+                plugin.kind = mw::clap::ClapPluginKind::Effect;
+                plugin.classificationReason += " User override: Treat as Effect.";
+            }
+            else if (plugin.userOverride == mw::clap::ClapPluginUserOverride::TreatAsUnsupported)
+            {
+                plugin.kind = plugin.detectedKind;
+                plugin.classificationReason += " User override: Treat as Unsupported.";
+            }
+        }
+    }
+
+    bool updateClapPluginCatalogRecord(const mw::clap::ClapPluginDescriptor& plugin,
+                                       mw::clap::ClapPluginUserOverride overrideValue)
+    {
+        auto records = loadClapPluginCatalogRecords();
+        auto& record = records[clapPluginCatalogKey(plugin)];
+        record.userOverride = overrideValue;
+        return saveClapPluginCatalogRecords(records);
+    }
+
+    bool isClapPluginBlockedOrMissing(const mw::clap::ClapPluginDescriptor& plugin)
+    {
+        return plugin.status == mw::clap::ClapPluginScanStatus::Missing
+            || plugin.status == mw::clap::ClapPluginScanStatus::Unsupported;
+    }
+
+    bool isInstrumentLikeClapPlugin(const mw::clap::ClapPluginDescriptor& plugin)
+    {
+        return plugin.detectedKind == mw::clap::ClapPluginKind::Instrument
+            || plugin.kind == mw::clap::ClapPluginKind::Instrument
+            || plugin.userOverride == mw::clap::ClapPluginUserOverride::TreatAsInstrument;
+    }
+
+    bool isEffectLikeClapPlugin(const mw::clap::ClapPluginDescriptor& plugin)
+    {
+        return plugin.detectedKind == mw::clap::ClapPluginKind::Effect
+            || plugin.kind == mw::clap::ClapPluginKind::Effect
+            || plugin.userOverride == mw::clap::ClapPluginUserOverride::TreatAsEffect;
+    }
+
+    bool isSupportedClapInstrumentPlugin(const mw::clap::ClapPluginDescriptor& plugin)
+    {
+        return plugin.userOverride != mw::clap::ClapPluginUserOverride::TreatAsUnsupported
+            && plugin.userOverride != mw::clap::ClapPluginUserOverride::TreatAsEffect
+            && !isClapPluginBlockedOrMissing(plugin)
+            && isInstrumentLikeClapPlugin(plugin);
+    }
+
+    bool isSupportedClapEffectPlugin(const mw::clap::ClapPluginDescriptor& plugin)
+    {
+        return plugin.userOverride != mw::clap::ClapPluginUserOverride::TreatAsUnsupported
+            && !isClapPluginBlockedOrMissing(plugin)
+            && isEffectLikeClapPlugin(plugin)
+            && !isSupportedClapInstrumentPlugin(plugin);
+    }
+
+    juce::String clapPluginFinalStatusText(const mw::clap::ClapPluginDescriptor& plugin)
+    {
+        if (isClapPluginBlockedOrMissing(plugin))
+            return plugin.status == mw::clap::ClapPluginScanStatus::Missing ? "Missing" : "Unsupported / check failed";
+        if (isSupportedClapInstrumentPlugin(plugin))
+            return plugin.userOverride == mw::clap::ClapPluginUserOverride::TreatAsInstrument
+                ? "Cataloged as instrument (user enabled)"
+                : "Cataloged as instrument";
+        if (isSupportedClapEffectPlugin(plugin))
+            return plugin.userOverride == mw::clap::ClapPluginUserOverride::TreatAsEffect
+                ? "Cataloged as effect (user enabled)"
+                : "Cataloged as effect";
+        if (plugin.userOverride == mw::clap::ClapPluginUserOverride::TreatAsUnsupported)
+            return "Plugin manually marked unsupported";
+        return "Unknown - keep in library until user enables it";
+    }
+
+    juce::String clapPluginGroupName(const mw::clap::ClapPluginDescriptor& plugin)
+    {
+        if (isSupportedClapInstrumentPlugin(plugin))
+            return "Supported Instruments";
+        if (isSupportedClapEffectPlugin(plugin))
+            return "Supported Effects";
+        return "Unsupported";
+    }
+
+
+
+    mw::clap::ClapPluginKind clapKindFromHelperString(const juce::String& value)
+    {
+        const auto lower = value.trim().toLowerCase();
+        if (lower == "instrument")
+            return mw::clap::ClapPluginKind::Instrument;
+        if (lower == "effect")
+            return mw::clap::ClapPluginKind::Effect;
+        if (lower == "midi tool" || lower == "midi-tool" || lower == "miditool")
+            return mw::clap::ClapPluginKind::MidiTool;
+        return mw::clap::ClapPluginKind::Unknown;
+    }
+
+    mw::clap::ClapPluginScanStatus clapStatusFromHelperString(const juce::String& value)
+    {
+        const auto lower = value.trim().toLowerCase();
+        if (lower == "candidate")
+            return mw::clap::ClapPluginScanStatus::Candidate;
+        if (lower == "missing")
+            return mw::clap::ClapPluginScanStatus::Missing;
+        if (lower == "unsupported")
+            return mw::clap::ClapPluginScanStatus::Unsupported;
+        return mw::clap::ClapPluginScanStatus::Unknown;
+    }
+
+    std::string unescapeSimpleJsonString(std::string value)
+    {
+        std::string out;
+        out.reserve(value.size());
+
+        for (std::size_t i = 0; i < value.size(); ++i)
+        {
+            const char ch = value[i];
+            if (ch == '\\' && i + 1 < value.size())
+            {
+                const char next = value[++i];
+                switch (next)
+                {
+                    case 'n': out += '\n'; break;
+                    case 'r': out += '\r'; break;
+                    case 't': out += '\t'; break;
+                    case 'b': out += '\b'; break;
+                    case 'f': out += '\f'; break;
+                    case '\\': out += '\\'; break;
+                    case '"': out += '"'; break;
+                    default: out += next; break;
+                }
+            }
+            else
+            {
+                out += ch;
+            }
+        }
+
+        return out;
+    }
+
+    std::optional<std::string> helperJsonStringField(const juce::String& helperOutput, const std::string& key)
+    {
+        const auto raw = helperOutput.toStdString();
+        const auto marker = std::string("\"") + key + "\"";
+        auto pos = raw.find(marker);
+        if (pos == std::string::npos)
+            return std::nullopt;
+
+        pos = raw.find(':', pos + marker.size());
+        if (pos == std::string::npos)
+            return std::nullopt;
+
+        pos = raw.find('"', pos + 1);
+        if (pos == std::string::npos)
+            return std::nullopt;
+
+        std::string value;
+        bool escaped = false;
+        for (std::size_t i = pos + 1; i < raw.size(); ++i)
+        {
+            const char ch = raw[i];
+            if (escaped)
+            {
+                value += '\\';
+                value += ch;
+                escaped = false;
+                continue;
+            }
+
+            if (ch == '\\')
+            {
+                escaped = true;
+                continue;
+            }
+
+            if (ch == '"')
+                return unescapeSimpleJsonString(value);
+
+            value += ch;
+        }
+
+        return std::nullopt;
+    }
+
+    std::optional<int> helperJsonIntField(const juce::String& helperOutput, const std::string& key)
+    {
+        const auto raw = helperOutput.toStdString();
+        const auto marker = std::string("\"") + key + "\"";
+        auto pos = raw.find(marker);
+        if (pos == std::string::npos)
+            return std::nullopt;
+
+        pos = raw.find(':', pos + marker.size());
+        if (pos == std::string::npos)
+            return std::nullopt;
+
+        ++pos;
+        while (pos < raw.size() && std::isspace(static_cast<unsigned char>(raw[pos])))
+            ++pos;
+
+        std::size_t end = pos;
+        if (end < raw.size() && (raw[end] == '-' || raw[end] == '+'))
+            ++end;
+        while (end < raw.size() && std::isdigit(static_cast<unsigned char>(raw[end])))
+            ++end;
+
+        if (end == pos)
+            return std::nullopt;
+
+        try { return std::stoi(raw.substr(pos, end - pos)); }
+        catch (...) { return std::nullopt; }
+    }
+
+    std::optional<bool> helperJsonBoolField(const juce::String& helperOutput, const std::string& key)
+    {
+        const auto raw = helperOutput.toStdString();
+        const auto marker = std::string("\"") + key + "\"";
+        auto pos = raw.find(marker);
+        if (pos == std::string::npos)
+            return std::nullopt;
+
+        pos = raw.find(':', pos + marker.size());
+        if (pos == std::string::npos)
+            return std::nullopt;
+
+        ++pos;
+        while (pos < raw.size() && std::isspace(static_cast<unsigned char>(raw[pos])))
+            ++pos;
+
+        if (raw.compare(pos, 4, "true") == 0)
+            return true;
+        if (raw.compare(pos, 5, "false") == 0)
+            return false;
+        return std::nullopt;
+    }
+
+    std::vector<std::string> helperJsonStringArrayField(const juce::String& helperOutput, const std::string& key)
+    {
+        std::vector<std::string> result;
+        const auto raw = helperOutput.toStdString();
+        const auto marker = std::string("\"") + key + "\"";
+        auto pos = raw.find(marker);
+        if (pos == std::string::npos)
+            return result;
+
+        pos = raw.find('[', pos + marker.size());
+        if (pos == std::string::npos)
+            return result;
+
+        for (++pos; pos < raw.size(); ++pos)
+        {
+            while (pos < raw.size() && std::isspace(static_cast<unsigned char>(raw[pos])))
+                ++pos;
+            if (pos >= raw.size() || raw[pos] == ']')
+                break;
+            if (raw[pos] != '"')
+                continue;
+
+            std::string value;
+            bool escaped = false;
+            for (++pos; pos < raw.size(); ++pos)
+            {
+                const char ch = raw[pos];
+                if (escaped)
+                {
+                    value += '\\';
+                    value += ch;
+                    escaped = false;
+                    continue;
+                }
+                if (ch == '\\')
+                {
+                    escaped = true;
+                    continue;
+                }
+                if (ch == '"')
+                {
+                    result.push_back(unescapeSimpleJsonString(value));
+                    break;
+                }
+                value += ch;
+            }
+        }
+
+        return result;
+    }
+
+    void mergeClapHelperJsonIntoDescriptor(mw::clap::ClapPluginDescriptor& plugin, const juce::String& helperOutput)
+    {
+        if (auto value = helperJsonStringField(helperOutput, "name"); value && !value->empty())
+            plugin.name = *value;
+        if (auto value = helperJsonStringField(helperOutput, "vendor"); value)
+            plugin.vendor = *value;
+        if (auto value = helperJsonStringField(helperOutput, "version"); value)
+            plugin.version = *value;
+        if (auto value = helperJsonStringField(helperOutput, "category"); value)
+            plugin.category = *value;
+        if (auto value = helperJsonStringField(helperOutput, "uid"); value)
+            plugin.uid = *value;
+        if (auto value = helperJsonStringField(helperOutput, "description"); value)
+            plugin.description = *value;
+        if (auto value = helperJsonStringField(helperOutput, "binaryPath"); value && !value->empty())
+            plugin.binaryPath = std::filesystem::path(*value);
+        if (auto value = helperJsonStringField(helperOutput, "statusMessage"); value)
+            plugin.statusMessage = *value;
+        if (auto value = helperJsonStringField(helperOutput, "classificationReason"); value)
+            plugin.classificationReason = *value;
+        if (auto value = helperJsonStringField(helperOutput, "kind"); value)
+        {
+            plugin.detectedKind = clapKindFromHelperString(juce::String(*value));
+            plugin.kind = plugin.detectedKind;
+        }
+        if (auto value = helperJsonStringField(helperOutput, "status"); value)
+        {
+            const auto parsed = clapStatusFromHelperString(juce::String(*value));
+            if (parsed != mw::clap::ClapPluginScanStatus::Unknown)
+                plugin.status = parsed;
+        }
+        if (auto value = helperJsonIntField(helperOutput, "pluginCount"); value)
+            plugin.clapPluginCount = *value;
+        if (auto value = helperJsonIntField(helperOutput, "clapVersionMajor"); value)
+            plugin.clapVersionMajor = static_cast<unsigned int>(std::max(0, *value));
+        if (auto value = helperJsonIntField(helperOutput, "clapVersionMinor"); value)
+            plugin.clapVersionMinor = static_cast<unsigned int>(std::max(0, *value));
+        if (auto value = helperJsonIntField(helperOutput, "clapVersionRevision"); value)
+            plugin.clapVersionRevision = static_cast<unsigned int>(std::max(0, *value));
+        if (auto value = helperJsonBoolField(helperOutput, "abiProbed"); value)
+            plugin.abiProbed = *value;
+        if (auto value = helperJsonBoolField(helperOutput, "metadataOnly"); value)
+            plugin.metadataOnly = *value;
+
+        auto features = helperJsonStringArrayField(helperOutput, "features");
+        if (!features.empty())
+            plugin.features = std::move(features);
+    }
+
     bool isPluginBlockedOrMissing(const mw::vst::VstPluginDescriptor& plugin)
     {
         return plugin.failedByHost
@@ -1181,18 +1813,36 @@ namespace
                            bool compatibilityWarningsEnabled,
                            bool safePluginUiMode,
                            int warningStyleId,
-                           int maxOpenPluginWindowsIn)
+                           int maxOpenPluginWindowsIn,
+                           juce::String titleTextIn = "VST3 Settings / Compatibility",
+                           juce::String maxOpenPluginWindowsLabelTextIn = "Max Open VST Windows:",
+                           juce::String safeModeTextIn = "Safe Plugin UI Mode",
+                           juce::String safeModeTooltipIn = "Safe Plugin UI Mode opens VST plugin editors in a more cautious way to reduce crashes or unstable behavior. Plugin windows may open a little slower or with reduced UI behavior. Recommended if a plugin editor is having display issues.",
+                           juce::String helpTextIn = "System Default / Auto lets Windows and the plugin decide. Adapter choices are a preference for plugin editor windows, not a guarantee. VST3 uses this now; future CLAP editor hosting can use the same preference.",
+                           juce::String detailsFooterTextIn = "Use Help > VST Plugin Compatibility Warnings to toggle warning popups.\nCompatibility warnings are non-blocking. The selected adapter is the preferred graphics adapter for plugin editor windows. VST3 uses this now; future CLAP editor hosting can use the same preference. Some plugins, drivers, or Windows graphics settings may still choose a different rendering path. This does not affect audio render quality.",
+                           juce::String extraToggleTextIn = {},
+                           bool extraToggleInitialStateIn = false,
+                           juce::String extraToggleTooltipIn = {})
             : warningsEnabled(compatibilityWarningsEnabled),
               safeMode(safePluginUiMode),
               warningStyle(warningStyleId),
-              maxOpenPluginWindows(sanitizeMaxOpenVstPluginWindows(maxOpenPluginWindowsIn))
+              maxOpenPluginWindows(sanitizeMaxOpenVstPluginWindows(maxOpenPluginWindowsIn)),
+              titleText(std::move(titleTextIn)),
+              maxOpenPluginWindowsLabelText(std::move(maxOpenPluginWindowsLabelTextIn)),
+              safeModeText(std::move(safeModeTextIn)),
+              safeModeTooltip(std::move(safeModeTooltipIn)),
+              helpText(std::move(helpTextIn)),
+              detailsFooterText(std::move(detailsFooterTextIn)),
+              extraToggleText(std::move(extraToggleTextIn)),
+              extraToggleState(extraToggleInitialStateIn),
+              extraToggleTooltip(std::move(extraToggleTooltipIn))
         {
-            title.setText("VST3 Settings / Compatibility", juce::dontSendNotification);
+            title.setText(titleText, juce::dontSendNotification);
             title.setFont(juce::FontOptions(18.0f, juce::Font::bold));
             title.setJustificationType(juce::Justification::centredLeft);
             addAndMakeVisible(title);
 
-            preferredGpuLabel.setText("VST Plugin Graphics Adapter:", juce::dontSendNotification);
+            preferredGpuLabel.setText("Plugin Graphics Adapter:", juce::dontSendNotification);
             preferredGpuLabel.setJustificationType(juce::Justification::centredLeft);
             addAndMakeVisible(preferredGpuLabel);
 
@@ -1207,7 +1857,7 @@ namespace
             };
             addAndMakeVisible(preferredGpuCombo);
 
-            maxOpenPluginWindowsLabel.setText("Max Open VST Windows:", juce::dontSendNotification);
+            maxOpenPluginWindowsLabel.setText(maxOpenPluginWindowsLabelText, juce::dontSendNotification);
             maxOpenPluginWindowsLabel.setJustificationType(juce::Justification::centredLeft);
             addAndMakeVisible(maxOpenPluginWindowsLabel);
 
@@ -1232,9 +1882,9 @@ namespace
             };
             addAndMakeVisible(maxOpenPluginWindowsCombo);
 
-            safeModeToggle.setButtonText("Safe Plugin UI Mode");
+            safeModeToggle.setButtonText(safeModeText);
             safeModeToggle.setToggleState(safeMode, juce::dontSendNotification);
-            safeModeToggle.setTooltip("Safe Plugin UI Mode opens VST plugin editors in a more cautious way to reduce crashes or unstable behavior. Plugin windows may open a little slower or with reduced UI behavior. Recommended if a plugin editor is having display issues.");
+            safeModeToggle.setTooltip(safeModeTooltip);
             safeModeToggle.onClick = [this]
             {
                 safeMode = safeModeToggle.getToggleState();
@@ -1243,6 +1893,22 @@ namespace
                     onSafePluginUiModeChanged(safeMode);
             };
             addAndMakeVisible(safeModeToggle);
+
+            if (extraToggleText.isNotEmpty())
+            {
+                extraToggle.setButtonText(extraToggleText);
+                extraToggle.setToggleState(extraToggleState, juce::dontSendNotification);
+                if (extraToggleTooltip.isNotEmpty())
+                    extraToggle.setTooltip(extraToggleTooltip);
+                extraToggle.onClick = [this]
+                {
+                    extraToggleState = extraToggle.getToggleState();
+                    rebuildDetailsText();
+                    if (onExtraToggleChanged)
+                        onExtraToggleChanged(extraToggleState);
+                };
+                addAndMakeVisible(extraToggle);
+            }
 
             refreshButton.setButtonText("Refresh Adapter List");
             refreshButton.onClick = [this]
@@ -1259,7 +1925,7 @@ namespace
             details.setFont(juce::FontOptions(16.0f));
             addAndMakeVisible(details);
 
-            help.setText("System Default / Auto lets Windows and the plugin decide. Adapter choices are a preference for VST plugin editor windows, not a guarantee.", juce::dontSendNotification);
+            help.setText(helpText, juce::dontSendNotification);
             help.setJustificationType(juce::Justification::centredLeft);
             help.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
             addAndMakeVisible(help);
@@ -1302,6 +1968,13 @@ namespace
             safeModeToggle.setBounds(maxWindowRow.removeFromLeft(260).reduced(4, 2));
             area.removeFromTop(8);
 
+            if (extraToggleText.isNotEmpty())
+            {
+                auto extraRow = area.removeFromTop(30);
+                extraToggle.setBounds(extraRow.removeFromLeft(430).reduced(4, 2));
+                area.removeFromTop(6);
+            }
+
             help.setBounds(area.removeFromTop(44));
             area.removeFromTop(8);
             details.setBounds(area);
@@ -1310,6 +1983,7 @@ namespace
         std::function<void(const std::string&)> onPreferredGpuChanged;
         std::function<void(int)> onMaxOpenPluginWindowsChanged;
         std::function<void(bool)> onSafePluginUiModeChanged;
+        std::function<void(bool)> onExtraToggleChanged;
         std::function<void()> onRefreshRequested;
 
     private:
@@ -1384,12 +2058,14 @@ namespace
             juce::String text;
             text << "Compatibility warnings: " << (warningsEnabled ? "On" : "Off") << "\n";
             text << "Safe Plugin UI Mode: " << (safeMode ? "On" : "Off") << "\n";
+            if (extraToggleText.isNotEmpty())
+                text << extraToggleText << ": " << (extraToggleState ? "On" : "Off") << "\n";
             text << "Warning style: " << (warningStyle == 2 ? "Conservative" : (warningStyle == 3 ? "Minimal" : "Auto")) << "\n";
-            text << "Maximum open VST plugin windows: " << maxOpenPluginWindows << " (hard cap " << kHardMaxOpenVstPluginWindows << ")\n\n";
+            text << "Maximum open plugin windows: " << maxOpenPluginWindows << " (hard cap " << kHardMaxOpenVstPluginWindows << ")\n\n";
             text << "Graphics adapter list: " << (profile.detected ? "Detected" : "Not detected") << "\n";
             text << "Source: " << profile.source << "\n";
             text << "Last detected: " << profile.lastDetectedLocal << "\n";
-            text << "Selected VST plugin graphics adapter: " << selectedAdapterDisplayName() << "\n";
+            text << "Selected plugin graphics adapter: " << selectedAdapterDisplayName() << "\n";
             text << "Summary: " << profile.summary() << "\n\n";
             text << "Detected adapters:\n";
 
@@ -1412,8 +2088,7 @@ namespace
                 }
             }
 
-            text << "\nUse Help > VST Plugin Compatibility Warnings to toggle warning popups.\n";
-            text << "Compatibility warnings are non-blocking. The selected adapter is the preferred graphics adapter for VST plugin editor windows. Some plugins, drivers, or Windows graphics settings may still choose a different rendering path. This does not affect audio render quality.\n";
+            text << "\n" << detailsFooterText << "\n";
             details.setText(text, juce::dontSendNotification);
         }
 
@@ -1422,6 +2097,15 @@ namespace
         bool safeMode = false;
         int warningStyle = 1;
         int maxOpenPluginWindows = kDefaultMaxOpenVstPluginWindows;
+        juce::String titleText;
+        juce::String maxOpenPluginWindowsLabelText;
+        juce::String safeModeText;
+        juce::String safeModeTooltip;
+        juce::String helpText;
+        juce::String detailsFooterText;
+        juce::String extraToggleText;
+        bool extraToggleState = false;
+        juce::String extraToggleTooltip;
         std::vector<std::string> gpuIds;
         juce::Label title;
         juce::Label preferredGpuLabel;
@@ -1429,6 +2113,7 @@ namespace
         juce::Label maxOpenPluginWindowsLabel;
         juce::ComboBox maxOpenPluginWindowsCombo;
         juce::ToggleButton safeModeToggle;
+        juce::ToggleButton extraToggle;
         juce::TextButton refreshButton;
         juce::Label help;
         juce::TextEditor details;
@@ -1443,7 +2128,7 @@ namespace
         explicit HelperStatusContent(const mw::gui::VstHostHelperStatusSnapshot& statusIn)
             : status(statusIn)
         {
-            title.setText("VST Host Helper Status", juce::dontSendNotification);
+            title.setText(status.displayName + " Status", juce::dontSendNotification);
             title.setFont(juce::FontOptions(20.0f, juce::Font::bold));
             title.setJustificationType(juce::Justification::centredLeft);
             addAndMakeVisible(title);
@@ -1480,11 +2165,11 @@ namespace
             auto noteArea = juce::Rectangle<int>(24, 270, getWidth() - 48, 48);
             juce::String note;
             if (status.allOk())
-                note = "This is the cached startup helper check. OK only closes this status window; it does not start, stop, or restart the VST host helper.";
+                note = "This is the cached startup helper check. OK only closes this status window; it does not start, stop, or restart the helper.";
             else if (status.errorText.isNotEmpty())
-                note = "Suggested fix: rebuild the project or copy PoorMansStudioVstHost.exe into workspace\\vst_host. Details: " + status.errorText;
+                note = "Suggested fix: rebuild the project or copy " + status.helperExecutableName + " into " + status.helperFolderHint + ". Details: " + status.errorText;
             else
-                note = "Suggested fix: rebuild the project or copy PoorMansStudioVstHost.exe into workspace\\vst_host.";
+                note = "Suggested fix: rebuild the project or copy " + status.helperExecutableName + " into " + status.helperFolderHint + ".";
             g.drawFittedText(note, noteArea, juce::Justification::topLeft, 3);
 
             if (status.checkedAtLocal.isNotEmpty())
@@ -1552,8 +2237,8 @@ namespace
     class HelperStatusWindow final : public juce::DocumentWindow
     {
     public:
-        HelperStatusWindow(std::function<void()> onCloseCallback)
-            : juce::DocumentWindow("VST Host Helper Status", juce::Colours::transparentBlack, 0),
+        HelperStatusWindow(juce::String title, std::function<void()> onCloseCallback)
+            : juce::DocumentWindow(std::move(title), juce::Colours::transparentBlack, 0),
               onClose(std::move(onCloseCallback))
         {
             setUsingNativeTitleBar(false);
@@ -1956,10 +2641,10 @@ namespace
     void drawHeadphonesIcon(juce::Graphics& g, juce::Rectangle<float> area)
             {
                 area = area.reduced(3.0f);
-    
+
                 g.setColour(juce::Colour(0xff6ec6ff));
                 g.drawEllipse(area, 2.0f);
-    
+
                 auto arc = area.reduced(area.getWidth() * 0.18f, area.getHeight() * 0.22f);
                 g.setColour(juce::Colours::white.withAlpha(0.92f));
                 juce::Path headphoneArc;
@@ -1973,23 +2658,23 @@ namespace
                     true
                 );
                 g.strokePath(headphoneArc, juce::PathStrokeType(3.0f));
-    
+
                 auto leftCup = juce::Rectangle<float>(area.getX() + area.getWidth() * 0.24f, area.getY() + area.getHeight() * 0.48f, area.getWidth() * 0.16f, area.getHeight() * 0.26f);
                 auto rightCup = juce::Rectangle<float>(area.getRight() - area.getWidth() * 0.40f, area.getY() + area.getHeight() * 0.48f, area.getWidth() * 0.16f, area.getHeight() * 0.26f);
-    
+
                 g.setColour(juce::Colour(0xff6ec6ff));
                 g.fillRoundedRectangle(leftCup, 3.0f);
                 g.fillRoundedRectangle(rightCup, 3.0f);
-    
+
                 const float stemX = area.getCentreX() + area.getWidth() * 0.05f;
                 const float stemTop = area.getY() + area.getHeight() * 0.36f;
                 const float stemBottom = area.getY() + area.getHeight() * 0.62f;
-    
+
                 g.setColour(juce::Colour(0xffffe066));
                 g.drawLine(stemX, stemTop, stemX, stemBottom, 2.0f);
                 g.fillEllipse(stemX - area.getWidth() * 0.13f, stemBottom - 2.0f, area.getWidth() * 0.14f, area.getHeight() * 0.11f);
             }
-    
+
             void drawPianoKeysIcon(juce::Graphics& g, juce::Rectangle<float> area)
         {
             area = area.reduced(4.0f);
@@ -2037,7 +2722,7 @@ namespace
             g.setColour(juce::Colour(0xff6ec6ff));
             g.fillRoundedRectangle(keys.getX() + 5.0f, keys.getBottom() - 5.0f, keys.getWidth() - 10.0f, 2.0f, 1.0f);
         }
-    
+
             void drawTrackManagerIcon(juce::Graphics& g, juce::Rectangle<float> area)
             {
                 area = area.reduced(6.0f, 6.0f);
@@ -2048,9 +2733,9 @@ namespace
                 g.fillRoundedRectangle(area, 5.0f);
                 g.setColour(juce::Colour(0xff111111));
                 g.drawRoundedRectangle(area, 5.0f, 1.7f);
-    
+
                 const float rowH = area.getHeight() / 3.0f;
-    
+
                 for (int i = 0; i < 3; ++i)
                 {
                     auto row = juce::Rectangle<float>(area.getX() + 5.0f, area.getY() + rowH * static_cast<float>(i) + 4.0f, area.getWidth() - 10.0f, rowH - 7.0f);
@@ -2110,7 +2795,7 @@ namespace
                 g.setColour(juce::Colour(0xffff4d57));
                 g.fillEllipse(area.getRight() - 14.0f, area.getY() + 6.0f, 8.0f, 8.0f);
             }
-    
+
 
             void drawAudioClipEditorIcon(juce::Graphics& g, juce::Rectangle<float> area)
             {
@@ -2235,7 +2920,7 @@ namespace
             void drawEditInfoIcon(juce::Graphics& g, juce::Rectangle<float> area)
             {
                 area = area.reduced(5.0f);
-    
+
                 juce::Path tag;
                 const float notch = area.getWidth() * 0.18f;
                 tag.startNewSubPath(area.getX(), area.getY());
@@ -2244,33 +2929,33 @@ namespace
                 tag.lineTo(area.getRight(), area.getBottom());
                 tag.lineTo(area.getX(), area.getBottom());
                 tag.closeSubPath();
-    
+
                 g.setColour(juce::Colour(0xffffe066));
                 g.fillPath(tag);
                 g.setColour(juce::Colour(0xffa8871d));
                 g.strokePath(tag, juce::PathStrokeType(1.5f));
-    
+
                 g.setColour(juce::Colour(0xff202124).withAlpha(0.35f));
                 g.drawLine(area.getX() + 7.0f, area.getY() + area.getHeight() * 0.68f, area.getRight() - 8.0f, area.getY() + area.getHeight() * 0.68f, 1.5f);
-    
+
                 // Pencil body
                 const float x1 = area.getX() + area.getWidth() * 0.28f;
                 const float y1 = area.getY() + area.getHeight() * 0.70f;
                 const float x2 = area.getX() + area.getWidth() * 0.72f;
                 const float y2 = area.getY() + area.getHeight() * 0.30f;
-    
+
                 g.setColour(juce::Colour(0xfff4f4f4));
                 g.drawLine(x1, y1, x2, y2, 5.0f);
                 g.setColour(juce::Colour(0xff6ec6ff));
                 g.drawLine(x1 + 2.0f, y1 - 2.0f, x2 + 2.0f, y2 - 2.0f, 2.0f);
-    
+
                 // Pencil tip
                 juce::Path tip;
                 tip.startNewSubPath(x2, y2);
                 tip.lineTo(x2 + 7.0f, y2 - 4.0f);
                 tip.lineTo(x2 + 3.0f, y2 + 7.0f);
                 tip.closeSubPath();
-    
+
                 g.setColour(juce::Colour(0xff202124));
                 g.fillPath(tip);
             }
@@ -2705,8 +3390,8 @@ namespace
             });
         }
 
-    
-    
+
+
     class PianoRollDocumentWindow final : public juce::DocumentWindow
             {
             public:
@@ -2733,7 +3418,7 @@ namespace
                     };
 
                     editorToolbarTestButton.setButtonText("Test Effect");
-                    editorToolbarTestButton.setTooltip("Audition the current live effect editor state with the bundled VST effect test sample without committing it.");
+                    editorToolbarTestButton.setTooltip("Audition the current live effect editor state with the bundled effect test sample without committing it.");
                     editorToolbarTestButton.onClick = [this]
                     {
                         if (onEditorToolbarTestEffect)
@@ -2820,7 +3505,7 @@ namespace
                     juce::DocumentWindow::resized();
                     layoutPluginEditorToolbarControls();
                 }
-    
+
                 void closeButtonPressed() override
                 {
                     if (closeRequestPending)
@@ -2844,7 +3529,7 @@ namespace
                             safeThis->onClose();
                     });
                 }
-    
+
             private:
                 void layoutPluginEditorToolbarControls()
                 {
@@ -2916,7 +3601,9 @@ namespace
                                            std::function<void(int)> onLoadSnapshotCallbackIn = {},
                                            std::function<void(int)> onSaveSnapshotCallbackIn = {},
                                            std::function<void(int)> onClearCurrentSnapshotCallbackIn = {},
-                                           std::function<void()> onClearAllSnapshotsCallbackIn = {})
+                                           std::function<void()> onClearAllSnapshotsCallbackIn = {},
+                                           juce::String testButtonTextIn = {},
+                                           juce::String testButtonTooltipIn = {})
                     : pluginEditorContent(std::move(pluginEditorContentIn)),
                       targetText(std::move(targetTextIn)),
                       onApplyCallback(std::move(onApplyCallbackIn)),
@@ -2924,7 +3611,9 @@ namespace
                       onLoadSnapshotCallback(std::move(onLoadSnapshotCallbackIn)),
                       onSaveSnapshotCallback(std::move(onSaveSnapshotCallbackIn)),
                       onClearCurrentSnapshotCallback(std::move(onClearCurrentSnapshotCallbackIn)),
-                      onClearAllSnapshotsCallback(std::move(onClearAllSnapshotsCallbackIn))
+                      onClearAllSnapshotsCallback(std::move(onClearAllSnapshotsCallbackIn)),
+                      testButtonText(std::move(testButtonTextIn)),
+                      testButtonTooltip(std::move(testButtonTooltipIn))
                 {
                     toolbarBackground.setInterceptsMouseClicks(false, false);
                     toolbarBackground.setColour(juce::Label::backgroundColourId, juce::Colour(0xff202124).withAlpha(0.94f));
@@ -2937,8 +3626,13 @@ namespace
                             onApplyCallback();
                     };
 
-                    testEffectButton.setButtonText("Test Effect");
-                    testEffectButton.setTooltip("Audition the current live effect editor state with the bundled VST effect test sample without committing it.");
+                    if (testButtonText.isEmpty())
+                        testButtonText = "Test Effect";
+                    if (testButtonTooltip.isEmpty())
+                        testButtonTooltip = "Audition the current live effect editor state with the bundled effect test sample without committing it.";
+
+                    testEffectButton.setButtonText(testButtonText);
+                    testEffectButton.setTooltip(testButtonTooltip);
                     testEffectButton.onClick = [this]
                     {
                         if (onTestEffectCallback)
@@ -3172,6 +3866,8 @@ namespace
                 std::function<void(int)> onSaveSnapshotCallback;
                 std::function<void(int)> onClearCurrentSnapshotCallback;
                 std::function<void()> onClearAllSnapshotsCallback;
+                juce::String testButtonText;
+                juce::String testButtonTooltip;
 
                 juce::Label toolbarBackground;
                 juce::TextButton applyButton;
@@ -3185,10 +3881,10 @@ namespace
                 juce::Label targetLabel;
                 juce::Label statusLabel;
             };
-    
-            
-            
-            
+
+
+
+
 
             class ProjectInfoWindowContent final : public juce::Component
             {
@@ -3215,21 +3911,21 @@ namespace
                     albumLabel.setText("Album", juce::dontSendNotification);
                     trackNumberLabel.setText("Track #", juce::dontSendNotification);
                     yearLabel.setText("Year", juce::dontSendNotification);
-    
+
                     helpLabel.setText(
                         "Blank fields are allowed. Non-empty tags are embedded for MP3/FLAC/OGG/M4A during render.",
                         juce::dontSendNotification
                     );
-    
+
                     applyButton.setButtonText("Apply Info");
                     closeButton.setButtonText("Cancel");
-    
+
                     for (auto* label : { &helpLabel, &titleLabel, &artistLabel, &albumLabel, &trackNumberLabel, &yearLabel })
                     {
                         label->setJustificationType(juce::Justification::centredLeft);
                         addAndMakeVisible(*label);
                     }
-    
+
                     addAndMakeVisible(titleBox);
                     addAndMakeVisible(artistBox);
                     addAndMakeVisible(albumBox);
@@ -3237,31 +3933,31 @@ namespace
                     addAndMakeVisible(yearBox);
                     addAndMakeVisible(applyButton);
                     addAndMakeVisible(closeButton);
-            
+
                     applyButton.onClick = [this]
                     {
                         if (onApply)
                             onApply();
                     };
-    
+
                     closeButton.onClick = [this]
                     {
                         if (onClose)
                             onClose();
                     };
                 }
-    
+
     void resized() override
                 {
                     auto area = getLocalBounds().reduced(12);
-    
+
                     auto top = area.removeFromTop(34);
                     closeButton.setBounds(top.removeFromRight(90).reduced(4, 2));
                     applyButton.setBounds(top.removeFromRight(120).reduced(4, 2));
                     helpLabel.setBounds(top.reduced(4, 2));
-    
+
                     area.removeFromTop(8);
-    
+
                     auto layoutRow = [&area](juce::Label& label, juce::TextEditor& editor)
                     {
                         auto row = area.removeFromTop(34);
@@ -3269,21 +3965,21 @@ namespace
                         editor.setBounds(row.reduced(4, 2));
                         area.removeFromTop(4);
                     };
-    
+
                     layoutRow(titleLabel, titleBox);
                     layoutRow(artistLabel, artistBox);
                     layoutRow(albumLabel, albumBox);
                     layoutRow(trackNumberLabel, trackNumberBox);
                     layoutRow(yearLabel, yearBox);
                 }
-    
+
             private:
                 juce::TextEditor& titleBox;
                 juce::TextEditor& artistBox;
                 juce::TextEditor& albumBox;
                 juce::TextEditor& trackNumberBox;
                 juce::TextEditor& yearBox;
-    
+
                 juce::Label helpLabel;
                 juce::Label titleLabel;
                 juce::Label artistLabel;
@@ -3292,11 +3988,11 @@ namespace
                 juce::Label yearLabel;
                 juce::TextButton applyButton;
                 juce::TextButton closeButton;
-    
+
                 std::function<void()> onApply;
                 std::function<void()> onClose;
             };
-    
+
     class SequenceMapView final : public juce::Component
             {
             public:
@@ -4370,11 +5066,11 @@ namespace
                 {
                     helpLabel.setText({}, juce::dontSendNotification);
                     helpLabel.setJustificationType(juce::Justification::centredLeft);
-    
+
                     selectLabel.setText("Track #:", juce::dontSendNotification);
                     selectLabel.setJustificationType(juce::Justification::centredLeft);
                     selectLabel.setFont(juce::FontOptions(15.0f, juce::Font::bold));
-    
+
                     startBeatLabel.setText("Track Start", juce::dontSendNotification);
                     startBeatLabel.setJustificationType(juce::Justification::centredLeft);
 
@@ -4399,7 +5095,7 @@ namespace
                     mapBeatWindowCombo.addItem("256", 256);
                     mapBeatWindowCombo.addItem("Full", 999);
                     syncMapBeatWindowComboFromText();
-    
+
                     filterLabel.setText("Track Filter", juce::dontSendNotification);
                     filterLabel.setJustificationType(juce::Justification::centredLeft);
                     filterCombo.addItem("All Tracks", 1);
@@ -4480,9 +5176,9 @@ namespace
                     redoButton.setTooltip("Redo the most recently undone Track Manager edit.");
                     openPianoRollButton.setTooltip("Open the selected MIDI track in the editable Piano Roll. AudioClip tracks use AudioClip Editor instead.");
                     audioClipEditorButton.setTooltip("Open the selected AudioClip track in the AudioClip Editor for non-destructive source trim metadata.");
-                    previewTrackButton.setTooltip("Render and play a temporary preview of the selected track.");
+                    previewTrackButton.setTooltip("Preview the selected track. CLAP instrument tracks may play directly when safe; otherwise the app uses the rendered preview fallback.");
                     previewSequenceButton.setTooltip("Render and play a temporary preview of the selected sequence.");
-                    previewProjectButton.setTooltip("Render and play a temporary preview of the full project from Track Manager using current applied track settings.");
+                    previewProjectButton.setTooltip("Preview the full project from Track Manager using current applied track settings. Compatible CLAP-only projects may play directly; mixed or unsupported projects use the rendered preview fallback.");
                     startFromFileButton.setTooltip("Import a file as the start of a new project.");
                     importSequenceButton.setTooltip("Add another imported file as a new sequence.");
                     applySectionStartButton.setTooltip("Apply the typed Sequence Start beat to the selected sequence.");
@@ -4504,7 +5200,7 @@ namespace
                     mapGoButton.setTooltip("Apply the selected Beats Visible zoom choice to the Sequence Map.");
                     nameModeButton.setTooltip("Switch Track Manager between full names and shortened names.");
                     applyChangesButton.setTooltip("Apply Track Manager edits to the open project. Save Project still writes them to disk.");
-    
+
                     addAndMakeVisible(selectLabel);
                     addAndMakeVisible(selectBox);
                     addAndMakeVisible(startBeatLabel);
@@ -4563,7 +5259,7 @@ namespace
                     addAndMakeVisible(mapHorizontalScrollBar);
                     addAndMakeVisible(mapVerticalScrollBar);
                     addAndMakeVisible(trackText);
-    
+
                     refreshButton.onClick = [this] { if (onRefresh) onRefresh(); };
                     selectButton.onClick = [this] { if (onSelect) onSelect(); };
                     selectSequenceButton.onClick = [this] { if (onSelectSequence) onSelectSequence(); };
@@ -4647,7 +5343,7 @@ namespace
 
                     return std::max(4, requested);
                 }
-    
+
                     void refreshSequenceMap()
                 {
                     updateLockButton();
@@ -4760,7 +5456,7 @@ namespace
     void resized() override
                 {
                     auto area = getLocalBounds().reduced(10);
-    
+
                     auto top = area.removeFromTop(34);
                     applyChangesButton.setBounds(top.removeFromRight(125).reduced(4, 2));
                     redoButton.setBounds(top.removeFromRight(75).reduced(4, 2));
@@ -4784,7 +5480,7 @@ namespace
                     previewProjectButton.setBounds(previewRow.removeFromRight(125).reduced(4, 2));
                     previewSequenceButton.setBounds(previewRow.removeFromRight(105).reduced(4, 2));
                     previewTrackButton.setBounds(previewRow.removeFromRight(115).reduced(4, 2));
-    
+
                     auto importRow = area.removeFromTop(34);
                     nameModeButton.setBounds(importRow.removeFromRight(105).reduced(4, 2));
                     mapDownButton.setBounds(importRow.removeFromRight(95).reduced(4, 2));
@@ -4841,7 +5537,7 @@ namespace
                     area.removeFromTop(6);
                     trackText.setBounds(area);
                 }
-    
+
             private:
                 mw::gui::SequenceConsoleComponent& trackText;
                 juce::TextEditor& selectBox;
@@ -4853,7 +5549,7 @@ namespace
                 juce::TextEditor& projectLoopCountBox;
                 juce::TextEditor& mapStartBeatBox;
                 juce::TextEditor& mapBeatWindowBox;
-    
+
                 juce::Label helpLabel;
                 juce::Label selectLabel;
                 juce::Label startBeatLabel;
@@ -4912,7 +5608,7 @@ namespace
                 SequenceMapView sequenceMap;
                 mw::gui::HelperTooltipLookAndFeel helperTooltipLookAndFeel;
                 std::unique_ptr<juce::TooltipWindow> helperTooltipWindow;
-    
+
                 std::function<void()> onRefresh;
                 std::function<void()> onSelect;
                 std::function<void()> onSelectSequence;
@@ -4957,7 +5653,7 @@ namespace
                 std::function<void()> onApplyChanges;
                 std::function<void()> onClose;
             };
-    
+
 
 
 
@@ -4976,41 +5672,41 @@ namespace
                         juce::dontSendNotification
                     );
                     helpLabel.setJustificationType(juce::Justification::centredLeft);
-    
+
                     applyButton.setButtonText("Apply Raw Notes");
-    
+
                     addAndMakeVisible(noteEditor);
                     addAndMakeVisible(applyButton);
-    
+
                     applyButton.onClick = [this]
                     {
                         if (onApply)
                             onApply();
                     };
-    
+
                 }
-    
+
                 void resized() override
                 {
                     auto area = getLocalBounds().reduced(10);
-    
+
                     auto top = area.removeFromTop(34);
                     applyButton.setBounds(top.removeFromRight(140).reduced(4, 2));
                     helpLabel.setBounds(top.reduced(4, 2));
-    
+
                     area.removeFromTop(8);
                     noteEditor.setBounds(area);
                 }
-    
+
             private:
                 juce::TextEditor& noteEditor;
                 juce::Label helpLabel;
                 juce::TextButton applyButton;
                 std::function<void()> onApply;
             };
-    
-    
-            
+
+
+
     class MiniNoteMapComponent final : public juce::Component,
                                                private juce::Timer
             {
@@ -5311,11 +6007,11 @@ PianoRollWindowContent(
                     libraryLabel.setText("Library", juce::dontSendNotification);
                     instrumentLabel.setText("Instrument", juce::dontSendNotification);
                     pageInputLabel.setText("Window", juce::dontSendNotification);
-    
+
                     trackLibraryBox.setReadOnly(true);
                     beatWindowBox.setReadOnly(true);
                     beatWindowBox.setJustification(juce::Justification::centred);
-    
+
                     applySettingsButton.setButtonText("Apply Track Settings");
                     applyButton.setButtonText("Apply Changes");
                     previewButton.setButtonText("Player");
@@ -5360,13 +6056,13 @@ PianoRollWindowContent(
                     applySettingsButton.setTooltip("Apply Piano Roll timing controls plus pending track library and instrument changes. This does not reload or discard unsaved note edits.");
                     applyButton.setTooltip("Apply Piano Roll note edits to the open project. Save Project still writes them to disk.");
                     previewButton.setTooltip("Open the Preview Player for this Piano Roll using the current notes and track settings.");
-    
+
                     helpLabel.setText(
                         "Shift-click or Shift-drag selects multiple notes.",
                         juce::dontSendNotification
                     );
                     helpLabel.setJustificationType(juce::Justification::centredLeft);
-    
+
                     addAndMakeVisible(trackColourSwatch);
                     addAndMakeVisible(trackNameLabel);
                     addAndMakeVisible(headerInstrumentLabel);
@@ -5414,7 +6110,7 @@ PianoRollWindowContent(
                     addAndMakeVisible(previewButton);
                     addAndMakeVisible(miniMap);
                     addAndMakeVisible(roll);
-    
+
                     changeLibrary.onClick = [this]
                     {
                         if (onChangeLibrary)
@@ -5426,22 +6122,22 @@ PianoRollWindowContent(
                         if (onApplySettings)
                             onApplySettings();
                     };
-    
+
                     applyButton.onClick = [this]
                     {
                         if (onApplySettings)
                             onApplySettings();
-    
+
                         if (onApply)
                             onApply();
                     };
-    
+
                     previewButton.onClick = [this]
                     {
                         if (onPreview)
                             onPreview();
                     };
-    
+
                 }
 
                 void setHeaderTrackInfo(int trackIndexForHeader, const juce::String& trackNameForHeader)
@@ -5459,11 +6155,11 @@ PianoRollWindowContent(
                     headerInstrumentLabel.setText(headerInstrumentText, juce::dontSendNotification);
                     repaint();
                 }
-    
+
     void resized() override
                 {
                     auto area = getLocalBounds().reduced(10);
-    
+
                     auto toolbar = area.removeFromTop(34);
                     trackColourSwatch.setBounds(toolbar.removeFromLeft(26).reduced(4, 7));
                     trackNameLabel.setBounds(toolbar.removeFromLeft(265).reduced(4, 2));
@@ -5541,16 +6237,16 @@ PianoRollWindowContent(
                     redoNote.setBounds(navRow.removeFromLeft(65).reduced(4, 2));
                     clearSelection.setBounds(navRow.removeFromLeft(90).reduced(4, 2));
                     helpLabel.setBounds(navRow.reduced(4, 2));
-    
+
                     area.removeFromTop(6);
-    
+
                     auto miniMapArea = area.removeFromTop(76);
                     miniMap.setBounds(miniMapArea.reduced(2, 2));
-    
+
                     area.removeFromTop(6);
                     roll.setBounds(area);
                 }
-    
+
             private:
                 mw::gui::PianoRollComponent& roll;
                 juce::TextEditor& bpmBox;
@@ -5571,7 +6267,7 @@ PianoRollWindowContent(
                 juce::TextButton& keyJumpGo;
                 juce::TextButton& notesDown;
                 juce::TextButton& notesUp;
-    
+
                 juce::TextButton& beat4;
                 juce::TextButton& beat8;
                 juce::TextButton& beat16;
@@ -5582,12 +6278,12 @@ PianoRollWindowContent(
                 juce::TextButton& jumpPage;
                 juce::TextButton& copyNote;
                 juce::TextButton& pasteNote;
-    
+
                                 juce::TextButton& undoNote;
                 juce::TextButton& redoNote;
 
                                 juce::TextButton& clearSelection;
-                
+
                 int headerTrackIndex = -1;
                 juce::String headerTrackName;
                 juce::String headerInstrumentText;
@@ -5604,11 +6300,11 @@ juce::Label helpLabel;
                 juce::Label libraryLabel;
                 juce::Label instrumentLabel;
                 juce::Label pageInputLabel;
-    
+
                 juce::TextButton applySettingsButton;
                 juce::TextButton applyButton;
                 juce::TextButton previewButton;
-    
+
                 std::function<void()> onApplySettings;
                 std::function<void()> onApply;
                 std::function<void()> onPreview;
@@ -5616,7 +6312,7 @@ juce::Label helpLabel;
                 mw::gui::HelperTooltipLookAndFeel helperTooltipLookAndFeel;
                 std::unique_ptr<juce::TooltipWindow> helperTooltipWindow;
             };
-    
+
     }
 
 
@@ -6897,7 +7593,7 @@ namespace mw::gui
                 auto textArea = juce::Rectangle<int>(54, 414, getWidth() - 108, 88);
                 g.setColour(juce::Colour(0xff17120f));
                 g.setFont(juce::Font(18.0f, juce::Font::bold));
-                g.drawFittedText("The VST plugin feature is still experimental and could crash the program.\nClick OK to acknowledge and continue.",
+                g.drawFittedText("Third-party plugin features are still experimental. VST3 and CLAP plugins can crash, freeze, or behave unpredictably.\nClick OK to acknowledge and continue.",
                                  textArea,
                                  juce::Justification::centred,
                                  3);
@@ -6978,29 +7674,37 @@ namespace mw::gui
             return true;
         }
 
-        bool vstAssignmentsReferToSamePlugin(const mw::core::InstrumentAssignment& a, const mw::core::InstrumentAssignment& b)
+        bool trackPluginAssignmentsReferToSamePlugin(const mw::core::InstrumentAssignment& a, const mw::core::InstrumentAssignment& b)
         {
+            if (a.backendType != b.backendType)
+                return false;
+
             if (a.backendType != mw::core::SampleBackendType::VST3
-                || b.backendType != mw::core::SampleBackendType::VST3)
+                && a.backendType != mw::core::SampleBackendType::CLAP)
                 return false;
 
             if (!a.vst3.uid.empty() && !b.vst3.uid.empty())
                 return a.vst3.uid == b.vst3.uid;
 
-            const auto aPath = resolveVst3BundlePath(a);
-            const auto bPath = resolveVst3BundlePath(b);
+            const auto aPath = a.backendType == mw::core::SampleBackendType::CLAP
+                ? resolveClapPluginPath(a)
+                : resolveVst3BundlePath(a);
+            const auto bPath = b.backendType == mw::core::SampleBackendType::CLAP
+                ? resolveClapPluginPath(b)
+                : resolveVst3BundlePath(b);
             return !aPath.empty() && !bPath.empty() && pathsReferToSameLocation(aPath, bPath);
         }
 
-        void stripVstRuntimeState(mw::core::InstrumentAssignment& assignment)
+        void stripTrackPluginRuntimeState(mw::core::InstrumentAssignment& assignment)
         {
             assignment.vst3.stateBase64.clear();
         }
 
         mw::core::InstrumentAssignment makeUndoSafeInstrumentAssignment(mw::core::InstrumentAssignment assignment)
         {
-            if (assignment.backendType == mw::core::SampleBackendType::VST3)
-                stripVstRuntimeState(assignment);
+            if (assignment.backendType == mw::core::SampleBackendType::VST3
+                || assignment.backendType == mw::core::SampleBackendType::CLAP)
+                stripTrackPluginRuntimeState(assignment);
             else
                 assignment.vst3 = {};
 
@@ -7010,14 +7714,15 @@ namespace mw::gui
         mw::core::InstrumentAssignment prepareInstrumentAssignmentForUndoRestore(const mw::core::InstrumentAssignment& current,
                                                                                  mw::core::InstrumentAssignment restored)
         {
-            if (restored.backendType == mw::core::SampleBackendType::VST3)
+            if (restored.backendType == mw::core::SampleBackendType::VST3
+                || restored.backendType == mw::core::SampleBackendType::CLAP)
             {
-                stripVstRuntimeState(restored);
+                stripTrackPluginRuntimeState(restored);
 
-                // The undo/redo stacks are deliberately metadata-only for VST3. If
+                // The undo/redo stacks are deliberately metadata-only for plugin instruments. If
                 // the user is undoing/redoing around the same live plugin identity,
                 // keep the current applied state instead of reviving an old blob.
-                if (vstAssignmentsReferToSamePlugin(current, restored))
+                if (trackPluginAssignmentsReferToSamePlugin(current, restored))
                     restored.vst3.stateBase64 = current.vst3.stateBase64;
             }
             else
@@ -7049,10 +7754,11 @@ namespace mw::gui
                 auto restoredAssignment = restoredTracks[i].getInstrument();
                 const auto& currentAssignment = currentTracks[i].getInstrument();
 
-                if (restoredAssignment.backendType == mw::core::SampleBackendType::VST3)
+                if (restoredAssignment.backendType == mw::core::SampleBackendType::VST3
+                    || restoredAssignment.backendType == mw::core::SampleBackendType::CLAP)
                 {
-                    stripVstRuntimeState(restoredAssignment);
-                    if (vstAssignmentsReferToSamePlugin(currentAssignment, restoredAssignment))
+                    stripTrackPluginRuntimeState(restoredAssignment);
+                    if (trackPluginAssignmentsReferToSamePlugin(currentAssignment, restoredAssignment))
                         restoredAssignment.vst3.stateBase64 = currentAssignment.vst3.stateBase64;
                     restoredTracks[i].setInstrumentAssignment(std::move(restoredAssignment));
                 }
@@ -7068,14 +7774,17 @@ namespace mw::gui
         {
             for (const auto& track : project.getTracks())
             {
-                if (track.getInstrument().backendType == mw::core::SampleBackendType::VST3)
+                if (track.getInstrument().backendType == mw::core::SampleBackendType::VST3
+                    || track.getInstrument().backendType == mw::core::SampleBackendType::CLAP)
                     return true;
 
                 const auto& effects = track.getVstEffects();
                 for (std::size_t slotIndex = 0; slotIndex < mw::core::maxVstEffectSlots; ++slotIndex)
                 {
                     const auto* slot = effects.slot(slotIndex);
-                    if (slot != nullptr && effects.slotEnabled(slotIndex) && slot->plugin.hasPluginIdentity())
+                    if (slot != nullptr
+                        && effects.slotEnabled(slotIndex)
+                        && slot->plugin.hasPluginIdentity())
                         return true;
                 }
             }
@@ -7122,6 +7831,7 @@ namespace mw::gui
         bool vstEffectSlotsEqual(const mw::core::VstEffectSlotAssignment& a, const mw::core::VstEffectSlotAssignment& b)
         {
             return a.enabled == b.enabled
+                && a.backendType == b.backendType
                 && vstPluginAssignmentsEqual(a.plugin, b.plugin);
         }
 
@@ -7138,8 +7848,11 @@ namespace mw::gui
                 const bool bEnabled = b.slotEnabled(i);
                 const auto aPlugin = aSlot != nullptr ? aSlot->plugin : mw::core::VstPluginAssignment{};
                 const auto bPlugin = bSlot != nullptr ? bSlot->plugin : mw::core::VstPluginAssignment{};
+                const auto aBackend = aSlot != nullptr ? aSlot->backendType : mw::core::EffectSlotBackendType::None;
+                const auto bBackend = bSlot != nullptr ? bSlot->backendType : mw::core::EffectSlotBackendType::None;
+                const bool eitherPluginAssigned = aPlugin.hasPluginIdentity() || bPlugin.hasPluginIdentity();
 
-                if (aEnabled != bEnabled || !vstPluginAssignmentsEqual(aPlugin, bPlugin))
+                if (aEnabled != bEnabled || (eitherPluginAssigned && aBackend != bBackend) || !vstPluginAssignmentsEqual(aPlugin, bPlugin))
                     return false;
             }
 
@@ -7336,7 +8049,7 @@ namespace mw::gui
                 micGainUpButton.setButtonText("+");
                 micGainResetButton.setButtonText("0 dB");
                 trackLiveEffectToggle.setButtonText("Track Live Effect");
-                trackLiveEffectToggle.setTooltip("Monitor recorder input through the selected target track's first enabled, non-bypassed VST3 effect. The applied track effect is printed into the recorded clip whether this monitor checkbox is on or off.");
+                trackLiveEffectToggle.setTooltip("Monitor recorder input through the selected target track's first enabled, non-bypassed Effect Slot. The applied track effect is printed into the recorded clip whether this monitor checkbox is on or off.");
                 pauseButton.setButtonText("Pause");
                 stopButton.setButtonText("Stop");
                 keepButton.setButtonText("Save / Apply");
@@ -7830,6 +8543,19 @@ namespace mw::gui
             menuVstHostHelperStatus,
             menuToggleVstCompatibilityWarnings,
 
+            menuClapScan = 1581,
+            menuClapPluginManager,
+            menuClapSettings,
+            menuClapHostHelperStatus,
+            menuClapPreflightSelectedTrackInstrument,
+            menuClapArmLiveEngineSession,
+            menuClapDisarmLiveEngineSession,
+            menuClapLiveEngineSessionStatus,
+            menuClapProbeLiveProcessBridge,
+            menuClapStartSelectedTrackLiveAudition,
+            menuClapStopLiveAudition,
+            menuClapCloseAllWindows,
+
             menuWindowMain = 1601,
             menuWindowTrackManager,
             menuWindowPreviewPlayer,
@@ -7844,7 +8570,11 @@ namespace mw::gui
             menuWindowVstPluginManager,
             menuWindowVstSettings,
             menuWindowVstHostHelperStatus,
+            menuWindowClapPluginManager,
+            menuWindowClapSettings,
+            menuWindowClapHostHelperStatus,
             menuWindowCloseAllOpen = 1650,
+            menuWindowCloseAllPluginWindows,
             menuWindowPianoRollBase = 1700,
             menuWindowVstInstrumentBase = 18000,
             menuWindowVstEffectBase = 19000,
@@ -7858,7 +8588,290 @@ namespace mw::gui
 
     juce::StringArray MainComponent::getMenuBarNames()
     {
-        return { "File", "Project", "Import", "Render", "View", "Window", "VST Plugins", "Help" };
+        return { "File", "Project", "Import", "Render", "View", "Window", "VST Plugins", "CLAP Plugins", "Help" };
+    }
+
+    bool MainComponent::hasOpenPluginWindows() const
+    {
+        return !vstPluginEditorWindows.empty()
+            || !clapInstrumentEditorWindows.empty()
+            || !vstEffectEditorWindows.empty()
+            || !clapEffectEditorWindows.empty();
+    }
+
+    bool MainComponent::hasOpenAuxiliaryWindows() const
+    {
+        return trackManagerWindow != nullptr
+            || rawNotesWindow != nullptr
+            || pianoRollPreviewPlayerWindow != nullptr
+            || audioRecorderWindow != nullptr
+            || audioClipEditorWindow != nullptr
+            || projectInfoWindow != nullptr
+            || sequencePickerWindow != nullptr
+            || sequenceThoughtsWindow != nullptr
+            || sequenceColorWindow != nullptr
+            || renderSettingsWindow != nullptr
+            || vstPluginManagerWindow != nullptr
+            || vstSettingsWindow != nullptr
+            || vstHostHelperStatusWindow != nullptr
+            || clapPluginManagerWindow != nullptr
+            || clapSettingsWindow != nullptr
+            || clapHostHelperStatusWindow != nullptr
+            || !pianoRollEditorWindows.empty()
+            || hasOpenPluginWindows();
+    }
+
+    juce::String MainComponent::makePluginWindowTrackMenuLabel(int trackIndex) const
+    {
+        juce::String label = "Track #" + juce::String(trackIndex + 1);
+        if (currentProject
+            && trackIndex >= 0
+            && trackIndex < static_cast<int>(currentProject->getTracks().size()))
+        {
+            const auto name = juce::String(currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getName()).trim();
+            if (name.isNotEmpty())
+                label += " - " + name;
+        }
+        return label;
+    }
+
+    juce::String MainComponent::makePluginWindowInstrumentMenuLabel(int trackIndex) const
+    {
+        juce::String label = makePluginWindowTrackMenuLabel(trackIndex);
+        juce::String pluginName;
+
+        if (currentProject
+            && trackIndex >= 0
+            && trackIndex < static_cast<int>(currentProject->getTracks().size()))
+        {
+            const auto& assignment = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getInstrument();
+            pluginName = juce::String(assignment.vst3.name.empty() ? assignment.displayName : assignment.vst3.name).trim();
+        }
+
+        if (pluginName.isNotEmpty())
+            label += " - " + pluginName;
+
+        return label;
+    }
+
+    juce::String MainComponent::makePluginWindowEffectMenuLabel(int effectWindowKey) const
+    {
+        const int trackIndex = effectWindowKey / 10;
+        const int effectSlotIndex = effectWindowKey % 10;
+        const int slotNumber = effectSlotIndex + 1;
+        juce::String label = "Track #" + juce::String(trackIndex + 1) + " - S" + juce::String(slotNumber);
+
+        if (currentProject
+            && trackIndex >= 0
+            && trackIndex < static_cast<int>(currentProject->getTracks().size()))
+        {
+            const auto& track = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)];
+            const auto effects = track.getVstEffects();
+            const auto* slot = effects.slot(static_cast<std::size_t>(juce::jlimit(0, static_cast<int>(mw::core::maxVstEffectSlots) - 1, effectSlotIndex)));
+            if (slot != nullptr && slot->plugin.hasPluginIdentity())
+            {
+                auto pluginName = juce::String(slot->plugin.name.empty() ? slot->plugin.bundlePath.stem().string() : slot->plugin.name).trim();
+                if (pluginName.isNotEmpty())
+                    label += " - " + pluginName;
+            }
+        }
+
+        return label;
+    }
+
+    juce::PopupMenu MainComponent::buildVstPluginMenu() const
+    {
+        juce::PopupMenu menu;
+        menu.addItem(menuVstScan, "Scan VST3 Plugins");
+        menu.addItem(menuVstPluginManager, "VST3 Plugin Manager...");
+        menu.addItem(menuVstSettings, "VST3 Settings...");
+        menu.addItem(menuVstHostHelperStatus, "VST Host Helper Status...");
+        return menu;
+    }
+
+    juce::PopupMenu MainComponent::buildClapPluginMenu() const
+    {
+        juce::PopupMenu menu;
+        menu.addItem(menuClapScan, "Scan CLAP Plugins");
+        menu.addItem(menuClapPluginManager, "CLAP Plugin Manager...");
+        menu.addItem(menuClapSettings, "CLAP Settings...");
+        menu.addItem(menuClapHostHelperStatus, "CLAP Host Helper Status...");
+        return menu;
+    }
+
+    juce::PopupMenu MainComponent::buildWindowMenu()
+    {
+        juce::PopupMenu menu;
+
+        windowMenuVstInstrumentCommandToTrack.clear();
+        windowMenuVstEffectCommandToKey.clear();
+
+        menu.addItem(menuWindowMain, "Main UI", true);
+        menu.addItem(menuWindowCloseAllOpen, "Close All Open Windows", hasOpenAuxiliaryWindows());
+        menu.addItem(menuWindowCloseAllPluginWindows, "Close All Plugin Windows", hasOpenPluginWindows());
+        menu.addSeparator();
+
+        if (trackManagerWindow != nullptr)
+            menu.addItem(menuWindowTrackManager, "Track / Sequence Manager");
+
+        if (rawNotesWindow != nullptr)
+            menu.addItem(menuWindowRawNotes, "Raw Notes - Advanced");
+
+        if (pianoRollPreviewPlayerWindow != nullptr)
+            menu.addItem(menuWindowPreviewPlayer, "Piano Roll Preview Player");
+
+        if (audioRecorderWindow != nullptr)
+            menu.addItem(menuWindowAudioRecorder, "Audio Recorder");
+
+        if (audioClipEditorWindow != nullptr)
+            menu.addItem(menuWindowAudioClipEditor, "AudioClip Editor");
+
+        if (projectInfoWindow != nullptr)
+            menu.addItem(menuWindowProjectInfo, "Project Info");
+
+        if (sequencePickerWindow != nullptr)
+            menu.addItem(menuWindowSequencePicker, "Change Active Sequence");
+
+        if (sequenceThoughtsWindow != nullptr)
+            menu.addItem(menuWindowSequenceThoughts, "Sequence Thoughts");
+
+        if (sequenceColorWindow != nullptr)
+            menu.addItem(menuWindowSequenceColor, "Sequence Color");
+
+        if (renderSettingsWindow != nullptr)
+            menu.addItem(menuWindowRenderSettings, "Render Settings");
+
+        if (vstPluginManagerWindow != nullptr)
+            menu.addItem(menuWindowVstPluginManager, "VST3 Plugin Manager");
+
+        if (vstSettingsWindow != nullptr)
+            menu.addItem(menuWindowVstSettings, "VST3 Settings");
+
+        if (vstHostHelperStatusWindow != nullptr)
+            menu.addItem(menuWindowVstHostHelperStatus, "VST Host Helper Status");
+
+        if (clapPluginManagerWindow != nullptr)
+            menu.addItem(menuWindowClapPluginManager, "CLAP Plugin Manager");
+
+        if (clapSettingsWindow != nullptr)
+            menu.addItem(menuWindowClapSettings, "CLAP Settings");
+
+        if (clapHostHelperStatusWindow != nullptr)
+            menu.addItem(menuWindowClapHostHelperStatus, "CLAP Host Helper Status");
+
+        if (!pianoRollEditorWindows.empty())
+        {
+            juce::PopupMenu pianoRollMenu;
+            int openPianoRollCount = 0;
+
+            for (const auto& entry : pianoRollEditorWindows)
+            {
+                if (entry.second != nullptr && entry.second->window != nullptr)
+                {
+                    ++openPianoRollCount;
+                    pianoRollMenu.addItem(
+                        menuWindowPianoRollBase + entry.first,
+                        "Piano Roll - " + getTrackDisplayName(entry.first) + ((entry.second->dirty || entry.second->hasPendingInstrumentAssignment) ? " *" : "")
+                    );
+                }
+            }
+
+            if (openPianoRollCount == 1)
+            {
+                for (const auto& entry : pianoRollEditorWindows)
+                {
+                    if (entry.second != nullptr && entry.second->window != nullptr)
+                    {
+                        menu.addSeparator();
+                        menu.addItem(
+                            menuWindowPianoRollBase + entry.first,
+                            "Piano Roll - " + getTrackDisplayName(entry.first) + ((entry.second->dirty || entry.second->hasPendingInstrumentAssignment) ? " *" : "")
+                        );
+                        break;
+                    }
+                }
+            }
+            else if (openPianoRollCount > 1)
+            {
+                menu.addSeparator();
+                menu.addSubMenu("Piano Rolls", pianoRollMenu, true);
+            }
+        }
+
+        {
+            juce::PopupMenu instrumentMenu;
+            int openInstrumentCount = 0;
+
+            for (const auto& entry : vstPluginEditorWindows)
+            {
+                if (entry.second != nullptr)
+                {
+                    const int commandId = menuWindowVstInstrumentBase + openInstrumentCount;
+                    windowMenuVstInstrumentCommandToTrack[commandId] = entry.first;
+                    ++openInstrumentCount;
+                    instrumentMenu.addItem(commandId, makePluginWindowInstrumentMenuLabel(entry.first));
+                }
+            }
+
+            for (const auto& entry : clapInstrumentEditorWindows)
+            {
+                if (entry.second != nullptr)
+                {
+                    const int commandId = menuWindowVstInstrumentBase + openInstrumentCount;
+                    windowMenuVstInstrumentCommandToTrack[commandId] = entry.first;
+                    ++openInstrumentCount;
+                    instrumentMenu.addItem(commandId, makePluginWindowInstrumentMenuLabel(entry.first));
+                }
+            }
+
+            if (openInstrumentCount > 0)
+            {
+                menu.addSeparator();
+                menu.addSubMenu("Plugin Instruments", instrumentMenu, true);
+            }
+        }
+
+        {
+            juce::PopupMenu effectMenu;
+            int openEffectCount = 0;
+
+            for (const auto& entry : vstEffectEditorWindows)
+            {
+                if (entry.second != nullptr)
+                {
+                    const int commandId = menuWindowVstEffectBase + openEffectCount;
+                    windowMenuVstEffectCommandToKey[commandId] = entry.first;
+                    ++openEffectCount;
+                    effectMenu.addItem(commandId, makePluginWindowEffectMenuLabel(entry.first));
+                }
+            }
+
+            for (const auto& entry : clapEffectEditorWindows)
+            {
+                if (entry.second != nullptr)
+                {
+                    const int commandId = menuWindowVstEffectBase + openEffectCount;
+                    windowMenuVstEffectCommandToKey[commandId] = entry.first;
+                    ++openEffectCount;
+                    effectMenu.addItem(commandId, makePluginWindowEffectMenuLabel(entry.first));
+                }
+            }
+
+            if (openEffectCount > 0)
+            {
+                if (vstPluginEditorWindows.empty() && clapInstrumentEditorWindows.empty())
+                    menu.addSeparator();
+                menu.addSubMenu("Effect Slot Editors", effectMenu, true);
+            }
+        }
+
+        if (!hasOpenAuxiliaryWindows())
+        {
+            menu.addSeparator();
+            menu.addItem(-10, "No tool windows are open", false);
+        }
+
+        return menu;
     }
 
     juce::PopupMenu MainComponent::getMenuForIndex(int topLevelMenuIndex, const juce::String&)
@@ -7915,268 +8928,18 @@ namespace mw::gui
                 break;
 
             case 5:
-            {
-                windowMenuVstInstrumentCommandToTrack.clear();
-                windowMenuVstEffectCommandToKey.clear();
-
-                const bool hasOpenAuxiliaryWindows = trackManagerWindow != nullptr
-                    || rawNotesWindow != nullptr
-                    || pianoRollPreviewPlayerWindow != nullptr
-                    || audioRecorderWindow != nullptr
-                    || audioClipEditorWindow != nullptr
-                    || projectInfoWindow != nullptr
-                    || sequencePickerWindow != nullptr
-                    || sequenceThoughtsWindow != nullptr
-                    || sequenceColorWindow != nullptr
-                    || renderSettingsWindow != nullptr
-                    || vstPluginManagerWindow != nullptr
-                    || vstSettingsWindow != nullptr
-                    || vstHostHelperStatusWindow != nullptr
-                    || !pianoRollEditorWindows.empty()
-                    || !vstPluginEditorWindows.empty()
-                    || !vstEffectEditorWindows.empty();
-
-                menu.addItem(menuWindowMain, "Main UI", true);
-                menu.addItem(menuWindowCloseAllOpen, "Close All Open Windows", hasOpenAuxiliaryWindows);
-                menu.addSeparator();
-
-                if (trackManagerWindow != nullptr)
-                    menu.addItem(menuWindowTrackManager, "Track / Sequence Manager");
-
-                if (rawNotesWindow != nullptr)
-                    menu.addItem(menuWindowRawNotes, "Raw Notes - Advanced");
-
-                if (pianoRollPreviewPlayerWindow != nullptr)
-                    menu.addItem(menuWindowPreviewPlayer, "Piano Roll Preview Player");
-
-                if (audioRecorderWindow != nullptr)
-                    menu.addItem(menuWindowAudioRecorder, "Audio Recorder");
-
-                if (audioClipEditorWindow != nullptr)
-                    menu.addItem(menuWindowAudioClipEditor, "AudioClip Editor");
-
-                if (projectInfoWindow != nullptr)
-                    menu.addItem(menuWindowProjectInfo, "Project Info");
-
-                if (sequencePickerWindow != nullptr)
-                    menu.addItem(menuWindowSequencePicker, "Change Active Sequence");
-
-                if (sequenceThoughtsWindow != nullptr)
-                    menu.addItem(menuWindowSequenceThoughts, "Sequence Thoughts");
-
-                if (sequenceColorWindow != nullptr)
-                    menu.addItem(menuWindowSequenceColor, "Sequence Color");
-
-                if (renderSettingsWindow != nullptr)
-                    menu.addItem(menuWindowRenderSettings, "Render Settings");
-
-                if (vstPluginManagerWindow != nullptr)
-                    menu.addItem(menuWindowVstPluginManager, "VST3 Plugin Manager");
-
-                if (vstSettingsWindow != nullptr)
-                    menu.addItem(menuWindowVstSettings, "VST3 Settings");
-
-                if (vstHostHelperStatusWindow != nullptr)
-                    menu.addItem(menuWindowVstHostHelperStatus, "VST Host Helper Status");
-
-                auto makeTrackMenuLabel = [this](int trackIndex) -> juce::String
-                {
-                    juce::String label = "Track #" + juce::String(trackIndex + 1);
-                    if (currentProject
-                        && trackIndex >= 0
-                        && trackIndex < static_cast<int>(currentProject->getTracks().size()))
-                    {
-                        const auto name = juce::String(currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getName()).trim();
-                        if (name.isNotEmpty())
-                            label += " - " + name;
-                    }
-                    return label;
-                };
-
-                auto makeInstrumentMenuLabel = [this, makeTrackMenuLabel](int trackIndex) -> juce::String
-                {
-                    juce::String label = makeTrackMenuLabel(trackIndex);
-                    juce::String pluginName;
-                    if (currentProject
-                        && trackIndex >= 0
-                        && trackIndex < static_cast<int>(currentProject->getTracks().size()))
-                    {
-                        const auto& assignment = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getInstrument();
-                        pluginName = juce::String(assignment.vst3.name.empty() ? assignment.displayName : assignment.vst3.name).trim();
-                    }
-                    if (pluginName.isNotEmpty())
-                        label += " - " + pluginName;
-                    return label;
-                };
-
-                auto makeEffectMenuLabel = [this](int effectWindowKey) -> juce::String
-                {
-                    const int trackIndex = effectWindowKey / 10;
-                    const int effectSlotIndex = effectWindowKey % 10;
-                    const int slotNumber = effectSlotIndex + 1;
-                    juce::String label = "Track #" + juce::String(trackIndex + 1) + " - S" + juce::String(slotNumber);
-
-                    if (currentProject
-                        && trackIndex >= 0
-                        && trackIndex < static_cast<int>(currentProject->getTracks().size()))
-                    {
-                        const auto& track = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)];
-                        const auto effects = track.getVstEffects();
-                        const auto* slot = effects.slot(static_cast<std::size_t>(juce::jlimit(0, static_cast<int>(mw::core::maxVstEffectSlots) - 1, effectSlotIndex)));
-                        if (slot != nullptr && slot->plugin.hasPluginIdentity())
-                        {
-                            auto pluginName = juce::String(slot->plugin.name.empty() ? slot->plugin.bundlePath.stem().string() : slot->plugin.name).trim();
-                            if (pluginName.isNotEmpty())
-                                label += " - " + pluginName;
-                        }
-                    }
-
-                    return label;
-                };
-
-                if (!pianoRollEditorWindows.empty())
-                {
-                    menu.addSeparator();
-
-                    juce::PopupMenu pianoRollMenu;
-                    int openPianoRollCount = 0;
-
-                    for (const auto& entry : pianoRollEditorWindows)
-                    {
-                        if (entry.second != nullptr && entry.second->window != nullptr)
-                        {
-                            ++openPianoRollCount;
-                            pianoRollMenu.addItem(
-                                menuWindowPianoRollBase + entry.first,
-                                "Piano Roll - " + getTrackDisplayName(entry.first) + ((entry.second->dirty || entry.second->hasPendingInstrumentAssignment) ? " *" : "")
-                            );
-                        }
-                    }
-
-                    if (openPianoRollCount == 1)
-                    {
-                        for (const auto& entry : pianoRollEditorWindows)
-                        {
-                            if (entry.second != nullptr && entry.second->window != nullptr)
-                            {
-                                menu.addItem(
-                                    menuWindowPianoRollBase + entry.first,
-                                    "Piano Roll - " + getTrackDisplayName(entry.first) + ((entry.second->dirty || entry.second->hasPendingInstrumentAssignment) ? " *" : "")
-                                );
-                                break;
-                            }
-                        }
-                    }
-                    else if (openPianoRollCount > 1)
-                    {
-                        menu.addSubMenu("Piano Rolls", pianoRollMenu, true);
-                    }
-                }
-
-                {
-                    juce::PopupMenu vstInstrumentMenu;
-                    int openVstInstrumentCount = 0;
-                    for (const auto& entry : vstPluginEditorWindows)
-                    {
-                        if (entry.second != nullptr)
-                        {
-                            const int commandId = menuWindowVstInstrumentBase + openVstInstrumentCount;
-                            windowMenuVstInstrumentCommandToTrack[commandId] = entry.first;
-                            ++openVstInstrumentCount;
-                            vstInstrumentMenu.addItem(commandId, makeInstrumentMenuLabel(entry.first));
-                        }
-                    }
-
-                    if (openVstInstrumentCount > 0)
-                    {
-                        menu.addSeparator();
-                        menu.addSubMenu("VST Instrument", vstInstrumentMenu, true);
-                    }
-                }
-
-                {
-                    juce::PopupMenu vstEffectMenu;
-                    int openVstEffectCount = 0;
-                    for (const auto& entry : vstEffectEditorWindows)
-                    {
-                        if (entry.second != nullptr)
-                        {
-                            const int commandId = menuWindowVstEffectBase + openVstEffectCount;
-                            windowMenuVstEffectCommandToKey[commandId] = entry.first;
-                            ++openVstEffectCount;
-                            vstEffectMenu.addItem(commandId, makeEffectMenuLabel(entry.first));
-                        }
-                    }
-
-                    if (openVstEffectCount > 0)
-                    {
-                        if (vstPluginEditorWindows.empty())
-                            menu.addSeparator();
-                        menu.addSubMenu("VST Effect", vstEffectMenu, true);
-                    }
-                }
-
-                if (trackManagerWindow == nullptr
-                    && rawNotesWindow == nullptr
-                    && pianoRollPreviewPlayerWindow == nullptr
-                    && audioRecorderWindow == nullptr
-                    && audioClipEditorWindow == nullptr
-                    && projectInfoWindow == nullptr
-                    && sequencePickerWindow == nullptr
-                    && sequenceThoughtsWindow == nullptr
-                    && sequenceColorWindow == nullptr
-                    && renderSettingsWindow == nullptr
-                    && vstPluginManagerWindow == nullptr
-                    && vstSettingsWindow == nullptr
-                    && vstHostHelperStatusWindow == nullptr
-                    && pianoRollEditorWindows.empty()
-                    && vstPluginEditorWindows.empty()
-                    && vstEffectEditorWindows.empty())
-                {
-                    menu.addSeparator();
-                    menu.addItem(-10, "No tool windows are open", false);
-                }
+                menu = buildWindowMenu();
                 break;
-            }
 
             case 6:
-            {
-                menu.addItem(menuVstScan, "Scan VST3 Plugins");
-                menu.addItem(menuVstPluginManager, "VST3 Plugin Manager...");
-                menu.addItem(menuVstSettings, "VST3 Settings...");
-                menu.addItem(menuVstRefreshGraphics, "Refresh Adapter List");
-                menu.addItem(menuVstHostHelperStatus, "VST Host Helper Status...");
-                menu.addSeparator();
-                menu.addItem(menuVstOpenSelectedTrackUi, "Open Selected Track VST Instrument", selectedTrackHasAppliedVstPlugin());
-                menu.addItem(menuVstOpenSelectedTrackEffectUi, "Open Selected Track VST Effect", selectedTrackHasOpenableVstEffect(0));
-
-                bool hasOpenVstPluginWindows = false;
-                for (const auto& entry : vstPluginEditorWindows)
-                {
-                    if (entry.second != nullptr)
-                    {
-                        hasOpenVstPluginWindows = true;
-                        break;
-                    }
-                }
-
-                if (!hasOpenVstPluginWindows)
-                {
-                    for (const auto& entry : vstEffectEditorWindows)
-                    {
-                        if (entry.second != nullptr)
-                        {
-                            hasOpenVstPluginWindows = true;
-                            break;
-                        }
-                    }
-                }
-
-                menu.addItem(menuVstCloseAllWindows, "Close All VST Plugin Windows", hasOpenVstPluginWindows);
+                menu = buildVstPluginMenu();
                 break;
-            }
 
             case 7:
+                menu = buildClapPluginMenu();
+                break;
+
+            case 8:
                 menu.addItem(menuUserGuide, "Open User Guide PDF");
                 menu.addItem(menuSetupGuide, "Show Setup / Build Guide File");
                 menu.addSeparator();
@@ -8221,12 +8984,17 @@ namespace mw::gui
         if (menuItemID == menuWindowVstPluginManager) { focusWindow(vstPluginManagerWindow); return; }
         if (menuItemID == menuWindowVstSettings) { focusWindow(vstSettingsWindow); return; }
         if (menuItemID == menuWindowVstHostHelperStatus) { focusWindow(vstHostHelperStatusWindow); return; }
+        if (menuItemID == menuWindowClapPluginManager) { focusWindow(clapPluginManagerWindow); return; }
+        if (menuItemID == menuWindowClapSettings) { focusWindow(clapSettingsWindow); return; }
+        if (menuItemID == menuWindowClapHostHelperStatus) { focusWindow(clapHostHelperStatusWindow); return; }
 
         if (auto foundCommand = windowMenuVstEffectCommandToKey.find(menuItemID); foundCommand != windowMenuVstEffectCommandToKey.end())
         {
             const auto effectWindowKey = foundCommand->second;
             if (auto found = vstEffectEditorWindows.find(effectWindowKey); found != vstEffectEditorWindows.end() && found->second != nullptr)
                 found->second->toFront(true);
+            else if (auto foundClap = clapEffectEditorWindows.find(effectWindowKey); foundClap != clapEffectEditorWindows.end() && foundClap->second != nullptr)
+                foundClap->second->toFront(true);
             return;
         }
 
@@ -8235,6 +9003,8 @@ namespace mw::gui
             const auto trackIndex = foundCommand->second;
             if (auto found = vstPluginEditorWindows.find(trackIndex); found != vstPluginEditorWindows.end() && found->second != nullptr)
                 found->second->toFront(true);
+            else if (auto foundClap = clapInstrumentEditorWindows.find(trackIndex); foundClap != clapInstrumentEditorWindows.end() && foundClap->second != nullptr)
+                foundClap->second->toFront(true);
             return;
         }
 
@@ -8258,6 +9028,12 @@ namespace mw::gui
             return;
         }
 
+        if (menuItemID == menuWindowCloseAllPluginWindows)
+        {
+            closeAllPluginWindows();
+            return;
+        }
+
         if (menuItemID == menuWindowMain
             || menuItemID == menuWindowTrackManager
             || menuItemID == menuWindowPreviewPlayer
@@ -8272,6 +9048,9 @@ namespace mw::gui
             || menuItemID == menuWindowVstPluginManager
             || menuItemID == menuWindowVstSettings
             || menuItemID == menuWindowVstHostHelperStatus
+            || menuItemID == menuWindowClapPluginManager
+            || menuItemID == menuWindowClapSettings
+            || menuItemID == menuWindowClapHostHelperStatus
             || (menuItemID >= menuWindowPianoRollBase && menuItemID < menuWindowVstInstrumentBase)
             || windowMenuVstInstrumentCommandToTrack.find(menuItemID) != windowMenuVstInstrumentCommandToTrack.end()
             || windowMenuVstEffectCommandToKey.find(menuItemID) != windowMenuVstEffectCommandToKey.end())
@@ -8343,6 +9122,18 @@ namespace mw::gui
             case menuVstCloseAllWindows: closeAllVstPluginWindows(); break;
             case menuToggleVstCompatibilityWarnings: setVstCompatibilityWarningsEnabled(!vstCompatibilityWarningsEnabled); break;
 
+            case menuClapScan: scanClapPlugins(true); break;
+            case menuClapPluginManager: openClapPluginManagerWindow(); break;
+            case menuClapSettings: openClapSettingsWindow(); break;
+            case menuClapHostHelperStatus: showClapHostHelperStatusWindow(); break;
+            case menuClapPreflightSelectedTrackInstrument: preflightSelectedTrackClapInstrumentLiveReadiness(); break;
+            case menuClapArmLiveEngineSession: armSelectedTrackClapLiveEngineSession(); break;
+            case menuClapDisarmLiveEngineSession: disarmClapLiveEngineSession(true); break;
+            case menuClapLiveEngineSessionStatus: showClapLiveEngineSessionStatus(); break;
+            case menuClapStartSelectedTrackLiveAudition: startSelectedTrackClapInstrumentLiveAudition(); break;
+            case menuClapStopLiveAudition: stopClapInstrumentLiveAudition(true); break;
+            case menuClapCloseAllWindows: closeAllClapPluginWindows(); break;
+
             case menuTrackManager: openTrackManagerWindow(); break;
             case menuPianoRoll: openPianoRollWindow(); break;
             case menuAudioClipEditor: openAudioClipEditorWindow(); break;
@@ -8408,6 +9199,9 @@ namespace mw::gui
         vstWarningStyleId = startupPreferences.vstWarningStyleId;
         vstMaxOpenPluginWindows = sanitizeMaxOpenVstPluginWindows(startupPreferences.vstMaxOpenPluginWindows);
         vstExperimentalWarningAcknowledged = startupPreferences.vstExperimentalWarningAcknowledged;
+        clapCompatibilityWarningsEnabled = startupPreferences.clapCompatibilityWarningsEnabled;
+        clapSafePluginUiMode = startupPreferences.clapSafePluginUiMode;
+        clapMaxOpenPluginWindows = sanitizeMaxOpenVstPluginWindows(startupPreferences.clapMaxOpenPluginWindows);
         vstGraphicsProfile.detected = startupPreferences.vstGraphicsProfileDetected;
         vstGraphicsProfile.source = startupPreferences.vstGraphicsProfileSource;
         vstGraphicsProfile.lastDetectedLocal = startupPreferences.vstGraphicsProfileLastDetected;
@@ -8422,6 +9216,7 @@ namespace mw::gui
             refreshVstGraphicsProfile(true);
 
         refreshVstHostHelperStatusCache();
+        refreshClapHostHelperStatusCache();
 
         titleLabel.setText(mw::app::applicationTitle(), juce::dontSendNotification);
         titleLabel.setJustificationType(juce::Justification::centredLeft);
@@ -8473,9 +9268,9 @@ namespace mw::gui
         setupLabel(sequenceThoughtsLabel, "Thoughts:");
         setupLabel(trackSoundLibraryLabel, "Track Sound Library:");
         setupLabel(instrumentLabel, "Instrument:");
-        setupLabel(vstEffectLabel, "VST Effect 1:");
-        setupLabel(vstEffect2Label, "VST Effect 2:");
-        vstEffectStatusLabel.setText("VST effect status is shown in the log.", juce::dontSendNotification);
+        setupLabel(vstEffectLabel, "Effect Slot 1:");
+        setupLabel(vstEffect2Label, "Effect Slot 2:");
+        vstEffectStatusLabel.setText("Effect slot status is shown in the log.", juce::dontSendNotification);
         vstEffectStatusLabel.setJustificationType(juce::Justification::centredLeft);
         vstEffectStatusLabel.setColour(juce::Label::textColourId, juce::Colour(0xff5f6368));
         vstEffectStatusLabel.setFont(juce::FontOptions(12.0f));
@@ -8582,12 +9377,14 @@ namespace mw::gui
         backendCombo.addItem("SF2 / FluidSynth", 1);
         backendCombo.addItem("SFZ / sfizz-render", 2);
         backendCombo.addItem("VST3 Plugin", 3);
+        backendCombo.addItem("CLAP Instrument", 4);
         backendCombo.setSelectedId(1);
 
         trackBackendCombo.addItem("Use Project Backend", 1);
         trackBackendCombo.addItem("SF2", 2);
         trackBackendCombo.addItem("SFZ", 3);
         trackBackendCombo.addItem("VST3 Plugin", 4);
+        trackBackendCombo.addItem("CLAP Instrument", 5);
         trackBackendCombo.setSelectedId(1);
 
         vstEffectCombo.setTextWhenNothingSelected("Choose effect plugin");
@@ -8759,7 +9556,7 @@ namespace mw::gui
         {
             slider.setSliderStyle(juce::Slider::LinearHorizontal);
             slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 70, 22);
-            slider.setRange(0.0, 1.5, 0.01);
+            slider.setRange(0.0, mw::audio::kMainUiVolumeGainMaximum, 0.01);
             slider.setValue(1.0);
         };
 
@@ -9240,6 +10037,9 @@ namespace mw::gui
         audioClipEditorContent.reset();
 
 
+        stopClapInstrumentLiveAudition(true);
+        disarmClapLiveEngineSession(false);
+
         cancelRenderRequested = true;
         renderingInProgress = false;
 
@@ -9276,10 +10076,10 @@ namespace mw::gui
         refreshSfzButton.setTooltip("Rescan the selected SFZ location for available instruments.");
         sfzTestButton.setTooltip("Render a short test note through the selected SFZ setup.");
         applyBackendButton.setTooltip("Apply the selected project playback backend defaults to the project.");
-        applyTrackButton.setTooltip("Apply the selected track instrument/mixer settings and both VST Effect slot assignments, Enable, and Bypass states. VST editor Apply Changes commits plugin parameter edits.");
+        applyTrackButton.setTooltip("Apply the selected track instrument/mixer settings and both Effect Slot assignments, Enable, and Bypass states. Plugin editor Apply Changes commits plugin parameter edits.");
         changeTrackLibraryButton.setTooltip("Change the sample library used by the selected track.");
-        openVstPluginButton.setTooltip("Open the selected track's VST3 instrument editor. Choose a VST3 instrument and click Apply Track Settings first.");
-        openVstEffectButton.setTooltip("Open the selected track's VST3 effect slot 1 editor. Choose a Supported Effect from the slot 1 dropdown first, then use Apply Changes inside the editor for parameter edits.");
+        openVstPluginButton.setTooltip("Open the selected track's plugin instrument editor. VST3 and compatible CLAP instrument editors can be opened; use Apply Changes to commit plugin UI edits.");
+        openVstEffectButton.setTooltip("Open the selected track's Effect Slot 1 editor. VST3 and compatible CLAP effect editors are available for supported effects.");
         trackSfzButton.setTooltip("Choose an SFZ instrument specifically for the selected track.");
         addTrackButton.setTooltip("Add a new blank track to the active sequence.");
         duplicateTrackButton.setTooltip("Duplicate the currently selected track.");
@@ -9307,8 +10107,8 @@ namespace mw::gui
         redoPianoRollButton.setTooltip("Redo the most recently undone Piano Roll note edit.");
         clearPianoRollSelectionButton.setTooltip("Clear the current Piano Roll note selection.");
         openPianoRollPreviewPlayerButton.setTooltip("Open the Piano Roll Preview Player window.");
-        playProjectPreviewButton.setTooltip("Render and play a temporary preview of the current project.");
-        stopProjectPreviewButton.setTooltip("Stop the current project preview playback.");
+        playProjectPreviewButton.setTooltip("Preview the current project. Compatible CLAP-only projects may play directly; mixed or unsupported projects use the rendered preview fallback.");
+        stopProjectPreviewButton.setTooltip("Stop the current project preview playback, including direct CLAP preview when active.");
         renderButton.setTooltip("Render the full project to the selected output format.");
         renderSettingsButton.setTooltip("Open render settings for stem-file retention and render-output cleanup behavior.");
         renderSelectedTrackButton.setTooltip("Render only the selected track.");
@@ -9323,7 +10123,7 @@ namespace mw::gui
         projectDefaultsLabel.setTooltip("Default playback/rendering library settings for the whole project.");
         labelAndControl(soundFontLabel, soundFontCombo, "Choose the SoundFont preset list used for SF2 instruments.");
         soundFontPathBox.setTooltip("Current SoundFont file or folder path.");
-        labelAndControl(backendLabel, backendCombo, "Choose the project default backend before importing or adding tracks. VST3 exposes scanned instrument plugins as track instruments.");
+        labelAndControl(backendLabel, backendCombo, "Choose the project default backend before importing or adding tracks. VST3 and CLAP use scanned supported instrument plugins; compatible CLAP instruments can preview live and render/export.");
         labelAndControl(sfzLabel, sfzCombo, "Choose the SFZ instrument used by the project defaults.");
         sfzPathBox.setTooltip("Current SFZ file or folder path.");
         labelAndControl(sfzKeySwitchLabel, sfzKeySwitchBox, "Optional SFZ key switch note value for expression changes.");
@@ -9344,15 +10144,15 @@ namespace mw::gui
         labelAndControl(trackLabel, trackCombo, "Choose the track to edit, render, preview, or open in Piano Roll.");
         labelAndControl(trackSoundLibraryLabel, trackSoundLibraryBox, "Shows the sample library currently assigned to the selected track.");
         labelAndControl(instrumentLabel, instrumentCombo, "Choose the instrument or preset for the selected track, then click Apply Track Settings.");
-        enableVstEffectsToggle.setTooltip("Enable the selected track's VST3 effect slot 1 for preview/export processing. Use Apply Track Settings as the clear commit point for this track-level processing flag.");
-        bypassVstEffectToggle.setTooltip("Temporarily bypass the selected track's VST3 effect slot 1 while keeping the assignment and saved settings. Use Apply Track Settings as the clear commit point for this track-level bypass flag.");
-        enableVstEffect2Toggle.setTooltip("Enable the selected track's VST3 effect slot 2 for preview/export processing after slot 1. Use Apply Track Settings as the clear commit point.");
-        bypassVstEffect2Toggle.setTooltip("Temporarily bypass the selected track's VST3 effect slot 2 while keeping the assignment and saved settings.");
-        labelAndControl(vstEffectLabel, vstEffectCombo, "Choose the selected track's VST3 effect slot 1 from Plugin Manager > Supported Effects. MIDI, recorded, and imported AudioClip tracks can use this effect during offline preview/export. Use Apply Track Settings for assignment/Enable/Bypass; use the VST editor Apply Changes for parameter edits.");
-        labelAndControl(vstEffect2Label, vstEffect2Combo, "Choose the selected track's VST3 effect slot 2. During preview/export, slot 2 runs after slot 1 when both are enabled and not bypassed.");
-        vstEffectStatusLabel.setTooltip("Detailed VST effect chain status is written to the main log.");
-        labelAndControl(trackVolumeLabel, trackVolumeSlider, "Set the volume for the selected track.");
-        labelAndControl(masterVolumeLabel, masterVolumeSlider, "Set the master output volume for the project.");
+        enableVstEffectsToggle.setTooltip("Enable the selected track's Effect Slot 1. VST3 and CLAP effects process in preview/export when assigned, enabled, and not bypassed. Use Apply Track Settings as the commit point.");
+        bypassVstEffectToggle.setTooltip("Temporarily bypass the selected track's Effect Slot 1 while keeping the assignment and saved settings. Use Apply Track Settings as the clear commit point for this track-level bypass flag.");
+        enableVstEffect2Toggle.setTooltip("Enable the selected track's Effect Slot 2. VST3 and CLAP effects process after slot 1 when assigned, enabled, and not bypassed. Use Apply Track Settings as the commit point.");
+        bypassVstEffect2Toggle.setTooltip("Temporarily bypass the selected track's Effect Slot 2 while keeping the assignment and saved settings.");
+        labelAndControl(vstEffectLabel, vstEffectCombo, "Choose the selected track's Effect Slot 1 from supported VST3 effects or supported CLAP effects. Assigned effects process during preview/export when enabled; compatible CLAP effects can also run in the live preview path. Use Apply Track Settings for assignment/Enable/Bypass.");
+        labelAndControl(vstEffect2Label, vstEffect2Combo, "Choose the selected track's Effect Slot 2. VST3 and CLAP slot 2 run after slot 1 when assigned, enabled, and not bypassed.");
+        vstEffectStatusLabel.setTooltip("Detailed Effect Slot chain status is written to the main log.");
+        labelAndControl(trackVolumeLabel, trackVolumeSlider, "Set the selected track volume from 0.00 to 3.00. Values above 1.00 boost gain and may clip.");
+        labelAndControl(masterVolumeLabel, masterVolumeSlider, "Set the master output volume from 0.00 to 3.00. Values above 1.00 boost gain and may clip.");
         muteToggle.setTooltip("Mute the selected track when previewing or rendering.");
         soloToggle.setTooltip("Solo the selected track when previewing or rendering.");
         labelAndControl(tempoLabel, tempoBox, "Project tempo in beats per minute.");
@@ -9412,9 +10212,9 @@ namespace mw::gui
             vstExperimentalWarningAcknowledged = true;
 
             if (!mw::app::UserPreferencesStore::saveValue("vstExperimentalWarningAcknowledged", "1"))
-                logMessage("ERROR: Failed to save VST experimental warning acknowledgement.");
+                logMessage("ERROR: Failed to save plugin experimental warning acknowledgement.");
             else
-                logMessage("VST experimental warning acknowledged.");
+                logMessage("Plugin experimental warning acknowledged.");
         });
 
         applyPoorMansStudioWindowIcon(*warningWindow, PoorMansStudioWindowIcon::Caution);
@@ -9442,19 +10242,44 @@ namespace mw::gui
                 return isSupportedVstInstrumentPlugin(*descriptor);
             return true;
         }
+        if (hasResolvableClapPluginPath(assignment))
+            return true;
 
         const int selectedTrackBackendChoice = trackBackendCombo.getSelectedId() > 0 ? trackBackendCombo.getSelectedId() : 1;
         const bool trackUiWantsVst = assignment.backendType == mw::core::SampleBackendType::VST3
             || selectedTrackBackendChoice == 4
             || (selectedTrackBackendChoice == 1 && appliedProjectBackendId == 3);
+        const bool trackUiWantsClap = assignment.backendType == mw::core::SampleBackendType::CLAP
+            || selectedTrackBackendChoice == 5
+            || (selectedTrackBackendChoice == 1 && appliedProjectBackendId == 4);
+
+        const int selectedInstrumentId = instrumentCombo.getSelectedId();
+        if (trackUiWantsClap)
+        {
+            if (selectedInstrumentId > 0)
+            {
+                int instrumentPluginId = 1;
+                for (const auto& plugin : detectedClapPlugins)
+                {
+                    if (!isSupportedClapInstrumentPlugin(plugin))
+                        continue;
+
+                    if (instrumentPluginId == selectedInstrumentId && !plugin.pluginPath.empty())
+                        return true;
+
+                    ++instrumentPluginId;
+                }
+            }
+
+            return !currentProject->getUserSettings().clapPluginPath.empty();
+        }
 
         if (!trackUiWantsVst)
             return false;
 
-        // Keep the button/menu in sync with the same visible VST3 state used by
-        // the Instrument dropdown. If a VST3 plugin is selected in the dropdown
-        // or saved as the project default, Open VST Instrument can resolve/apply it.
-        const int selectedInstrumentId = instrumentCombo.getSelectedId();
+        // Keep the button/menu in sync with the same visible plugin state used by
+        // the Instrument dropdown. If a plugin is selected in the dropdown or saved
+        // as the project default, Open Plugin Instrument can resolve/apply it.
         if (selectedInstrumentId > 0)
         {
             int instrumentPluginId = 1;
@@ -9473,8 +10298,28 @@ namespace mw::gui
         return !currentProject->getUserSettings().vst3PluginPath.empty();
     }
 
+    bool MainComponent::selectedTrackHasAppliedClapInstrument() const
+    {
+        if (!currentProject)
+            return false;
+
+        const auto index = getSelectedTrackIndex();
+        if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+            return false;
+
+        const auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
+        if (track.isAudioClipTrack())
+            return false;
+
+        const auto& assignment = track.getInstrument();
+        return assignment.backendType == mw::core::SampleBackendType::CLAP
+            && hasResolvableClapPluginPath(assignment);
+    }
+
     bool MainComponent::selectedTrackHasOpenableVstEffect(int effectSlotIndex) const
     {
+        constexpr int clapEffectComboBaseId = 10000;
+
         if (!currentProject)
             return false;
 
@@ -9492,7 +10337,10 @@ namespace mw::gui
         const auto& effects = track.getVstEffects();
         if (const auto* slot = effects.slot(slotIndex))
         {
-            if (effects.slotEnabled(slotIndex) && slot->plugin.hasPluginIdentity())
+            if (effects.slotEnabled(slotIndex)
+                && (slot->backendType == mw::core::EffectSlotBackendType::VST3
+                    || slot->backendType == mw::core::EffectSlotBackendType::CLAP)
+                && slot->plugin.hasPluginIdentity())
                 return true;
         }
 
@@ -9500,6 +10348,26 @@ namespace mw::gui
         const int selectedEffectId = combo.getSelectedId();
         if (selectedEffectId <= 0)
             return false;
+
+        if (selectedEffectId > clapEffectComboBaseId)
+        {
+            if (detectedClapPlugins.empty())
+                return false;
+
+            int clapEffectPluginId = clapEffectComboBaseId + 1;
+            for (const auto& plugin : detectedClapPlugins)
+            {
+                if (!isSupportedClapEffectPlugin(plugin))
+                    continue;
+
+                if (clapEffectPluginId == selectedEffectId && !plugin.pluginPath.empty())
+                    return true;
+
+                ++clapEffectPluginId;
+            }
+
+            return false;
+        }
 
         int effectPluginId = 1;
         for (const auto& plugin : detectedVstPlugins)
@@ -9521,20 +10389,20 @@ namespace mw::gui
         const bool canOpenInstrument = selectedTrackHasAppliedVstPlugin();
         openVstPluginButton.setEnabled(canOpenInstrument);
         openVstPluginButton.setTooltip(canOpenInstrument
-            ? juce::String("Open the selected track's VST3 instrument editor.")
-            : juce::String("Choose a VST3 instrument/backend for the selected track before opening the instrument editor."));
+            ? juce::String("Open the selected track's plugin instrument editor. VST3 and compatible CLAP instrument editors are supported; use Apply Changes to commit UI edits.")
+            : juce::String("Choose a supported VST3 or CLAP plugin instrument for the selected track before opening the editor."));
 
         const bool canOpenEffect1 = selectedTrackHasOpenableVstEffect(0);
         openVstEffectButton.setEnabled(canOpenEffect1);
         openVstEffectButton.setTooltip(canOpenEffect1
-            ? juce::String("Open the selected track's enabled VST3 effect slot 1 editor.")
-            : juce::String("Choose a Supported Effect in VST Effect 1, tick Enable, then use Open Slot 1."));
+            ? juce::String("Open the selected track's enabled Effect Slot 1 editor. VST3 and compatible CLAP effect editors are available for supported effects.")
+            : juce::String("Choose a VST3 or CLAP Supported Effect in Effect Slot 1 and tick Enable to open the editor."));
 
         const bool canOpenEffect2 = selectedTrackHasOpenableVstEffect(1);
         openVstEffect2Button.setEnabled(canOpenEffect2);
         openVstEffect2Button.setTooltip(canOpenEffect2
-            ? juce::String("Open the selected track's enabled VST3 effect slot 2 editor.")
-            : juce::String("Choose a Supported Effect in VST Effect 2, tick Enable, then use Open Slot 2."));
+            ? juce::String("Open the selected track's enabled Effect Slot 2 editor. VST3 and compatible CLAP effect editors are available for supported effects.")
+            : juce::String("Choose a VST3 or CLAP Supported Effect in Effect Slot 2 and tick Enable to open the editor."));
 
         menuBar.repaint();
     }
@@ -9549,7 +10417,7 @@ namespace mw::gui
 
         // Refresh replaces the cached adapter list. The normal settings file keeps
         // only a compact numeric preferred adapter option; the adapter rows live in
-        // workspace/settings/vst_graphics_adapters.txt.
+        // workspace/settings/plugin_graphics_adapters.txt.
         vstGraphicsProfile.preferredPluginGpuId = preferredGpuIdForIndex(previousPreferredGpuIndex, vstGraphicsProfile.adapters);
         saveGraphicsAdaptersToCacheFile(vstGraphicsProfile.adapters);
 
@@ -9562,7 +10430,7 @@ namespace mw::gui
         });
 
         if (!firstLaunchAutoDetect)
-            logMessage("VST graphics adapter list refreshed and cached: " + juce::String(vstGraphicsProfile.summary()));
+            logMessage("Plugin graphics adapter list refreshed and cached: " + juce::String(vstGraphicsProfile.summary()));
     }
 
     void MainComponent::scanVstPlugins(bool showSummary)
@@ -9646,7 +10514,7 @@ namespace mw::gui
                 availableLabel.setJustificationType(juce::Justification::centredLeft);
                 addAndMakeVisible(availableLabel);
 
-                supportedFilterLabel.setText("Right list:", juce::dontSendNotification);
+                supportedFilterLabel.setText("Show:", juce::dontSendNotification);
                 supportedFilterLabel.setJustificationType(juce::Justification::centredLeft);
                 supportedFilterLabel.setFont(juce::FontOptions(14.5f));
                 addAndMakeVisible(supportedFilterLabel);
@@ -10092,7 +10960,7 @@ namespace mw::gui
 
                     if (pluginMatchesActiveSupportedPane(plugin))
                     {
-                        // The right pane is controlled by the "Right list" selector.
+                        // The right pane is controlled by the Show selector.
                         // The left Filter should not hide items after they are moved
                         // into Supported Instruments/Effects; otherwise the arrow
                         // buttons look broken when Filter is set to Unsupported.
@@ -10238,7 +11106,7 @@ namespace mw::gui
                             << ", or have compatibility warnings.\n\n";
 
                     if (targetOverride == mw::vst::VstPluginUserOverride::TreatAsEffect)
-                        message << "Moving a plugin into Supported Effects makes it available to the track VST Effect 1 and 2 dropdowns and offline two-slot effect-chain processing. It does not put the plugin in the instrument dropdown.\n\n";
+                        message << "Moving a plugin into Supported Effects makes it available as a CLAP/VST Effect in the track Effect Slot 1 and 2 dropdowns. It does not put the plugin in the instrument dropdown.\n\n";
                     else
                         message << "Effects, MIDI tools, panners, EQs, compressors, reverbs, and delays usually do not produce sound from Piano Roll notes and may behave incorrectly or crash when used as instruments.\n\n";
 
@@ -10543,7 +11411,7 @@ namespace mw::gui
                 text << "\nUser decision guide:\n";
                 text << "  Instruments/synths/samplers/drum plugins should report isInstrument=true or clearly accept MIDI notes and output audio.\n";
                 text << "  Supported Instruments feeds the current VST instrument choices.\n";
-                text << "  Supported Effects feeds the track-owned VST Effect 1 and 2 dropdowns and offline two-slot effect-chain processing.\n";
+                text << "  Supported Effects feeds the track-owned Effect Slot 1 and 2 dropdowns.\n";
                 text << "  Unsupported keeps plugins out of both supported lists until you move them.\n";
                 return text;
             }
@@ -10722,6 +11590,879 @@ namespace mw::gui
     }
 
 
+    void MainComponent::scanClapPlugins(bool showSummary)
+    {
+        if (showSummary)
+            showVstExperimentalWarningIfNeeded();
+
+        mw::clap::ClapScanOptions options;
+        options.includeWorkspaceFolder = true;
+        options.includeSystemFolders = true;
+        detectedClapPlugins = mw::clap::ClapPluginScanner::scan(options);
+        validateClapPluginCandidatesWithHelper();
+        applyClapPluginCatalogRecords(detectedClapPlugins);
+
+        int instruments = 0;
+        int effects = 0;
+        int midiTools = 0;
+        int unknown = 0;
+        int helperChecked = 0;
+        int helperOk = 0;
+        for (const auto& plugin : detectedClapPlugins)
+        {
+            switch (plugin.kind)
+            {
+                case mw::clap::ClapPluginKind::Instrument: ++instruments; break;
+                case mw::clap::ClapPluginKind::Effect: ++effects; break;
+                case mw::clap::ClapPluginKind::MidiTool: ++midiTools; break;
+                default: ++unknown; break;
+            }
+
+            if (plugin.helperChecked)
+            {
+                ++helperChecked;
+                if (plugin.helperExitCode == 0)
+                    ++helperOk;
+            }
+        }
+
+        if (showSummary)
+        {
+            juce::String message = juce::String("CLAP scan complete. Found ") + juce::String(static_cast<int>(detectedClapPlugins.size()))
+                + " plugin(s): " + juce::String(instruments) + " instrument-like, "
+                + juce::String(effects) + " effect-like, " + juce::String(midiTools)
+                + " MIDI-tool-like, " + juce::String(unknown) + " unknown.";
+
+            if (helperChecked > 0)
+                message += " Validated " + juce::String(helperChecked) + " plugin(s); " + juce::String(helperOk) + " validated.";
+            else
+                message += " CLAP validation was not available; showing path-only scan results.";
+
+            message += " Supported CLAP effects can be assigned as CLAP Effect slots, used during preview/render where compatible, and opened in compatible editor windows when available.";
+            logMessage(message);
+        }
+    }
+
+    void MainComponent::validateClapPluginCandidatesWithHelper()
+    {
+        if (detectedClapPlugins.empty())
+            return;
+
+        const auto helperPath = mw::app::AppPaths::clapHostFolder() / "PoorMansStudioClapHost.exe";
+        const juce::File helperFile(helperPath.string());
+
+        if (!helperFile.existsAsFile())
+        {
+            for (auto& plugin : detectedClapPlugins)
+                plugin.statusMessage += " CLAP validation was not available for this plugin.";
+            return;
+        }
+
+        for (auto& plugin : detectedClapPlugins)
+        {
+            int exitCode = -1;
+            const auto pathArgument = quoteCommandArgument(juce::String(plugin.pluginPath.string()));
+            const auto output = runVstHostHelperCommandForStatus(helperFile, "--scan-json " + pathArgument, 3500, exitCode);
+
+            plugin.helperChecked = true;
+            plugin.helperExitCode = exitCode;
+            plugin.helperOutput = output.substring(0, 2400).toStdString();
+            mergeClapHelperJsonIntoDescriptor(plugin, output);
+
+            if (exitCode == 0)
+            {
+                plugin.status = mw::clap::ClapPluginScanStatus::Candidate;
+                if (plugin.statusMessage.empty())
+                    plugin.statusMessage = plugin.abiProbed
+                        ? "CLAP plugin details were read successfully. Assigned instruments and effects are available in the app where supported."
+                        : "CLAP plugin path validated successfully.";
+            }
+            else if (exitCode == 3)
+            {
+                plugin.status = mw::clap::ClapPluginScanStatus::Missing;
+                if (plugin.statusMessage.empty())
+                    plugin.statusMessage = "This CLAP plugin path is missing.";
+            }
+            else
+            {
+                plugin.status = mw::clap::ClapPluginScanStatus::Unsupported;
+                if (plugin.statusMessage.empty())
+                    plugin.statusMessage = "This CLAP plugin could not be validated. Code: " + std::to_string(exitCode) + ".";
+            }
+        }
+    }
+
+    void MainComponent::openClapPluginManagerWindow()
+    {
+        showVstExperimentalWarningIfNeeded();
+
+        if (detectedClapPlugins.empty())
+            scanClapPlugins(false);
+
+        if (clapPluginManagerWindow != nullptr)
+        {
+            clapPluginManagerWindow->toFront(true);
+            return;
+        }
+
+        class ClapPluginManagerContent final : public juce::Component,
+                                             public WindowPendingCloseHandler
+        {
+        public:
+            explicit ClapPluginManagerContent(std::vector<mw::clap::ClapPluginDescriptor> pluginsIn)
+                : plugins(std::move(pluginsIn)),
+                  libraryModel(*this, false),
+                  supportedModel(*this, true)
+            {
+                title.setText("CLAP Plugin Manager", juce::dontSendNotification);
+                title.setFont(juce::FontOptions(18.0f, juce::Font::bold));
+                title.setJustificationType(juce::Justification::centredLeft);
+                addAndMakeVisible(title);
+
+                filterLabel.setText("Filter:", juce::dontSendNotification);
+                filterLabel.setJustificationType(juce::Justification::centredLeft);
+                filterLabel.setFont(juce::FontOptions(16.0f));
+                addAndMakeVisible(filterLabel);
+
+                filterCombo.addItem("All CLAP Plugins", 1);
+                filterCombo.addItem("Supported Instruments", 2);
+                filterCombo.addItem("Supported Effects", 3);
+                filterCombo.addItem("Unsupported", 4);
+                filterCombo.addItem("Checked Plugins", 5);
+                filterCombo.addItem("Failed / Missing", 6);
+                filterCombo.setSelectedId(activeFilterId, juce::dontSendNotification);
+                filterCombo.onChange = [this]
+                {
+                    activeFilterId = juce::jlimit(1, 6, filterCombo.getSelectedId());
+                    rebuildLists();
+                    rebuildDetails();
+                };
+                addAndMakeVisible(filterCombo);
+
+                searchLabel.setText("Search:", juce::dontSendNotification);
+                searchLabel.setJustificationType(juce::Justification::centredLeft);
+                searchLabel.setFont(juce::FontOptions(16.0f));
+                addAndMakeVisible(searchLabel);
+
+                searchBox.setTextToShowWhenEmpty("name, vendor, path, role...", juce::Colours::grey);
+                searchBox.setFont(juce::FontOptions(16.0f));
+                searchBox.onTextChange = [this] { rebuildLists(); rebuildDetails(); };
+                addAndMakeVisible(searchBox);
+
+                libraryLabel.setText("Plugin Library", juce::dontSendNotification);
+                libraryLabel.setFont(juce::FontOptions(16.5f, juce::Font::bold));
+                libraryLabel.setJustificationType(juce::Justification::centredLeft);
+                addAndMakeVisible(libraryLabel);
+
+                supportedLabel.setText("Supported Plugins", juce::dontSendNotification);
+                supportedLabel.setFont(juce::FontOptions(16.5f, juce::Font::bold));
+                supportedLabel.setJustificationType(juce::Justification::centredLeft);
+                addAndMakeVisible(supportedLabel);
+
+                supportedFilterLabel.setText("Show:", juce::dontSendNotification);
+                supportedFilterLabel.setJustificationType(juce::Justification::centredLeft);
+                supportedFilterLabel.setFont(juce::FontOptions(14.5f));
+                addAndMakeVisible(supportedFilterLabel);
+
+                supportedFilterCombo.addItem("Supported Instruments", 1);
+                supportedFilterCombo.addItem("Supported Effects", 2);
+                supportedFilterCombo.setSelectedId(activeSupportedFilterId, juce::dontSendNotification);
+                supportedFilterCombo.setTooltip("Choose whether the right pane shows supported CLAP instruments or supported CLAP effects.");
+                supportedFilterCombo.onChange = [this]
+                {
+                    activeSupportedFilterId = juce::jlimit(1, 2, supportedFilterCombo.getSelectedId());
+                    rebuildLists();
+                    rebuildDetails();
+                };
+                addAndMakeVisible(supportedFilterCombo);
+
+                libraryList.setModel(&libraryModel);
+                libraryList.setMultipleSelectionEnabled(true);
+                libraryList.setRowHeight(pluginRowHeight());
+                libraryList.setColour(juce::ListBox::backgroundColourId, juce::Colours::black.withAlpha(0.20f));
+                libraryList.setTooltip("All detected CLAP plugins not currently in the selected supported category. The scanner checks workspace\\clap and standard Windows CLAP folders, including vendor subfolders. Select one or more, then use Add >.");
+                if (auto* viewport = libraryList.getViewport())
+                    viewport->setScrollBarsShown(true, true);
+                addAndMakeVisible(libraryList);
+
+                supportedList.setModel(&supportedModel);
+                supportedList.setMultipleSelectionEnabled(true);
+                supportedList.setRowHeight(pluginRowHeight());
+                supportedList.setColour(juce::ListBox::backgroundColourId, juce::Colours::black.withAlpha(0.20f));
+                supportedList.setTooltip("CLAP plugins currently shown in the selected supported category.");
+                if (auto* viewport = supportedList.getViewport())
+                    viewport->setScrollBarsShown(true, true);
+                addAndMakeVisible(supportedList);
+
+                moveActionLabel.setText("Move", juce::dontSendNotification);
+                moveActionLabel.setJustificationType(juce::Justification::centred);
+                moveActionLabel.setFont(juce::FontOptions(14.5f, juce::Font::bold));
+                moveActionLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+                addAndMakeVisible(moveActionLabel);
+
+                moveRightButton.setButtonText("Add >");
+                moveRightButton.setTooltip("Add selected CLAP plugins to the shown Supported Instruments or Supported Effects list.");
+                moveRightButton.onClick = [this] { moveSelectedToSupported(); };
+                addAndMakeVisible(moveRightButton);
+
+                moveLeftButton.setButtonText("< Remove");
+                moveLeftButton.setTooltip("Move selected supported CLAP plugins back to Unsupported.");
+                moveLeftButton.onClick = [this] { moveSelectedToUnsupported(); };
+                addAndMakeVisible(moveLeftButton);
+
+                applyButton.setButtonText("Apply Changes");
+                applyButton.setTooltip("Save pending CLAP Plugin Manager catalog changes.");
+                applyButton.onClick = [this] { applyPendingChanges(); };
+                addAndMakeVisible(applyButton);
+
+                revertButton.setButtonText("Revert Changes");
+                revertButton.setTooltip("Discard pending CLAP Plugin Manager changes since the last Apply.");
+                revertButton.onClick = [this] { discardPendingChanges(); };
+                addAndMakeVisible(revertButton);
+
+                resetOverrideButton.setButtonText("Reset Selected");
+                resetOverrideButton.setTooltip("Reset selected CLAP catalog overrides back to scanner/helper detection. Pending until Apply Changes.");
+                resetOverrideButton.onClick = [this] { resetSelectedOverrides(); };
+                addAndMakeVisible(resetOverrideButton);
+
+                rescanButton.setButtonText("Rescan");
+                rescanButton.setTooltip("Rescan CLAP plugins in workspace\\clap and the standard Windows CLAP folders, including vendor subfolders. Prompts if there are unapplied CLAP manager changes.");
+                rescanButton.onClick = [this] { requestRescanWithPendingPrompt(); };
+                addAndMakeVisible(rescanButton);
+
+                revealFolderButton.setButtonText("Open workspace\\clap");
+                revealFolderButton.onClick = [this]
+                {
+                    if (onRevealWorkspaceFolderRequested)
+                        onRevealWorkspaceFolderRequested();
+                };
+                addAndMakeVisible(revealFolderButton);
+
+                copyInfoButton.setButtonText("Copy Plugin Info");
+                copyInfoButton.onClick = [this]
+                {
+                    juce::SystemClipboard::copyTextToClipboard(details.getText());
+                };
+                addAndMakeVisible(copyInfoButton);
+
+                details.setMultiLine(true);
+                details.setReadOnly(true);
+                details.setScrollbarsShown(true);
+                details.setCaretVisible(false);
+                details.setFont(juce::FontOptions(16.0f));
+                details.setTooltip("Details for the highlighted CLAP plugin. Select multiple plugins for a bulk-selection summary.");
+                addAndMakeVisible(details);
+
+                help.setText("Choose which CLAP instruments and effects are shown in Poor Man's Studio. Use Add >, < Remove, and Apply Changes. Scans workspace\\clap and the standard Windows CLAP folders.", juce::dontSendNotification);
+                help.setJustificationType(juce::Justification::centredLeft);
+                help.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+                help.setFont(juce::FontOptions(15.0f));
+                addAndMakeVisible(help);
+
+                rebuildLists();
+                rebuildDetails();
+                updatePendingButtons();
+            }
+
+            ~ClapPluginManagerContent() override
+            {
+                libraryList.setModel(nullptr);
+                supportedList.setModel(nullptr);
+            }
+
+            void setPlugins(std::vector<mw::clap::ClapPluginDescriptor> pluginsIn)
+            {
+                plugins = std::move(pluginsIn);
+                pendingOverrides.clear();
+                rebuildLists();
+                rebuildDetails();
+                updatePendingButtons();
+            }
+
+            bool requestCloseWithPendingPrompt(std::function<void()> closeAction) override
+            {
+                if (!hasPendingChanges())
+                {
+                    if (closeAction)
+                        closeAction();
+                    return true;
+                }
+
+                juce::Component::SafePointer<ClapPluginManagerContent> safeThis(this);
+                juce::AlertWindow::showYesNoCancelBox(juce::AlertWindow::QuestionIcon,
+                                                       "CLAP Plugin Manager",
+                                                       "Apply your CLAP Plugin Manager changes, discard them and close, or cancel?",
+                                                       "Apply",
+                                                       "Discard",
+                                                       "Cancel",
+                                                       nullptr,
+                                                       juce::ModalCallbackFunction::create([safeThis, closeAction](int result)
+                                                       {
+                                                           if (safeThis == nullptr)
+                                                               return;
+
+                                                           if (result == 1)
+                                                           {
+                                                               safeThis->applyPendingChanges();
+                                                               if (closeAction)
+                                                                   closeAction();
+                                                           }
+                                                           else if (result == 2)
+                                                           {
+                                                               safeThis->discardPendingChanges();
+                                                               if (closeAction)
+                                                                   closeAction();
+                                                           }
+                                                       }));
+                return true;
+            }
+
+            void resized() override
+            {
+                auto area = getLocalBounds().reduced(14);
+                title.setBounds(area.removeFromTop(28));
+                area.removeFromTop(6);
+
+                auto topRow = area.removeFromTop(32);
+                filterLabel.setBounds(topRow.removeFromLeft(55));
+                filterCombo.setBounds(topRow.removeFromLeft(220));
+                topRow.removeFromLeft(14);
+                searchLabel.setBounds(topRow.removeFromLeft(65));
+                searchBox.setBounds(topRow);
+                area.removeFromTop(8);
+
+                auto labelsRow = area.removeFromTop(28);
+                const int centreWidth = 112;
+                auto leftHeader = labelsRow.removeFromLeft((labelsRow.getWidth() - centreWidth) / 2);
+                auto centreHeader = labelsRow.removeFromLeft(centreWidth);
+                libraryLabel.setBounds(leftHeader);
+                moveActionLabel.setBounds(centreHeader.removeFromBottom(24));
+                supportedLabel.setBounds(labelsRow.removeFromLeft(175));
+                supportedFilterLabel.setBounds(labelsRow.removeFromLeft(72));
+                supportedFilterCombo.setBounds(labelsRow.reduced(0, 1));
+                area.removeFromTop(4);
+
+                auto bottomArea = area.removeFromBottom(170);
+                auto buttonRow = bottomArea.removeFromBottom(34);
+                copyInfoButton.setBounds(buttonRow.removeFromRight(150));
+                buttonRow.removeFromRight(8);
+                revealFolderButton.setBounds(buttonRow.removeFromRight(180));
+                buttonRow.removeFromRight(8);
+                rescanButton.setBounds(buttonRow.removeFromRight(110));
+                buttonRow.removeFromRight(8);
+                resetOverrideButton.setBounds(buttonRow.removeFromRight(130));
+                buttonRow.removeFromRight(8);
+                revertButton.setBounds(buttonRow.removeFromRight(130));
+                buttonRow.removeFromRight(8);
+                applyButton.setBounds(buttonRow.removeFromRight(130));
+
+                bottomArea.removeFromBottom(8);
+                help.setBounds(bottomArea.removeFromBottom(42));
+                bottomArea.removeFromBottom(8);
+                details.setBounds(bottomArea);
+
+                area.removeFromBottom(10);
+                auto listArea = area;
+                auto leftPane = listArea.removeFromLeft((listArea.getWidth() - centreWidth) / 2);
+                auto centrePane = listArea.removeFromLeft(centreWidth);
+                auto rightPane = listArea;
+                libraryList.setBounds(leftPane);
+                supportedList.setBounds(rightPane);
+
+                auto moveButtons = centrePane.reduced(8);
+                moveButtons.removeFromTop(juce::jmax(0, (moveButtons.getHeight() - 74) / 2));
+                moveRightButton.setBounds(moveButtons.removeFromTop(32));
+                moveButtons.removeFromTop(10);
+                moveLeftButton.setBounds(moveButtons.removeFromTop(32));
+            }
+
+            std::function<void()> onRescanRequested;
+            std::function<void()> onRevealWorkspaceFolderRequested;
+            std::function<void(const std::vector<std::pair<int, mw::clap::ClapPluginUserOverride>>&)> onApplyOverridesRequested;
+
+        private:
+            static constexpr int pluginRowHeight() { return 42; }
+
+            static juce::String clapScanStatusDisplayText(const mw::clap::ClapPluginDescriptor& plugin)
+            {
+                switch (plugin.status)
+                {
+                    case mw::clap::ClapPluginScanStatus::Candidate: return "Found";
+                    case mw::clap::ClapPluginScanStatus::Missing: return "Missing";
+                    case mw::clap::ClapPluginScanStatus::Unsupported: return "Check failed";
+                    default: return "Unknown";
+                }
+            }
+
+            static juce::String helperValidationDisplayText(const mw::clap::ClapPluginDescriptor& plugin, bool includeExitCode)
+            {
+                if (!plugin.helperChecked)
+                    return "Not checked";
+
+                juce::String text;
+                if (plugin.helperExitCode == 0)
+                    text = "OK";
+                else if (plugin.helperExitCode == 3)
+                    text = "Missing";
+                else
+                    text = "Check failed";
+
+                juce::ignoreUnused(includeExitCode);
+                return text;
+            }
+
+            class PluginListModel final : public juce::ListBoxModel
+            {
+            public:
+                PluginListModel(ClapPluginManagerContent& ownerIn, bool supportedPaneIn)
+                    : owner(ownerIn), supportedPane(supportedPaneIn) {}
+
+                int getNumRows() override
+                {
+                    return static_cast<int>((supportedPane ? owner.supportedIndexes : owner.libraryIndexes).size());
+                }
+
+                void paintListBoxItem(int rowNumber, juce::Graphics& g, int width, int height, bool rowIsSelected) override
+                {
+                    const auto& indexes = supportedPane ? owner.supportedIndexes : owner.libraryIndexes;
+                    if (rowNumber < 0 || rowNumber >= static_cast<int>(indexes.size()))
+                        return;
+
+                    const auto pluginIndex = indexes[static_cast<std::size_t>(rowNumber)];
+                    if (pluginIndex < 0 || pluginIndex >= static_cast<int>(owner.plugins.size()))
+                        return;
+
+                    const auto plugin = owner.pluginWithPendingOverride(pluginIndex);
+                    g.fillAll(rowIsSelected ? juce::Colours::blue.withAlpha(0.32f)
+                                            : (rowNumber % 2 == 0 ? juce::Colours::white.withAlpha(0.045f)
+                                                                 : juce::Colours::black.withAlpha(0.08f)));
+
+                    g.setColour(juce::Colours::white);
+                    g.setFont(juce::FontOptions(14.5f, juce::Font::bold));
+                    const auto name = juce::String(plugin.displayName()).trim();
+                    g.drawFittedText(name.isNotEmpty() ? name : "Unnamed CLAP Plugin", 8, 3, width - 16, 18, juce::Justification::centredLeft, 1);
+
+                    juce::String sub;
+                    sub << "CLAP • " << clapPluginGroupName(plugin)
+                        << " • " << ClapPluginManagerContent::clapScanStatusDisplayText(plugin);
+                    if (plugin.userOverride != mw::clap::ClapPluginUserOverride::None)
+                        sub << " • " << juce::String(mw::clap::clapPluginUserOverrideToString(plugin.userOverride));
+
+                    g.setColour(juce::Colours::lightgrey);
+                    g.setFont(juce::FontOptions(12.0f));
+                    g.drawFittedText(sub, 8, 22, width - 16, 17, juce::Justification::centredLeft, 1);
+                }
+
+                void selectedRowsChanged(int) override { owner.rebuildDetails(); }
+
+            private:
+                ClapPluginManagerContent& owner;
+                bool supportedPane = false;
+            };
+
+            static juce::String cleanPath(const std::filesystem::path& path)
+            {
+                return juce::String(path.string()).trim();
+            }
+
+            bool rightPaneShowsEffects() const { return activeSupportedFilterId == 2; }
+
+            bool hasPendingChanges() const { return !pendingOverrides.empty(); }
+
+            mw::clap::ClapPluginDescriptor pluginWithPendingOverride(int pluginIndex) const
+            {
+                auto plugin = plugins[static_cast<std::size_t>(pluginIndex)];
+                const auto it = pendingOverrides.find(pluginIndex);
+                if (it == pendingOverrides.end())
+                    return plugin;
+
+                plugin.userOverride = it->second;
+                if (it->second == mw::clap::ClapPluginUserOverride::TreatAsInstrument)
+                {
+                    plugin.kind = mw::clap::ClapPluginKind::Instrument;
+                    plugin.classificationReason += " Pending override: Treat as Instrument.";
+                }
+                else if (it->second == mw::clap::ClapPluginUserOverride::TreatAsEffect)
+                {
+                    plugin.kind = mw::clap::ClapPluginKind::Effect;
+                    plugin.classificationReason += " Pending override: Treat as Effect.";
+                }
+                else if (it->second == mw::clap::ClapPluginUserOverride::TreatAsUnsupported)
+                {
+                    plugin.kind = plugin.detectedKind;
+                    plugin.classificationReason += " Pending override: Treat as Unsupported.";
+                }
+                else
+                {
+                    plugin.kind = plugin.detectedKind;
+                    plugin.userOverride = mw::clap::ClapPluginUserOverride::None;
+                    plugin.classificationReason += " Pending override: Reset to detected.";
+                }
+
+                return plugin;
+            }
+
+            bool matchesSearch(const mw::clap::ClapPluginDescriptor& plugin) const
+            {
+                const auto query = searchBox.getText().trim().toLowerCase();
+                if (query.isEmpty())
+                    return true;
+
+                juce::String haystack;
+                haystack << plugin.displayName() << " " << plugin.vendor << " " << plugin.category << " "
+                         << plugin.uid << " " << plugin.pluginPath.string() << " " << plugin.binaryPath.string() << " "
+                         << mw::clap::clapPluginKindToString(plugin.kind) << " " << plugin.statusMessage << " "
+                         << plugin.classificationReason;
+                return haystack.toLowerCase().contains(query);
+            }
+
+            bool matchesFilter(const mw::clap::ClapPluginDescriptor& plugin) const
+            {
+                switch (activeFilterId)
+                {
+                    case 2: return isSupportedClapInstrumentPlugin(plugin);
+                    case 3: return isSupportedClapEffectPlugin(plugin);
+                    case 4: return !isSupportedClapInstrumentPlugin(plugin) && !isSupportedClapEffectPlugin(plugin);
+                    case 5: return plugin.helperChecked;
+                    case 6: return isClapPluginBlockedOrMissing(plugin);
+                    default: return true;
+                }
+            }
+
+            bool belongsInSupportedPane(const mw::clap::ClapPluginDescriptor& plugin) const
+            {
+                return rightPaneShowsEffects() ? isSupportedClapEffectPlugin(plugin) : isSupportedClapInstrumentPlugin(plugin);
+            }
+
+            void rebuildLists()
+            {
+                libraryIndexes.clear();
+                supportedIndexes.clear();
+
+                for (int i = 0; i < static_cast<int>(plugins.size()); ++i)
+                {
+                    const auto plugin = pluginWithPendingOverride(i);
+                    if (!matchesSearch(plugin) || !matchesFilter(plugin))
+                        continue;
+
+                    if (belongsInSupportedPane(plugin))
+                        supportedIndexes.push_back(i);
+                    else
+                        libraryIndexes.push_back(i);
+                }
+
+                libraryList.updateContent();
+                supportedList.updateContent();
+                libraryList.repaint();
+                supportedList.repaint();
+                updatePendingButtons();
+            }
+
+            std::vector<int> selectedPluginIndexes(const juce::ListBox& list, const std::vector<int>& visibleIndexes) const
+            {
+                std::vector<int> selected;
+                for (int row = 0; row < static_cast<int>(visibleIndexes.size()); ++row)
+                    if (list.isRowSelected(row))
+                        selected.push_back(visibleIndexes[static_cast<std::size_t>(row)]);
+                return selected;
+            }
+
+            void setOverrideForSelection(const std::vector<int>& selected, mw::clap::ClapPluginUserOverride overrideValue)
+            {
+                for (const auto pluginIndex : selected)
+                    if (pluginIndex >= 0 && pluginIndex < static_cast<int>(plugins.size()))
+                        pendingOverrides[pluginIndex] = overrideValue;
+
+                rebuildLists();
+                rebuildDetails();
+                updatePendingButtons();
+            }
+
+            void moveSelectedToSupported()
+            {
+                const auto selected = selectedPluginIndexes(libraryList, libraryIndexes);
+                if (selected.empty())
+                {
+                    details.setText("Select one or more CLAP plugins in the Plugin Library, then click Add >.", juce::dontSendNotification);
+                    return;
+                }
+
+                setOverrideForSelection(selected, rightPaneShowsEffects()
+                    ? mw::clap::ClapPluginUserOverride::TreatAsEffect
+                    : mw::clap::ClapPluginUserOverride::TreatAsInstrument);
+            }
+
+            void moveSelectedToUnsupported()
+            {
+                const auto selected = selectedPluginIndexes(supportedList, supportedIndexes);
+                if (selected.empty())
+                {
+                    details.setText("Select one or more CLAP plugins in the Supported Plugins pane, then click < Remove.", juce::dontSendNotification);
+                    return;
+                }
+
+                setOverrideForSelection(selected, mw::clap::ClapPluginUserOverride::TreatAsUnsupported);
+            }
+
+            void resetSelectedOverrides()
+            {
+                auto selected = selectedPluginIndexes(libraryList, libraryIndexes);
+                const auto supportedSelected = selectedPluginIndexes(supportedList, supportedIndexes);
+                selected.insert(selected.end(), supportedSelected.begin(), supportedSelected.end());
+
+                if (selected.empty())
+                {
+                    details.setText("Select one or more CLAP plugins, then click Reset Selected.", juce::dontSendNotification);
+                    return;
+                }
+
+                setOverrideForSelection(selected, mw::clap::ClapPluginUserOverride::None);
+            }
+
+            void applyPendingChanges()
+            {
+                if (!hasPendingChanges())
+                {
+                    details.setText("No pending CLAP Plugin Manager changes to apply.", juce::dontSendNotification);
+                    return;
+                }
+
+                std::vector<std::pair<int, mw::clap::ClapPluginUserOverride>> changes;
+                for (const auto& [pluginIndex, overrideValue] : pendingOverrides)
+                    changes.push_back({ pluginIndex, overrideValue });
+
+                if (onApplyOverridesRequested)
+                    onApplyOverridesRequested(changes);
+
+                pendingOverrides.clear();
+                rebuildLists();
+                rebuildDetails();
+                updatePendingButtons();
+            }
+
+            void discardPendingChanges()
+            {
+                pendingOverrides.clear();
+                rebuildLists();
+                rebuildDetails();
+                updatePendingButtons();
+            }
+
+            void requestRescanWithPendingPrompt()
+            {
+                if (!hasPendingChanges())
+                {
+                    if (onRescanRequested)
+                        onRescanRequested();
+                    return;
+                }
+
+                juce::Component::SafePointer<ClapPluginManagerContent> safeThis(this);
+                juce::AlertWindow::showYesNoCancelBox(juce::AlertWindow::QuestionIcon,
+                                                       "CLAP Plugin Manager",
+                                                       "You have unapplied CLAP Plugin Manager changes. Save changes before rescanning?",
+                                                       "Apply",
+                                                       "Discard",
+                                                       "Cancel",
+                                                       nullptr,
+                                                       juce::ModalCallbackFunction::create([safeThis](int result)
+                                                       {
+                                                           if (safeThis == nullptr)
+                                                               return;
+
+                                                           if (result == 1)
+                                                           {
+                                                               safeThis->applyPendingChanges();
+                                                               if (safeThis->onRescanRequested)
+                                                                   safeThis->onRescanRequested();
+                                                           }
+                                                           else if (result == 2)
+                                                           {
+                                                               safeThis->discardPendingChanges();
+                                                               if (safeThis->onRescanRequested)
+                                                                   safeThis->onRescanRequested();
+                                                           }
+                                                       }));
+            }
+
+            void updatePendingButtons()
+            {
+                const auto hasPending = hasPendingChanges();
+                applyButton.setEnabled(hasPending);
+                revertButton.setEnabled(hasPending);
+            }
+
+            void rebuildDetails()
+            {
+                auto selected = selectedPluginIndexes(libraryList, libraryIndexes);
+                const auto supportedSelected = selectedPluginIndexes(supportedList, supportedIndexes);
+                selected.insert(selected.end(), supportedSelected.begin(), supportedSelected.end());
+
+                if (selected.empty())
+                {
+                    juce::String text;
+                    int supportedInstruments = 0;
+                    int supportedEffects = 0;
+                    int helperChecked = 0;
+                    int rejectedOrMissing = 0;
+                    for (int i = 0; i < static_cast<int>(plugins.size()); ++i)
+                    {
+                        const auto plugin = pluginWithPendingOverride(i);
+                        if (isSupportedClapInstrumentPlugin(plugin)) ++supportedInstruments;
+                        if (isSupportedClapEffectPlugin(plugin)) ++supportedEffects;
+                        if (plugin.helperChecked) ++helperChecked;
+                        if (isClapPluginBlockedOrMissing(plugin)) ++rejectedOrMissing;
+                    }
+
+                    text << "Found " << static_cast<int>(plugins.size()) << " CLAP plugin(s).\n";
+                    text << "Supported Instruments: " << supportedInstruments << "    Supported Effects: " << supportedEffects << "\n";
+                    text << "Checked Plugins: " << helperChecked << "    Failed / Missing: " << rejectedOrMissing << "\n\n";
+                    text << "Scan roots: workspace\\clap, C:\\Program Files\\Common Files\\CLAP, C:\\Program Files (x86)\\Common Files\\CLAP.\n";
+                    text << "Drop .clap files or bundles into workspace\\clap, or install CLAP plugins in one of the system CLAP folders, then rescan.\n";
+                    text << "Use Apply Changes to save CLAP catalog edits.\n";
+                    details.setText(text, juce::dontSendNotification);
+                    return;
+                }
+
+                if (selected.size() > 1)
+                {
+                    juce::String text;
+                    text << static_cast<int>(selected.size()) << " CLAP plugins selected.\n";
+                    text << "Use Add >, < Remove, or Reset Selected to stage catalog changes, then Apply Changes.\n";
+                    details.setText(text, juce::dontSendNotification);
+                    return;
+                }
+
+                const auto pluginIndex = selected.front();
+                if (pluginIndex < 0 || pluginIndex >= static_cast<int>(plugins.size()))
+                    return;
+
+                const auto plugin = pluginWithPendingOverride(pluginIndex);
+                juce::String text;
+                text << "Name: " << juce::String(plugin.displayName()) << "\n";
+                text << "Format: CLAP\n";
+                text << "Group: " << clapPluginGroupName(plugin) << "\n";
+                text << "Status: " << clapPluginFinalStatusText(plugin) << "\n";
+                text << "Detected type: " << juce::String(mw::clap::clapPluginKindToString(plugin.detectedKind)) << "\n";
+                text << "Catalog type: " << juce::String(mw::clap::clapPluginKindToString(plugin.kind)) << "\n";
+                text << "Manual choice: " << juce::String(mw::clap::clapPluginUserOverrideToString(plugin.userOverride)) << "\n";
+                text << "Instrument catalog: " << (isSupportedClapInstrumentPlugin(plugin) ? "Shown" : "Hidden") << "\n";
+                text << "Effect catalog: " << (isSupportedClapEffectPlugin(plugin) ? "Shown" : "Hidden") << "\n";
+                if (plugin.helperChecked)
+                    text << "Check: " << helperValidationDisplayText(plugin, false) << "\n";
+                if (!plugin.vendor.empty())
+                    text << "Vendor: " << juce::String(plugin.vendor) << "\n";
+                if (!plugin.version.empty())
+                    text << "Plugin version: " << juce::String(plugin.version) << "\n";
+                if (!plugin.description.empty())
+                    text << "Description: " << juce::String(plugin.description) << "\n";
+                text << "Path: " << cleanPath(plugin.pluginPath) << "\n";
+
+                details.setText(text, juce::dontSendNotification);
+            }
+
+            std::vector<mw::clap::ClapPluginDescriptor> plugins;
+            std::map<int, mw::clap::ClapPluginUserOverride> pendingOverrides;
+            std::vector<int> libraryIndexes;
+            std::vector<int> supportedIndexes;
+            int activeFilterId = 1;
+            int activeSupportedFilterId = 2;
+
+            PluginListModel libraryModel;
+            PluginListModel supportedModel;
+            juce::Label title;
+            juce::Label filterLabel;
+            juce::ComboBox filterCombo;
+            juce::Label searchLabel;
+            juce::TextEditor searchBox;
+            juce::Label libraryLabel;
+            juce::Label supportedLabel;
+            juce::Label supportedFilterLabel;
+            juce::ComboBox supportedFilterCombo;
+            juce::ListBox libraryList;
+            juce::ListBox supportedList;
+            juce::Label moveActionLabel;
+            juce::TextButton moveRightButton;
+            juce::TextButton moveLeftButton;
+            juce::TextButton applyButton;
+            juce::TextButton revertButton;
+            juce::TextButton resetOverrideButton;
+            juce::TextButton rescanButton;
+            juce::TextButton revealFolderButton;
+            juce::TextButton copyInfoButton;
+            juce::TextEditor details;
+            juce::Label help;
+        };
+
+        auto* content = new ClapPluginManagerContent(detectedClapPlugins);
+        juce::Component::SafePointer<ClapPluginManagerContent> safeContent(content);
+
+        content->onRescanRequested = [this, safeContent]
+        {
+            scanClapPlugins(true);
+            populateVstEffectCombo();
+            if (safeContent != nullptr)
+                safeContent->setPlugins(detectedClapPlugins);
+        };
+
+        content->onApplyOverridesRequested = [this, safeContent](const std::vector<std::pair<int, mw::clap::ClapPluginUserOverride>>& changes)
+        {
+            int saved = 0;
+            for (const auto& [pluginIndex, overrideValue] : changes)
+            {
+                if (pluginIndex < 0 || pluginIndex >= static_cast<int>(detectedClapPlugins.size()))
+                    continue;
+
+                const auto& plugin = detectedClapPlugins[static_cast<std::size_t>(pluginIndex)];
+                if (!updateClapPluginCatalogRecord(plugin, overrideValue))
+                {
+                    logMessage("ERROR: Failed to save CLAP plugin catalog override for " + juce::String(plugin.displayName()) + ".");
+                    continue;
+                }
+
+                ++saved;
+                logMessage(juce::String("CLAP Plugin Manager: ") + juce::String(plugin.displayName())
+                    + " override set to " + juce::String(mw::clap::clapPluginUserOverrideToString(overrideValue)) + ".");
+            }
+
+            applyClapPluginCatalogRecords(detectedClapPlugins);
+            populateVstEffectCombo();
+            updateOpenVstPluginButtonState();
+            if (safeContent != nullptr)
+                safeContent->setPlugins(detectedClapPlugins);
+
+            logMessage("CLAP Plugin Manager applied " + juce::String(saved) + " catalog override change(s). CLAP effects can be assigned to Effect Slots as CLAP Effects.");
+        };
+
+        content->onRevealWorkspaceFolderRequested = [this]
+        {
+            const auto folderPath = mw::app::AppPaths::clapFolder();
+            std::error_code ec;
+            std::filesystem::create_directories(folderPath, ec);
+            const auto folder = juce::File(folderPath.string());
+            folder.revealToUser();
+            logMessage("CLAP workspace folder: " + folder.getFullPathName());
+        };
+
+        auto window = std::make_unique<PianoRollDocumentWindow>("CLAP Plugin Manager", [this, safeContent]
+        {
+            if (safeContent != nullptr)
+            {
+                safeContent->requestCloseWithPendingPrompt([this] { clapPluginManagerWindow = nullptr; });
+                return;
+            }
+
+            clapPluginManagerWindow = nullptr;
+        });
+        window->setResizable(true, true);
+        window->setContentOwned(content, true);
+        window->centreWithSize(1360, 860);
+        window->setVisible(true);
+        applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::VSTPlugin);
+        clapPluginManagerWindow = std::move(window);
+    }
+
+
     juce::String MainComponent::runVstHostHelperCommandForStatus(const juce::File& helperFile, const juce::String& argument, int timeoutMs, int& exitCode)
     {
         exitCode = -1;
@@ -10758,6 +12499,9 @@ namespace mw::gui
     void MainComponent::refreshVstHostHelperStatusCache()
     {
         vstHostHelperStatus = {};
+        vstHostHelperStatus.displayName = "VST Host Helper";
+        vstHostHelperStatus.helperFolderHint = "workspace\\vst_host";
+        vstHostHelperStatus.helperExecutableName = "PoorMansStudioVstHost.exe";
         vstHostHelperStatus.checked = true;
         vstHostHelperStatus.checkedAtLocal = juce::Time::getCurrentTime().formatted("%Y-%m-%d %H:%M:%S");
 
@@ -10808,7 +12552,7 @@ namespace mw::gui
         }
 
         auto* content = new HelperStatusContent(vstHostHelperStatus);
-        auto window = std::make_unique<HelperStatusWindow>([this] { vstHostHelperStatusWindow = nullptr; });
+        auto window = std::make_unique<HelperStatusWindow>("VST Host Helper Status", [this] { vstHostHelperStatusWindow = nullptr; });
         content->onOk = [this]
         {
             juce::MessageManager::callAsync([this]
@@ -10821,6 +12565,90 @@ namespace mw::gui
         window->centreWithSize(content->getWidth(), content->getHeight());
         window->setVisible(true);
         vstHostHelperStatusWindow = std::move(window);
+    }
+
+
+    void MainComponent::refreshClapHostHelperStatusCache()
+    {
+        clapHostHelperStatus = {};
+        clapHostHelperStatus.displayName = "CLAP Host Helper";
+        clapHostHelperStatus.helperFolderHint = "workspace\\clap_host";
+        clapHostHelperStatus.helperExecutableName = "PoorMansStudioClapHost.exe";
+        clapHostHelperStatus.checked = true;
+        clapHostHelperStatus.checkedAtLocal = juce::Time::getCurrentTime().formatted("%Y-%m-%d %H:%M:%S");
+
+        const auto helperPath = mw::app::AppPaths::clapHostFolder() / "PoorMansStudioClapHost.exe";
+        const juce::File helperFile(helperPath.string());
+        clapHostHelperStatus.executablePath = helperFile.getFullPathName();
+        clapHostHelperStatus.executableFound = helperFile.existsAsFile();
+
+        if (!clapHostHelperStatus.executableFound)
+        {
+            clapHostHelperStatus.errorText = "Helper executable was not found.";
+            logMessage("CLAP host helper startup check: missing " + clapHostHelperStatus.executablePath);
+            return;
+        }
+
+        int exitCode = -1;
+        clapHostHelperStatus.versionOutput = runVstHostHelperCommandForStatus(helperFile, "--version", 1800, exitCode);
+        clapHostHelperStatus.versionOk = exitCode == 0
+            && clapHostHelperStatus.versionOutput.contains("PoorMansStudioClapHost");
+
+        exitCode = -1;
+        clapHostHelperStatus.pingOutput = runVstHostHelperCommandForStatus(helperFile, "--ping", 1800, exitCode);
+        clapHostHelperStatus.pingOk = exitCode == 0 && clapHostHelperStatus.pingOutput.containsIgnoreCase("pong");
+
+        exitCode = -1;
+        clapHostHelperStatus.helpOutput = runVstHostHelperCommandForStatus(helperFile, "--help", 2200, exitCode);
+        clapHostHelperStatus.scanCommandsOk = exitCode == 0
+            && clapHostHelperStatus.helpOutput.contains("--scan")
+            && clapHostHelperStatus.helpOutput.contains("--scan-json");
+
+        if (clapHostHelperStatus.allOk())
+            logMessage("CLAP host helper startup check: OK (" + clapHostHelperStatus.versionOutput.replace("\n", " ").trim() + ").");
+        else
+        {
+            clapHostHelperStatus.errorText = "One or more helper checks failed.";
+            logMessage("CLAP plugin validation startup check: FAILED. CLAP scanning will continue with limited validation.");
+        }
+    }
+
+    void MainComponent::showClapHostHelperStatusWindow()
+    {
+        showVstExperimentalWarningIfNeeded();
+
+        if (clapHostHelperStatusWindow != nullptr)
+        {
+            clapHostHelperStatusWindow->toFront(true);
+            return;
+        }
+
+        auto* content = new HelperStatusContent(clapHostHelperStatus);
+        auto window = std::make_unique<HelperStatusWindow>("CLAP Host Helper Status", [this] { clapHostHelperStatusWindow = nullptr; });
+        content->onOk = [this]
+        {
+            juce::MessageManager::callAsync([this]
+            {
+                clapHostHelperStatusWindow = nullptr;
+            });
+        };
+
+        window->setContentOwned(content, true);
+        window->centreWithSize(content->getWidth(), content->getHeight());
+        window->setVisible(true);
+        clapHostHelperStatusWindow = std::move(window);
+    }
+
+    void MainComponent::closeAllClapPluginWindows()
+    {
+        showVstExperimentalWarningIfNeeded();
+
+        const int closedCount = closePluginEditorWindowGroups(false, true);
+
+        if (closedCount > 0)
+            logMessage("Closed " + juce::String(closedCount) + " CLAP plugin editor window" + (closedCount == 1 ? "." : "s."));
+        else
+            logMessage("Close All Plugin Windows: no CLAP plugin editor windows are open.");
     }
 
     void MainComponent::openVstSettingsWindow()
@@ -10844,9 +12672,9 @@ namespace mw::gui
                     { "vstGraphicsProfileLastDetected", vstGraphicsProfile.lastDetectedLocal },
                     { "vstGraphicsProfileSummary", vstGraphicsProfile.summary() }
                 }))
-                logMessage("ERROR: Failed to save VST plugin graphics adapter preference.");
+                logMessage("ERROR: Failed to save plugin graphics adapter preference.");
             else
-                logMessage("VST plugin graphics adapter set to: " + juce::String(vstGraphicsProfile.preferredPluginGpuId));
+                logMessage("Plugin graphics adapter set to: " + juce::String(vstGraphicsProfile.preferredPluginGpuId));
 
             if (content != nullptr)
                 content->setGraphicsProfile(vstGraphicsProfile);
@@ -10887,6 +12715,85 @@ namespace mw::gui
         window->setVisible(true);
         applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::VSTPlugin);
         vstSettingsWindow = std::move(window);
+    }
+
+    void MainComponent::openClapSettingsWindow()
+    {
+        showVstExperimentalWarningIfNeeded();
+
+        if (clapSettingsWindow != nullptr)
+        {
+            clapSettingsWindow->toFront(true);
+            return;
+        }
+
+        auto* content = new VstSettingsContent(
+            vstGraphicsProfile,
+            clapCompatibilityWarningsEnabled,
+            clapSafePluginUiMode,
+            vstWarningStyleId,
+            clapMaxOpenPluginWindows,
+            "CLAP Settings / Compatibility",
+            "Max Open CLAP Windows:",
+            "Safe CLAP Plugin UI Mode",
+            "Safe CLAP Plugin UI Mode opens CLAP plugin editors in a more cautious way to reduce crashes or unstable behavior. Recommended if a CLAP editor is having display or attach issues.",
+            "System Default / Auto lets Windows and the plugin decide. Adapter choices are a shared preference for plugin editor windows, not a guarantee. CLAP editor hosting uses the same graphics-adapter preference as VST3.",
+            "CLAP compatibility warnings use the shared third-party plugin Dragon warning. The selected adapter is the preferred graphics adapter for plugin editor windows. CLAP editor hosting uses the same adapter preference as VST3. Some plugins, drivers, or Windows graphics settings may still choose a different rendering path. This does not affect audio render quality.");
+
+        content->onPreferredGpuChanged = [this, content](const std::string& preferredGpuId)
+        {
+            vstGraphicsProfile.preferredPluginGpuId = preferredGpuId.empty() ? std::string("auto") : preferredGpuId;
+
+            const int preferredIndex = preferredGpuIndexForId(vstGraphicsProfile.preferredPluginGpuId, vstGraphicsProfile.adapters);
+            if (!mw::app::UserPreferencesStore::saveValues({
+                    { "vstPreferredPluginGpuIndex", std::to_string(preferredIndex) },
+                    { "vstGraphicsProfileDetected", vstGraphicsProfile.detected ? "1" : "0" },
+                    { "vstGraphicsProfileSource", vstGraphicsProfile.source },
+                    { "vstGraphicsProfileLastDetected", vstGraphicsProfile.lastDetectedLocal },
+                    { "vstGraphicsProfileSummary", vstGraphicsProfile.summary() }
+                }))
+                logMessage("ERROR: Failed to save CLAP/plugin graphics adapter preference.");
+            else
+                logMessage("CLAP/plugin graphics adapter set to: " + juce::String(vstGraphicsProfile.preferredPluginGpuId));
+
+            if (content != nullptr)
+                content->setGraphicsProfile(vstGraphicsProfile);
+        };
+
+        content->onMaxOpenPluginWindowsChanged = [this](int maxOpenPluginWindows)
+        {
+            clapMaxOpenPluginWindows = sanitizeMaxOpenVstPluginWindows(maxOpenPluginWindows);
+
+            if (!mw::app::UserPreferencesStore::saveIntValue("clapMaxOpenPluginWindows", clapMaxOpenPluginWindows))
+                logMessage("ERROR: Failed to save maximum CLAP plugin window preference.");
+            else
+                logMessage("Maximum open CLAP plugin windows set to: " + juce::String(clapMaxOpenPluginWindows));
+        };
+
+        content->onSafePluginUiModeChanged = [this](bool enabled)
+        {
+            clapSafePluginUiMode = enabled;
+
+            if (!mw::app::UserPreferencesStore::saveBoolValue("clapSafePluginUiMode", enabled))
+                logMessage("ERROR: Failed to save Safe CLAP Plugin UI Mode preference.");
+            else
+                logMessage(enabled ? "Safe CLAP Plugin UI Mode enabled." : "Safe CLAP Plugin UI Mode disabled.");
+        };
+
+        content->onRefreshRequested = [this, content]
+        {
+            refreshVstGraphicsProfile(false);
+            if (content != nullptr)
+                content->setGraphicsProfile(vstGraphicsProfile);
+        };
+
+        auto window = std::make_unique<PianoRollDocumentWindow>("CLAP Settings", [this] { clapSettingsWindow = nullptr; });
+        window->setResizable(true, true);
+        window->setContentOwned(content, true);
+        window->centreWithSize(860, 520);
+        window->setVisible(true);
+        applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::VSTPlugin);
+        clapSettingsWindow = std::move(window);
     }
 
     void MainComponent::assignSelectedTrackVstPlugin(const mw::vst::VstPluginDescriptor& descriptor)
@@ -10944,6 +12851,57 @@ namespace mw::gui
             juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "VST3 Compatibility Warning", warning);
     }
 
+    void MainComponent::assignSelectedTrackClapPlugin(const mw::clap::ClapPluginDescriptor& descriptor)
+    {
+        if (!currentProject)
+            return;
+
+        const auto index = getSelectedTrackIndex();
+        if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+            return;
+
+        auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
+        if (track.isAudioClipTrack())
+            return;
+
+        const auto currentAssignment = track.getInstrument();
+        const auto currentPluginPath = resolveClapPluginPath(currentAssignment);
+        const bool samePluginIdentity = currentAssignment.backendType == mw::core::SampleBackendType::CLAP
+            && ((!currentAssignment.vst3.uid.empty() && !descriptor.uid.empty() && currentAssignment.vst3.uid == descriptor.uid)
+                || (!currentPluginPath.empty()
+                    && !descriptor.pluginPath.empty()
+                    && pathsReferToSameLocation(currentPluginPath, descriptor.pluginPath)));
+
+        if (!samePluginIdentity)
+            closeVstPluginWindowForTrack(index, "Closed open VST plugin window before replacing the track plugin assignment.");
+
+        showVstExperimentalWarningIfNeeded();
+
+        auto assignment = currentAssignment;
+        applyClapPluginDescriptorToAssignment(assignment, descriptor);
+
+        track.setInstrumentAssignment(assignment);
+        trackBackendCombo.setSelectedId(5, juce::dontSendNotification);
+        refreshTrackSoundLibraryDisplay();
+        updateOpenVstPluginButtonState();
+        populateInstrumentCombo();
+        populateVstEffectCombo();
+        updateOpenVstPluginButtonState();
+        updateTrackSummary(*currentProject);
+        refreshTrackManagerText();
+        refreshOpenPianoRollInstrumentControls();
+        setProjectDirty();
+
+        juce::String assignmentMessage = samePluginIdentity
+            ? "Confirmed CLAP plugin assignment for "
+            : "Assigned CLAP plugin to ";
+        assignmentMessage += getTrackDisplayName(index);
+        assignmentMessage += ": ";
+        assignmentMessage += juce::String(descriptor.displayName());
+        assignmentMessage += " (CLAP Instrument assignment saved).";
+        logMessage(assignmentMessage);
+    }
+
     void MainComponent::openSelectedTrackVstPluginUi()
     {
         if (!currentProject)
@@ -10958,8 +12916,618 @@ namespace mw::gui
 
         auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
         auto assignment = track.getInstrument();
-        if (repairVst3BundlePathIfPossible(assignment))
+        bool repairedPluginPath = repairVst3BundlePathIfPossible(assignment);
+        repairedPluginPath = repairClapPluginPathIfPossible(assignment) || repairedPluginPath;
+        if (repairedPluginPath)
             track.setInstrumentAssignment(assignment);
+
+        auto clapPluginPath = resolveClapPluginPath(track.getInstrument());
+        const int selectedTrackBackendChoice = trackBackendCombo.getSelectedId() > 0 ? trackBackendCombo.getSelectedId() : 1;
+        const bool wantsClapInstrument = track.getInstrument().backendType == mw::core::SampleBackendType::CLAP
+            || selectedTrackBackendChoice == 5
+            || (selectedTrackBackendChoice == 1 && appliedProjectBackendId == 4);
+
+        if (wantsClapInstrument)
+        {
+            if (track.getInstrument().backendType != mw::core::SampleBackendType::CLAP || clapPluginPath.empty())
+            {
+                if (detectedClapPlugins.empty())
+                    scanClapPlugins(false);
+
+                std::vector<mw::clap::ClapPluginDescriptor> instrumentPlugins;
+                for (const auto& plugin : detectedClapPlugins)
+                {
+                    if (isSupportedClapInstrumentPlugin(plugin))
+                        instrumentPlugins.push_back(plugin);
+                }
+
+                std::optional<mw::clap::ClapPluginDescriptor> descriptor;
+                const int selectedInstrumentId = instrumentCombo.getSelectedId();
+                if (selectedInstrumentId > 0 && selectedInstrumentId <= static_cast<int>(instrumentPlugins.size()))
+                    descriptor = instrumentPlugins[static_cast<std::size_t>(selectedInstrumentId - 1)];
+
+                if (!descriptor && currentProject)
+                {
+                    const auto& settings = currentProject->getUserSettings();
+                    for (const auto& plugin : instrumentPlugins)
+                    {
+                        if ((!settings.clapPluginUid.empty() && plugin.uid == settings.clapPluginUid)
+                            || (!settings.clapPluginPath.empty() && pathsReferToSameLocation(plugin.pluginPath, settings.clapPluginPath)))
+                        {
+                            descriptor = plugin;
+                            break;
+                        }
+                    }
+
+                    if (!descriptor && !settings.clapPluginPath.empty())
+                    {
+                        mw::clap::ClapPluginDescriptor savedDescriptor;
+                        savedDescriptor.pluginPath = settings.clapPluginPath;
+                        savedDescriptor.name = settings.clapPluginName.empty()
+                            ? settings.clapPluginPath.stem().string()
+                            : settings.clapPluginName;
+                        savedDescriptor.vendor = settings.clapPluginVendor;
+                        savedDescriptor.version = settings.clapPluginVersion;
+                        savedDescriptor.category = settings.clapPluginCategory;
+                        savedDescriptor.uid = settings.clapPluginUid;
+                        savedDescriptor.kind = mw::clap::ClapPluginKind::Instrument;
+                        savedDescriptor.status = mw::clap::ClapPluginScanStatus::Unknown;
+                        descriptor = savedDescriptor;
+                    }
+                }
+
+                if (descriptor)
+                {
+                    assignment = track.getInstrument();
+                    applyClapPluginDescriptorToAssignment(assignment, *descriptor);
+                    track.setInstrumentAssignment(assignment);
+                    trackBackendCombo.setSelectedId(5, juce::dontSendNotification);
+                    clapPluginPath = descriptor->pluginPath;
+                    refreshTrackSoundLibraryDisplay();
+                    populateInstrumentCombo();
+                    populateVstEffectCombo();
+                    updateTrackSummary(*currentProject);
+                    refreshTrackManagerText();
+                    refreshOpenPianoRollInstrumentControls();
+                    setProjectDirty();
+                    logMessage("Open Plugin Instrument: applied selected CLAP instrument to " + getTrackDisplayName(index) + ": " + descriptor->displayName());
+                }
+            }
+
+            if (track.getInstrument().backendType != mw::core::SampleBackendType::CLAP || clapPluginPath.empty())
+            {
+                logMessage("Open Plugin Instrument: selected track does not have a resolvable CLAP instrument. Choose a supported CLAP instrument, then click Open Plugin Instrument or Apply Track Settings.");
+                updateOpenVstPluginButtonState();
+                return;
+            }
+
+            if (clapPluginPath.empty() || !std::filesystem::exists(clapPluginPath))
+            {
+                logMessage("Open Plugin Instrument: CLAP plugin bundle was not found: " + clapPluginPath.string());
+                updateOpenVstPluginButtonState();
+                return;
+            }
+
+            showVstExperimentalWarningIfNeeded();
+
+            if (auto found = clapInstrumentEditorWindows.find(index); found != clapInstrumentEditorWindows.end() && found->second != nullptr)
+            {
+                found->second->toFront(true);
+                return;
+            }
+
+            const int effectiveWindowLimit = sanitizeMaxOpenVstPluginWindows(clapMaxOpenPluginWindows);
+            const int totalOpenPluginWindows = static_cast<int>(vstPluginEditorWindows.size() + clapInstrumentEditorWindows.size() + vstEffectEditorWindows.size() + clapEffectEditorWindows.size());
+            if (totalOpenPluginWindows >= effectiveWindowLimit)
+            {
+                const auto message = juce::String("Maximum open CLAP/plugin windows reached (")
+                    + juce::String(effectiveWindowLimit)
+                    + "). Close another plugin window first, or increase the limit in CLAP Plugins > CLAP Settings.";
+                logMessage(message);
+                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open Plugin Instrument", message);
+                return;
+            }
+
+            auto pluginAssignment = track.getInstrument().vst3;
+            if (pluginAssignment.bundlePath.empty())
+                pluginAssignment.bundlePath = clapPluginPath;
+
+            auto load = mw::clap::ClapEffectEditorHost::openEffectEditor(pluginAssignment, 48000.0, 512);
+            if (!load.success || load.instance == nullptr)
+            {
+                const auto message = juce::String(load.message.empty() ? "Could not open CLAP instrument editor." : load.message);
+                logMessage("Open CLAP instrument editor failed: " + message);
+                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open CLAP Instrument", message);
+                updateOpenVstPluginButtonState();
+                return;
+            }
+
+            class ClapInstrumentEditorHolder final : public juce::Component,
+                                                     public VstEditorStateProvider
+            {
+            public:
+                ClapInstrumentEditorHolder(std::unique_ptr<mw::clap::ClapEffectEditorInstance> instanceIn,
+                                           std::function<bool(const juce::String&)> onApplyStateIn,
+                                           std::function<void(const juce::String&)> onStatusChangedIn)
+                    : instance(std::move(instanceIn)),
+                      onApplyState(std::move(onApplyStateIn)),
+                      onStatusChanged(std::move(onStatusChangedIn))
+                {
+                    infoLabel.setJustificationType(juce::Justification::centred);
+                    infoLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+                    addAndMakeVisible(infoLabel);
+
+                    if (instance != nullptr && instance->hasGui())
+                    {
+                        infoLabel.setText("Opening CLAP instrument GUI...", juce::dontSendNotification);
+                        setSize(juce::jlimit(420, 1800, static_cast<int>(instance->width())),
+                                juce::jlimit(300, 1200, static_cast<int>(instance->height())));
+                    }
+                    else
+                    {
+                        infoLabel.setText("This CLAP instrument did not expose an embeddable GUI. Apply Changes can still capture state if the plugin exposes clap.state.", juce::dontSendNotification);
+                        setSize(620, 260);
+                    }
+                }
+
+                ~ClapInstrumentEditorHolder() override
+                {
+                    if (instance != nullptr)
+                        instance->hide();
+#if JUCE_WINDOWS
+                    destroyNativeViewport();
+#endif
+                }
+
+                juce::String captureCurrentVstStateBase64() override
+                {
+                    if (instance == nullptr)
+                        return {};
+
+                    std::string error;
+                    const auto state = instance->captureStateBase64(&error);
+                    if (state.empty() && !error.empty())
+                        setStatus("CLAP instrument state capture failed: " + juce::String(error));
+                    return juce::String(state);
+                }
+
+                bool restoreVstStateBase64(const juce::String& stateBase64) override
+                {
+                    if (instance == nullptr || stateBase64.isEmpty())
+                        return false;
+
+                    std::string error;
+                    const bool ok = instance->restoreStateBase64(stateBase64.toStdString(), &error);
+                    setStatus(ok ? "Loaded CLAP instrument state into this editor." : ("CLAP instrument state load failed: " + juce::String(error)));
+                    repaint();
+                    return ok;
+                }
+
+                void stopLiveAuditionForPreview() override {}
+
+                void requestApplyCurrentChanges()
+                {
+                    const auto currentState = captureCurrentVstStateBase64();
+                    if (currentState.isEmpty())
+                    {
+                        setStatus("Apply failed: CLAP instrument did not return state data.");
+                        return;
+                    }
+
+                    const bool applied = onApplyState && onApplyState(currentState);
+                    setStatus(applied
+                        ? "Applied CLAP instrument changes to this track."
+                        : "Apply failed: CLAP instrument assignment could not be updated.");
+                }
+
+                void parentHierarchyChanged() override { attachAndShowIfNeeded(); }
+                void visibilityChanged() override
+                {
+#if JUCE_WINDOWS
+                    updateNativeViewportBounds();
+#endif
+                    attachAndShowIfNeeded();
+                }
+                void moved() override
+                {
+#if JUCE_WINDOWS
+                    updateNativeViewportBounds();
+#endif
+                }
+
+                void resized() override
+                {
+                    infoLabel.setBounds(getLocalBounds().reduced(18));
+#if JUCE_WINDOWS
+                    updateNativeViewportBounds();
+#endif
+                    if (instance != nullptr && instance->hasGui())
+                    {
+                        std::string error;
+                        instance->resize(static_cast<std::uint32_t>(juce::jmax(1, getWidth())),
+                                         static_cast<std::uint32_t>(juce::jmax(1, getHeight())),
+                                         &error);
+                    }
+                }
+
+            private:
+                void setStatus(const juce::String& text)
+                {
+                    if (onStatusChanged)
+                        onStatusChanged(text);
+                }
+
+                void attachAndShowIfNeeded()
+                {
+                    if (attached || instance == nullptr || !instance->hasGui() || !isShowing())
+                        return;
+
+                    void* nativeHandle = nullptr;
+
+                    if (!instance->isFloating())
+                    {
+#if JUCE_WINDOWS
+                        if (!createNativeViewportIfNeeded())
+                            return;
+                        nativeHandle = nativeViewport;
+#else
+                        auto* topLevel = getTopLevelComponent();
+                        if (topLevel == nullptr)
+                            return;
+                        auto* peer = topLevel->getPeer();
+                        if (peer == nullptr)
+                            return;
+                        nativeHandle = peer->getNativeHandle();
+#endif
+                        if (nativeHandle == nullptr)
+                            return;
+                    }
+
+                    std::string error;
+                    if (!instance->attachToParent(nativeHandle, &error))
+                    {
+                        setStatus("CLAP instrument editor attach failed: " + juce::String(error));
+                        infoLabel.setText("CLAP instrument GUI was created, but could not attach to the dedicated host viewport. " + juce::String(error), juce::dontSendNotification);
+                        attached = true;
+                        return;
+                    }
+
+                    if (!instance->show(&error))
+                    {
+                        setStatus("CLAP instrument editor show failed: " + juce::String(error));
+                        infoLabel.setText("CLAP instrument GUI was created, but show() failed. " + juce::String(error), juce::dontSendNotification);
+                        attached = true;
+                        return;
+                    }
+
+#if JUCE_WINDOWS
+                    updateNativeViewportBounds();
+#endif
+                    infoLabel.setText(instance->isFloating()
+                        ? "CLAP instrument editor opened in the plugin's own floating window. Use Apply Changes here to commit state."
+                        : "CLAP instrument editor is attached inside a dedicated host viewport. Use Apply Changes to commit state.", juce::dontSendNotification);
+                    setStatus("CLAP instrument editor opened. Use Apply Changes to commit state for preview/render.");
+                    attached = true;
+                }
+
+#if JUCE_WINDOWS
+                bool createNativeViewportIfNeeded()
+                {
+                    auto* topLevel = getTopLevelComponent();
+                    if (topLevel == nullptr)
+                        return false;
+                    auto* peer = topLevel->getPeer();
+                    if (peer == nullptr)
+                        return false;
+
+                    auto* parentHwnd = static_cast<HWND>(peer->getNativeHandle());
+                    if (parentHwnd == nullptr)
+                        return false;
+
+                    if (nativeViewport != nullptr && nativeViewportParent != parentHwnd)
+                        destroyNativeViewport();
+
+                    if (nativeViewport == nullptr)
+                    {
+                        if (!ensureClapGuiViewportWindowClassRegistered())
+                            return false;
+
+                        nativeViewport = ::CreateWindowExW(WS_EX_NOPARENTNOTIFY,
+                                                           clapGuiViewportWindowClassName(),
+                                                           L"",
+                                                           WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                                                           0,
+                                                           0,
+                                                           juce::jmax(1, getWidth()),
+                                                           juce::jmax(1, getHeight()),
+                                                           parentHwnd,
+                                                           nullptr,
+                                                           ::GetModuleHandleW(nullptr),
+                                                           nullptr);
+                        nativeViewportParent = parentHwnd;
+                    }
+
+                    updateNativeViewportBounds();
+                    return nativeViewport != nullptr;
+                }
+
+                void updateNativeViewportBounds()
+                {
+                    if (nativeViewport == nullptr)
+                        return;
+
+                    auto* topLevel = getTopLevelComponent();
+                    if (topLevel == nullptr)
+                        return;
+                    auto* peer = topLevel->getPeer();
+                    if (peer == nullptr)
+                        return;
+
+                    auto* parentHwnd = static_cast<HWND>(peer->getNativeHandle());
+                    if (parentHwnd == nullptr)
+                        return;
+
+                    if (nativeViewportParent != parentHwnd)
+                    {
+                        destroyNativeViewport();
+                        return;
+                    }
+
+                    const auto screenBounds = getScreenBounds();
+                    POINT topLeft { screenBounds.getX(), screenBounds.getY() };
+                    ::ScreenToClient(parentHwnd, &topLeft);
+
+                    const int width = juce::jmax(1, screenBounds.getWidth());
+                    const int height = juce::jmax(1, screenBounds.getHeight());
+                    ::SetWindowPos(nativeViewport,
+                                   nullptr,
+                                   topLeft.x,
+                                   topLeft.y,
+                                   width,
+                                   height,
+                                   SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER);
+                    ::ShowWindow(nativeViewport, isShowing() ? SW_SHOWNOACTIVATE : SW_HIDE);
+                }
+
+                void destroyNativeViewport() noexcept
+                {
+                    if (nativeViewport != nullptr)
+                    {
+                        if (::IsWindow(nativeViewport))
+                            ::DestroyWindow(nativeViewport);
+                        nativeViewport = nullptr;
+                        nativeViewportParent = nullptr;
+                    }
+                }
+#endif
+
+                std::unique_ptr<mw::clap::ClapEffectEditorInstance> instance;
+                juce::Label infoLabel;
+                std::function<bool(const juce::String&)> onApplyState;
+                std::function<void(const juce::String&)> onStatusChanged;
+                bool attached = false;
+#if JUCE_WINDOWS
+                HWND nativeViewport = nullptr;
+                HWND nativeViewportParent = nullptr;
+#endif
+            };
+
+            const auto trackNumberTitle = "#" + juce::String(index + 1);
+            const auto trackNameTitle = juce::String(track.getName()).trim().isEmpty()
+                ? (juce::String("Track ") + juce::String(index + 1))
+                : juce::String(track.getName()).trim();
+            const auto pluginDisplayTitle = juce::String(pluginAssignment.name.empty() ? pluginAssignment.bundlePath.stem().string() : pluginAssignment.name);
+            const auto owningTrackTitle = "Track " + trackNumberTitle + " - [CLAP] " + pluginDisplayTitle;
+            const auto windowTitle = "Track: " + trackNumberTitle + " - " + trackNameTitle + " | CLAP: " + pluginDisplayTitle;
+            auto window = std::make_unique<PianoRollDocumentWindow>(windowTitle, [this, index]
+            {
+                clapInstrumentEditorWindows.erase(index);
+                updateOpenVstPluginButtonState();
+                logMessage("Closed track-owned CLAP instrument editor for " + getTrackDisplayName(index) + ". Use Apply Changes before closing to keep CLAP instrument UI edits; unapplied edits are discarded when the editor closes.");
+            });
+            auto safeHostContentRef = std::make_shared<juce::Component::SafePointer<VstPluginEditorHostContent>>();
+
+            auto* holder = new ClapInstrumentEditorHolder(
+                std::move(load.instance),
+                [this, index](const juce::String& stateBase64) -> bool
+                {
+                    if (!currentProject)
+                        return false;
+
+                    if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+                        return false;
+
+                    if (stateBase64.isEmpty())
+                        return false;
+
+                    auto& editedTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
+                    auto assignmentToUpdate = editedTrack.getInstrument();
+                    if (assignmentToUpdate.backendType != mw::core::SampleBackendType::CLAP || !assignmentToUpdate.vst3.hasPluginIdentity())
+                        return false;
+
+                    assignmentToUpdate.vst3.stateBase64 = stateBase64.toStdString();
+                    editedTrack.setInstrumentAssignment(assignmentToUpdate);
+
+                    cleanupPianoRollPreviewFiles();
+                    refreshTrackManagerText();
+                    recordExternalTrackStateUpdate(index);
+                    setProjectDirty();
+
+                    logMessage("Applied CLAP instrument UI changes for " + getTrackDisplayName(index) + ". Preview/render will restore this saved CLAP Instrument state before CLAP instrument rendering.");
+                    return true;
+                },
+                [safeHostContentRef](const juce::String& statusText)
+                {
+                    if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                        (*safeHostContentRef)->setToolbarStatus(statusText);
+                });
+
+            window->setResizable(true, true);
+            juce::Component::SafePointer<ClapInstrumentEditorHolder> safeHolder(holder);
+            auto* hostContent = new VstPluginEditorHostContent(
+                std::unique_ptr<juce::Component>(holder),
+                owningTrackTitle,
+                [safeHolder]
+                {
+                    if (safeHolder != nullptr)
+                        safeHolder->requestApplyCurrentChanges();
+                },
+                [this, index]
+                {
+                    renderClapInstrumentTestNoteForTrack(index);
+                },
+                [this, index, safeHolder, safeHostContentRef](int slot)
+                {
+                    if (!currentProject || safeHolder == nullptr)
+                        return;
+
+                    if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+                        return;
+
+                    auto& editedTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
+                    auto assignment = editedTrack.getInstrument();
+                    if (assignment.backendType != mw::core::SampleBackendType::CLAP || !assignment.vst3.hasPluginIdentity())
+                    {
+                        if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                            (*safeHostContentRef)->setToolbarStatus("CLAP Snapshot load failed: this track does not have a CLAP instrument assigned.");
+                        return;
+                    }
+
+                    std::string error;
+                    auto record = mw::clap::ClapSnapshotStore::loadSnapshot(assignment.vst3, mw::clap::ClapSnapshotRole::Instrument, slot, &error);
+                    if (!record)
+                    {
+                        const auto status = juce::String("CLAP Snapshot ") + juce::String(slot) + " load failed: " + juce::String(error);
+                        if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                            (*safeHostContentRef)->setToolbarStatus(status);
+                        logMessage(status);
+                        return;
+                    }
+
+                    if (!safeHolder->restoreVstStateBase64(record->stateBase64))
+                    {
+                        const auto status = juce::String("CLAP Snapshot ") + juce::String(slot) + " load failed: plugin rejected the saved state.";
+                        if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                            (*safeHostContentRef)->setToolbarStatus(status);
+                        logMessage(status);
+                        return;
+                    }
+
+                    assignment.vst3.stateBase64 = record->stateBase64;
+                    editedTrack.setInstrumentAssignment(assignment);
+                    cleanupPianoRollPreviewFiles();
+                    refreshTrackManagerText();
+                    recordExternalTrackStateUpdate(index);
+                    setProjectDirty();
+
+                    const auto status = juce::String("Loaded CLAP Snapshot ") + juce::String(slot) + " for this CLAP instrument.";
+                    if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                        (*safeHostContentRef)->setToolbarStatus(status);
+                    logMessage(status + " Track: " + getTrackDisplayName(index));
+                },
+                [this, index, safeHolder, safeHostContentRef](int slot)
+                {
+                    if (!currentProject || safeHolder == nullptr)
+                        return;
+
+                    if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+                        return;
+
+                    const auto& editedTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
+                    const auto assignment = editedTrack.getInstrument();
+                    if (assignment.backendType != mw::core::SampleBackendType::CLAP || !assignment.vst3.hasPluginIdentity())
+                    {
+                        if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                            (*safeHostContentRef)->setToolbarStatus("CLAP Snapshot save failed: this track does not have a CLAP instrument assigned.");
+                        return;
+                    }
+
+                    const auto currentState = safeHolder->captureCurrentVstStateBase64();
+                    if (currentState.isEmpty())
+                    {
+                        if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                            (*safeHostContentRef)->setToolbarStatus("CLAP Snapshot save failed: instrument plugin did not return state data.");
+                        return;
+                    }
+
+                    std::string error;
+                    const bool saved = mw::clap::ClapSnapshotStore::saveSnapshot(assignment.vst3, mw::clap::ClapSnapshotRole::Instrument, slot, currentState.toStdString(), &error);
+                    const auto status = saved
+                        ? (juce::String("Saved CLAP Snapshot ") + juce::String(slot) + " for this CLAP instrument.")
+                        : (juce::String("CLAP Snapshot ") + juce::String(slot) + " save failed: " + juce::String(error));
+                    if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                        (*safeHostContentRef)->setToolbarStatus(status);
+                    logMessage(status + " Track: " + getTrackDisplayName(index));
+                },
+                [this, index, safeHostContentRef](int slot)
+                {
+                    if (!currentProject)
+                        return;
+
+                    if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+                        return;
+
+                    const auto& editedTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
+                    const auto assignment = editedTrack.getInstrument();
+                    if (assignment.backendType != mw::core::SampleBackendType::CLAP || !assignment.vst3.hasPluginIdentity())
+                    {
+                        if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                            (*safeHostContentRef)->setToolbarStatus("CLAP Snapshot clear failed: this track does not have a CLAP instrument assigned.");
+                        return;
+                    }
+
+                    std::string error;
+                    const bool cleared = mw::clap::ClapSnapshotStore::clearSnapshot(assignment.vst3, mw::clap::ClapSnapshotRole::Instrument, slot, &error);
+                    const auto status = cleared
+                        ? (juce::String("Cleared CLAP Snapshot ") + juce::String(slot) + " for this CLAP instrument.")
+                        : (juce::String("CLAP Snapshot ") + juce::String(slot) + " clear failed: " + juce::String(error));
+                    if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                        (*safeHostContentRef)->setToolbarStatus(status);
+                    logMessage(status + " Track: " + getTrackDisplayName(index));
+                },
+                [this, index, safeHostContentRef]()
+                {
+                    if (!currentProject)
+                        return;
+
+                    if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+                        return;
+
+                    const auto& editedTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
+                    const auto assignment = editedTrack.getInstrument();
+                    if (assignment.backendType != mw::core::SampleBackendType::CLAP || !assignment.vst3.hasPluginIdentity())
+                    {
+                        if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                            (*safeHostContentRef)->setToolbarStatus("CLAP Snapshot clear failed: this track does not have a CLAP instrument assigned.");
+                        return;
+                    }
+
+                    std::string error;
+                    const bool cleared = mw::clap::ClapSnapshotStore::clearAllSnapshots(assignment.vst3, mw::clap::ClapSnapshotRole::Instrument, &error);
+                    const auto status = cleared
+                        ? juce::String("Cleared all CLAP Snapshots for this CLAP instrument.")
+                        : (juce::String("Clear all CLAP Snapshots failed: ") + juce::String(error));
+                    if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                        (*safeHostContentRef)->setToolbarStatus(status);
+                    logMessage(status + " Track: " + getTrackDisplayName(index));
+                },
+                "Test Instrument",
+                "Render and play a short CLAP instrument test note using the current open editor state without applying it to the project.");
+            *safeHostContentRef = juce::Component::SafePointer<VstPluginEditorHostContent>(hostContent);
+            window->setContentOwned(hostContent, true);
+            window->centreWithSize(juce::jmax(kMinimumVstEditorHostWidth, hostContent->getWidth() + 30),
+                                   juce::jmax(kMinimumVstEditorHostHeight, hostContent->getHeight() + 70));
+            window->enforceMinimumVstEditorHostSize();
+            applyPoorMansStudioCustomTitleBar(*window);
+            window->setVisible(true);
+            applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::VSTPlugin);
+            setPoorMansStudioNativeWindowTitle(*window, windowTitle);
+            clapInstrumentEditorWindows[index] = std::move(window);
+            if (!load.guiCreated)
+                logMessage("Open CLAP Instrument: " + juce::String(load.message));
+            updateOpenVstPluginButtonState();
+            return;
+        }
 
         auto bundlePath = resolveVst3BundlePath(track.getInstrument());
         if (track.getInstrument().backendType != mw::core::SampleBackendType::VST3
@@ -11024,14 +13592,14 @@ namespace mw::gui
                 refreshTrackManagerText();
                 refreshOpenPianoRollInstrumentControls();
                 setProjectDirty();
-                logMessage("Open VST Instrument: applied selected VST3 instrument to " + getTrackDisplayName(index) + ": " + descriptor->displayName());
+                logMessage("Open Plugin Instrument: applied selected VST3 instrument to " + getTrackDisplayName(index) + ": " + descriptor->displayName());
             }
         }
 
         if (track.getInstrument().backendType != mw::core::SampleBackendType::VST3
             || bundlePath.empty())
         {
-            logMessage("Open VST Instrument: selected track does not have a resolvable VST3 instrument. Choose a VST3 instrument, then click Open VST Instrument or Apply Track Settings.");
+            logMessage("Open Plugin Instrument: selected track does not have a resolvable VST3 instrument. Choose a supported plugin instrument, then click Open Plugin Instrument or Apply Track Settings. Currently VST3 only; CLAP support is planned.");
             updateOpenVstPluginButtonState();
             return;
         }
@@ -11055,15 +13623,15 @@ namespace mw::gui
                 + "Detected kind: " + juce::String(mw::vst::vstPluginKindToString(resolvedPluginDescriptor->detectedKind)) + "\n"
                 + "Final status: " + vstPluginFinalStatusText(*resolvedPluginDescriptor) + "\n\n"
                 + "Use VST3 Plugin Manager to review details or manually Treat as Instrument if you know it accepts MIDI notes and produces audio.";
-            logMessage(juce::String("Open VST Instrument blocked: ") + juce::String(resolvedPluginDescriptor->displayName()) + " is not a supported instrument.");
-            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open VST Instrument", message);
+            logMessage(juce::String("Open Plugin Instrument blocked: ") + juce::String(resolvedPluginDescriptor->displayName()) + " is not a supported instrument.");
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open Plugin Instrument", message);
             updateOpenVstPluginButtonState();
             return;
         }
 
         if (!std::filesystem::exists(bundlePath))
         {
-            logMessage("Open VST Instrument: plugin bundle was not found: " + bundlePath.string());
+            logMessage("Open Plugin Instrument: plugin bundle was not found: " + bundlePath.string());
             return;
         }
 
@@ -11080,9 +13648,9 @@ namespace mw::gui
         {
             const auto message = juce::String("Maximum open VST plugin windows reached (")
                 + juce::String(effectiveWindowLimit)
-                + "). Close another VST plugin window first, or use VST Plugins > Close All VST Plugin Windows.";
+                + "). Close another plugin window first, or use VST/CLAP close-window menu commands.";
             logMessage(message);
-            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open VST Instrument", message);
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open Plugin Instrument", message);
             return;
         }
 
@@ -11818,7 +14386,10 @@ namespace mw::gui
                 if (safeHolder != nullptr)
                     safeHolder->requestApplyCurrentChanges();
             },
-            {},
+            [this, index]
+            {
+                renderVstInstrumentTestNoteForTrack(index);
+            },
             [this, index, safeHolder, safeHostContentRef](int slot)
             {
                 if (!currentProject || safeHolder == nullptr)
@@ -11953,7 +14524,9 @@ namespace mw::gui
                 if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
                     (*safeHostContentRef)->setToolbarStatus(status);
                 logMessage(status + " Track: " + getTrackDisplayName(index));
-            });
+            },
+            "Test Instrument",
+            "Render and play a short VST3 instrument test note using the current open editor state without applying it to the project.");
         *safeHostContentRef = juce::Component::SafePointer<VstPluginEditorHostContent>(hostContent);
         window->setContentOwned(hostContent, true);
         window->centreWithSize(juce::jmax(kMinimumVstEditorHostWidth, hostContent->getWidth() + 30),
@@ -11976,7 +14549,7 @@ namespace mw::gui
         const auto index = getSelectedTrackIndex();
         if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
         {
-            logMessage("VST Effect UI: no valid selected track.");
+            logMessage("Effect Slot UI: no valid selected track.");
             return;
         }
 
@@ -11996,14 +14569,560 @@ namespace mw::gui
         auto* firstSlot = &effects.ensureSlot(slotIndexSize);
         if (firstSlot == nullptr || !firstSlot->plugin.hasPluginIdentity())
         {
-            logMessage("Open VST Effect: selected track does not have a VST3 effect selected for slot " + juce::String(slotNumber) + ". Choose a Supported Effect first.");
+            logMessage("Open Effect Slot: selected track does not have a supported effect selected for slot " + juce::String(slotNumber) + ". Choose a Supported Effect first.");
             updateOpenVstPluginButtonState();
             return;
         }
 
         if (!effects.slotEnabled(slotIndexSize))
         {
-            logMessage("Open VST Effect: slot " + juce::String(slotNumber) + " is assigned but not enabled. Tick Enable for this slot before opening the editor.");
+            logMessage("Open Effect Slot: slot " + juce::String(slotNumber) + " is assigned but not enabled. Tick Enable for this slot before opening the editor.");
+            updateOpenVstPluginButtonState();
+            return;
+        }
+
+        if (firstSlot->backendType == mw::core::EffectSlotBackendType::CLAP)
+        {
+            auto effectPlugin = firstSlot->plugin;
+            if (effectPlugin.bundlePath.empty() || !std::filesystem::exists(effectPlugin.bundlePath))
+            {
+                logMessage("Open Effect Slot: CLAP plugin bundle was not found: " + effectPlugin.bundlePath.string());
+                updateOpenVstPluginButtonState();
+                return;
+            }
+
+            if (auto found = clapEffectEditorWindows.find(effectWindowKey); found != clapEffectEditorWindows.end() && found->second != nullptr)
+            {
+                found->second->toFront(true);
+                return;
+            }
+
+            const int effectiveWindowLimit = sanitizeMaxOpenVstPluginWindows(clapMaxOpenPluginWindows);
+            const int totalOpenPluginWindows = static_cast<int>(vstPluginEditorWindows.size() + clapInstrumentEditorWindows.size() + vstEffectEditorWindows.size() + clapEffectEditorWindows.size());
+            if (totalOpenPluginWindows >= effectiveWindowLimit)
+            {
+                const auto message = juce::String("Maximum open CLAP/plugin windows reached (")
+                    + juce::String(effectiveWindowLimit)
+                    + "). Close another plugin window first, or increase the limit in CLAP Plugins > CLAP Settings.";
+                logMessage(message);
+                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open Effect Slot", message);
+                return;
+            }
+
+            auto load = mw::clap::ClapEffectEditorHost::openEffectEditor(effectPlugin, 48000.0, 512);
+            if (!load.success || load.instance == nullptr)
+            {
+                const auto message = juce::String(load.message.empty() ? "Could not open CLAP effect editor." : load.message);
+                logMessage("Open Effect Slot CLAP editor failed: " + message);
+                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open CLAP Effect Slot", message);
+                updateOpenVstPluginButtonState();
+                return;
+            }
+
+            class ClapEffectEditorHolder final : public juce::Component,
+                                                 public VstEditorStateProvider
+            {
+            public:
+                ClapEffectEditorHolder(std::unique_ptr<mw::clap::ClapEffectEditorInstance> instanceIn,
+                                       int effectSlotNumberIn,
+                                       std::function<bool(const juce::String&)> onApplyStateIn,
+                                       std::function<void(const juce::String&)> onStatusChangedIn)
+                    : instance(std::move(instanceIn)),
+                      effectSlotNumber(effectSlotNumberIn),
+                      onApplyState(std::move(onApplyStateIn)),
+                      onStatusChanged(std::move(onStatusChangedIn))
+                {
+                    infoLabel.setJustificationType(juce::Justification::centred);
+                    infoLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+                    addAndMakeVisible(infoLabel);
+
+                    if (instance != nullptr && instance->hasGui())
+                    {
+                        infoLabel.setText("Opening CLAP editor GUI...", juce::dontSendNotification);
+                        setSize(juce::jlimit(420, 1800, static_cast<int>(instance->width())),
+                                juce::jlimit(300, 1200, static_cast<int>(instance->height())));
+                    }
+                    else
+                    {
+                        infoLabel.setText("This CLAP effect did not expose an embeddable GUI. Apply Changes can still capture state if the plugin exposes clap.state.", juce::dontSendNotification);
+                        setSize(620, 260);
+                    }
+                }
+
+                ~ClapEffectEditorHolder() override
+                {
+                    if (instance != nullptr)
+                        instance->hide();
+#if JUCE_WINDOWS
+                    destroyNativeViewport();
+#endif
+                }
+
+                juce::String captureCurrentVstStateBase64() override
+                {
+                    if (instance == nullptr)
+                        return {};
+
+                    std::string error;
+                    const auto state = instance->captureStateBase64(&error);
+                    if (state.empty() && !error.empty())
+                        setStatus("CLAP state capture failed: " + juce::String(error));
+                    return juce::String(state);
+                }
+
+                bool restoreVstStateBase64(const juce::String& stateBase64) override
+                {
+                    if (instance == nullptr || stateBase64.isEmpty())
+                        return false;
+
+                    std::string error;
+                    const bool ok = instance->restoreStateBase64(stateBase64.toStdString(), &error);
+                    setStatus(ok ? "Loaded CLAP state into this editor." : ("CLAP state load failed: " + juce::String(error)));
+                    repaint();
+                    return ok;
+                }
+
+                void stopLiveAuditionForPreview() override
+                {
+                    // CLAP editor windows are edit/state windows. Test Effect can
+                    // audition the current state without committing it.
+                }
+
+                void requestApplyCurrentChanges()
+                {
+                    const auto currentState = captureCurrentVstStateBase64();
+                    if (currentState.isEmpty())
+                    {
+                        setStatus("Apply failed: CLAP plugin did not return state data.");
+                        return;
+                    }
+
+                    const bool applied = onApplyState && onApplyState(currentState);
+                    setStatus(applied
+                        ? "Applied CLAP effect changes to this track's Effect Slot " + juce::String(effectSlotNumber) + "."
+                        : "Apply failed: CLAP effect slot could not be updated.");
+                }
+
+                void parentHierarchyChanged() override { attachAndShowIfNeeded(); }
+                void visibilityChanged() override
+                {
+#if JUCE_WINDOWS
+                    updateNativeViewportBounds();
+#endif
+                    attachAndShowIfNeeded();
+                }
+                void moved() override
+                {
+#if JUCE_WINDOWS
+                    updateNativeViewportBounds();
+#endif
+                }
+
+                void resized() override
+                {
+                    infoLabel.setBounds(getLocalBounds().reduced(18));
+#if JUCE_WINDOWS
+                    updateNativeViewportBounds();
+#endif
+                    if (instance != nullptr && instance->hasGui())
+                    {
+                        std::string error;
+                        instance->resize(static_cast<std::uint32_t>(juce::jmax(1, getWidth())),
+                                         static_cast<std::uint32_t>(juce::jmax(1, getHeight())),
+                                         &error);
+                    }
+                }
+
+            private:
+                void setStatus(const juce::String& text)
+                {
+                    if (onStatusChanged)
+                        onStatusChanged(text);
+                }
+
+                void attachAndShowIfNeeded()
+                {
+                    if (attached || instance == nullptr || !instance->hasGui() || !isShowing())
+                        return;
+
+                    void* nativeHandle = nullptr;
+
+                    if (!instance->isFloating())
+                    {
+#if JUCE_WINDOWS
+                        if (!createNativeViewportIfNeeded())
+                            return;
+                        nativeHandle = nativeViewport;
+#else
+                        auto* topLevel = getTopLevelComponent();
+                        if (topLevel == nullptr)
+                            return;
+                        auto* peer = topLevel->getPeer();
+                        if (peer == nullptr)
+                            return;
+                        nativeHandle = peer->getNativeHandle();
+#endif
+                        if (nativeHandle == nullptr)
+                            return;
+                    }
+
+                    std::string error;
+                    if (!instance->attachToParent(nativeHandle, &error))
+                    {
+                        setStatus("CLAP editor attach failed: " + juce::String(error));
+                        infoLabel.setText("CLAP editor GUI was created, but could not attach to the dedicated host viewport. " + juce::String(error), juce::dontSendNotification);
+                        attached = true;
+                        return;
+                    }
+
+                    if (!instance->show(&error))
+                    {
+                        setStatus("CLAP editor show failed: " + juce::String(error));
+                        infoLabel.setText("CLAP editor GUI was created, but show() failed. " + juce::String(error), juce::dontSendNotification);
+                        attached = true;
+                        return;
+                    }
+
+#if JUCE_WINDOWS
+                    updateNativeViewportBounds();
+#endif
+                    infoLabel.setText(instance->isFloating()
+                        ? "CLAP editor opened in the plugin's own floating window. Use Apply Changes here to commit state."
+                        : "CLAP editor is attached inside a dedicated host viewport. Use Apply Changes to commit state.", juce::dontSendNotification);
+                    setStatus("CLAP editor opened in a contained viewport. Use Apply Changes to commit state for preview/render.");
+                    attached = true;
+                }
+
+#if JUCE_WINDOWS
+                bool createNativeViewportIfNeeded()
+                {
+                    auto* topLevel = getTopLevelComponent();
+                    if (topLevel == nullptr)
+                        return false;
+                    auto* peer = topLevel->getPeer();
+                    if (peer == nullptr)
+                        return false;
+
+                    auto* parentHwnd = static_cast<HWND>(peer->getNativeHandle());
+                    if (parentHwnd == nullptr)
+                        return false;
+
+                    if (nativeViewport != nullptr && nativeViewportParent != parentHwnd)
+                        destroyNativeViewport();
+
+                    if (nativeViewport == nullptr)
+                    {
+                        if (!ensureClapGuiViewportWindowClassRegistered())
+                            return false;
+
+                        nativeViewport = ::CreateWindowExW(WS_EX_NOPARENTNOTIFY,
+                                                           clapGuiViewportWindowClassName(),
+                                                           L"",
+                                                           WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                                                           0,
+                                                           0,
+                                                           juce::jmax(1, getWidth()),
+                                                           juce::jmax(1, getHeight()),
+                                                           parentHwnd,
+                                                           nullptr,
+                                                           ::GetModuleHandleW(nullptr),
+                                                           nullptr);
+                        nativeViewportParent = parentHwnd;
+                    }
+
+                    updateNativeViewportBounds();
+                    return nativeViewport != nullptr;
+                }
+
+                void updateNativeViewportBounds()
+                {
+                    if (nativeViewport == nullptr)
+                        return;
+
+                    auto* topLevel = getTopLevelComponent();
+                    if (topLevel == nullptr)
+                        return;
+                    auto* peer = topLevel->getPeer();
+                    if (peer == nullptr)
+                        return;
+
+                    auto* parentHwnd = static_cast<HWND>(peer->getNativeHandle());
+                    if (parentHwnd == nullptr)
+                        return;
+
+                    if (nativeViewportParent != parentHwnd)
+                    {
+                        destroyNativeViewport();
+                        return;
+                    }
+
+                    const auto screenBounds = getScreenBounds();
+                    POINT topLeft { screenBounds.getX(), screenBounds.getY() };
+                    ::ScreenToClient(parentHwnd, &topLeft);
+
+                    const int width = juce::jmax(1, screenBounds.getWidth());
+                    const int height = juce::jmax(1, screenBounds.getHeight());
+                    ::SetWindowPos(nativeViewport,
+                                   nullptr,
+                                   topLeft.x,
+                                   topLeft.y,
+                                   width,
+                                   height,
+                                   SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER);
+                    ::ShowWindow(nativeViewport, isShowing() ? SW_SHOWNOACTIVATE : SW_HIDE);
+                }
+
+                void destroyNativeViewport() noexcept
+                {
+                    if (nativeViewport != nullptr)
+                    {
+                        if (::IsWindow(nativeViewport))
+                            ::DestroyWindow(nativeViewport);
+                        nativeViewport = nullptr;
+                        nativeViewportParent = nullptr;
+                    }
+                }
+#endif
+
+                std::unique_ptr<mw::clap::ClapEffectEditorInstance> instance;
+                juce::Label infoLabel;
+                int effectSlotNumber = 1;
+                std::function<bool(const juce::String&)> onApplyState;
+                std::function<void(const juce::String&)> onStatusChanged;
+                bool attached = false;
+#if JUCE_WINDOWS
+                HWND nativeViewport = nullptr;
+                HWND nativeViewportParent = nullptr;
+#endif
+            };
+
+            const auto& trackForTitle = currentProject->getTracks()[static_cast<std::size_t>(index)];
+            const auto trackNumberTitle = "#" + juce::String(index + 1);
+            const auto trackNameTitle = juce::String(trackForTitle.getName()).trim().isEmpty()
+                ? (juce::String("Track ") + juce::String(index + 1))
+                : juce::String(trackForTitle.getName()).trim();
+            const auto pluginDisplayTitle = juce::String(effectPlugin.name.empty() ? effectPlugin.bundlePath.stem().string() : effectPlugin.name);
+            const auto slotShortTitle = "S" + juce::String(slotNumber);
+            const auto owningTrackTitle = "Track " + trackNumberTitle + " - " + slotShortTitle + " - [CLAP] " + pluginDisplayTitle;
+            const auto effectWindowTitle = "Track: " + trackNumberTitle + " - " + trackNameTitle + " | " + slotShortTitle + " | CLAP: " + pluginDisplayTitle;
+            auto window = std::make_unique<PianoRollDocumentWindow>(effectWindowTitle, [this, index, effectWindowKey, slotNumber]
+            {
+                clapEffectEditorWindows.erase(effectWindowKey);
+                updateOpenVstPluginButtonState();
+                logMessage("Closed track-owned CLAP Effect Slot " + juce::String(slotNumber) + " editor for " + getTrackDisplayName(index) + ". Use Apply Changes before closing to keep CLAP effect UI edits; unapplied edits are discarded when the editor closes.");
+            });
+            auto safeHostContentRef = std::make_shared<juce::Component::SafePointer<VstPluginEditorHostContent>>();
+
+            auto* holder = new ClapEffectEditorHolder(
+                std::move(load.instance),
+                slotNumber,
+                [this, index, slotIndexSize, slotNumber](const juce::String& stateBase64) -> bool
+                {
+                    if (!currentProject)
+                        return false;
+
+                    if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+                        return false;
+
+                    if (stateBase64.isEmpty())
+                        return false;
+
+                    auto& editedTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
+                    auto effects = editedTrack.getVstEffects();
+                    auto& slot = effects.ensureSlot(slotIndexSize);
+                    if (!slot.plugin.hasPluginIdentity() || slot.backendType != mw::core::EffectSlotBackendType::CLAP)
+                        return false;
+
+                    slot.plugin.stateBase64 = stateBase64.toStdString();
+                    editedTrack.setVstEffects(std::move(effects));
+
+                    cleanupPianoRollPreviewFiles();
+                    refreshTrackManagerText();
+                    recordExternalTrackStateUpdate(index);
+                    setProjectDirty();
+
+                    logMessage("Applied CLAP Effect Slot UI changes for " + getTrackDisplayName(index) + ". Preview/render will restore this saved CLAP Effect Slot " + juce::String(slotNumber) + " state before CLAP processing.");
+                    return true;
+                },
+                [safeHostContentRef](const juce::String& statusText)
+                {
+                    if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                        (*safeHostContentRef)->setToolbarStatus(statusText);
+                });
+
+            window->setResizable(true, true);
+            juce::Component::SafePointer<ClapEffectEditorHolder> safeHolder(holder);
+            auto* hostContent = new VstPluginEditorHostContent(
+                std::unique_ptr<juce::Component>(holder),
+                owningTrackTitle,
+                [safeHolder]
+                {
+                    if (safeHolder != nullptr)
+                        safeHolder->requestApplyCurrentChanges();
+                },
+                [this, index, slotIndexSize]
+                {
+                    renderVstEffectTestSampleForTrack(index, static_cast<int>(slotIndexSize));
+                },
+                [this, index, slotIndexSize, slotNumber, safeHolder, safeHostContentRef](int snapshotSlot)
+                {
+                    if (!currentProject || safeHolder == nullptr)
+                        return;
+
+                    if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+                        return;
+
+                    auto& editedTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
+                    auto effects = editedTrack.getVstEffects();
+                    auto* effectSlot = effects.slot(slotIndexSize);
+                    if (effectSlot == nullptr || effectSlot->backendType != mw::core::EffectSlotBackendType::CLAP || !effectSlot->plugin.hasPluginIdentity())
+                    {
+                        if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                            (*safeHostContentRef)->setToolbarStatus("CLAP Snapshot load failed: this slot does not have a CLAP effect assigned.");
+                        return;
+                    }
+
+                    std::string error;
+                    auto record = mw::clap::ClapSnapshotStore::loadSnapshot(effectSlot->plugin, mw::clap::ClapSnapshotRole::Effect, snapshotSlot, &error);
+                    if (!record)
+                    {
+                        const auto status = juce::String("CLAP Snapshot ") + juce::String(snapshotSlot) + " load failed: " + juce::String(error);
+                        if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                            (*safeHostContentRef)->setToolbarStatus(status);
+                        logMessage(status);
+                        return;
+                    }
+
+                    if (!safeHolder->restoreVstStateBase64(record->stateBase64))
+                    {
+                        const auto status = juce::String("CLAP Snapshot ") + juce::String(snapshotSlot) + " load failed: plugin rejected the saved state.";
+                        if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                            (*safeHostContentRef)->setToolbarStatus(status);
+                        logMessage(status);
+                        return;
+                    }
+
+                    auto& slotRef = effects.ensureSlot(slotIndexSize);
+                    slotRef.plugin.stateBase64 = record->stateBase64;
+                    editedTrack.setVstEffects(std::move(effects));
+                    cleanupPianoRollPreviewFiles();
+                    refreshTrackManagerText();
+                    recordExternalTrackStateUpdate(index);
+                    setProjectDirty();
+
+                    const auto status = juce::String("Loaded CLAP Snapshot ") + juce::String(snapshotSlot) + " for Effect Slot " + juce::String(slotNumber) + ".";
+                    if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                        (*safeHostContentRef)->setToolbarStatus(status);
+                    logMessage(status + " Track: " + getTrackDisplayName(index));
+                },
+                [this, index, slotIndexSize, slotNumber, safeHolder, safeHostContentRef](int snapshotSlot)
+                {
+                    if (!currentProject || safeHolder == nullptr)
+                        return;
+
+                    if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+                        return;
+
+                    const auto& editedTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
+                    const auto effects = editedTrack.getVstEffects();
+                    const auto* effectSlot = effects.slot(slotIndexSize);
+                    if (effectSlot == nullptr || effectSlot->backendType != mw::core::EffectSlotBackendType::CLAP || !effectSlot->plugin.hasPluginIdentity())
+                    {
+                        if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                            (*safeHostContentRef)->setToolbarStatus("CLAP Snapshot save failed: this slot does not have a CLAP effect assigned.");
+                        return;
+                    }
+
+                    const auto currentState = safeHolder->captureCurrentVstStateBase64();
+                    if (currentState.isEmpty())
+                    {
+                        if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                            (*safeHostContentRef)->setToolbarStatus("CLAP Snapshot save failed: effect plugin did not return state data.");
+                        return;
+                    }
+
+                    std::string error;
+                    const bool saved = mw::clap::ClapSnapshotStore::saveSnapshot(effectSlot->plugin, mw::clap::ClapSnapshotRole::Effect, snapshotSlot, currentState.toStdString(), &error);
+                    const auto status = saved
+                        ? (juce::String("Saved CLAP Snapshot ") + juce::String(snapshotSlot) + " for Effect Slot " + juce::String(slotNumber) + ".")
+                        : (juce::String("CLAP Snapshot ") + juce::String(snapshotSlot) + " save failed: " + juce::String(error));
+                    if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                        (*safeHostContentRef)->setToolbarStatus(status);
+                    logMessage(status + " Track: " + getTrackDisplayName(index));
+                },
+                [this, index, slotIndexSize, slotNumber, safeHostContentRef](int snapshotSlot)
+                {
+                    if (!currentProject)
+                        return;
+
+                    if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+                        return;
+
+                    const auto& editedTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
+                    const auto effects = editedTrack.getVstEffects();
+                    const auto* effectSlot = effects.slot(slotIndexSize);
+                    if (effectSlot == nullptr || effectSlot->backendType != mw::core::EffectSlotBackendType::CLAP || !effectSlot->plugin.hasPluginIdentity())
+                    {
+                        if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                            (*safeHostContentRef)->setToolbarStatus("CLAP Snapshot clear failed: this slot does not have a CLAP effect assigned.");
+                        return;
+                    }
+
+                    std::string error;
+                    const bool cleared = mw::clap::ClapSnapshotStore::clearSnapshot(effectSlot->plugin, mw::clap::ClapSnapshotRole::Effect, snapshotSlot, &error);
+                    const auto status = cleared
+                        ? (juce::String("Cleared CLAP Snapshot ") + juce::String(snapshotSlot) + " for Effect Slot " + juce::String(slotNumber) + ".")
+                        : (juce::String("CLAP Snapshot ") + juce::String(snapshotSlot) + " clear failed: " + juce::String(error));
+                    if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                        (*safeHostContentRef)->setToolbarStatus(status);
+                    logMessage(status + " Track: " + getTrackDisplayName(index));
+                },
+                [this, index, slotIndexSize, slotNumber, safeHostContentRef]()
+                {
+                    if (!currentProject)
+                        return;
+
+                    if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+                        return;
+
+                    const auto& editedTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
+                    const auto effects = editedTrack.getVstEffects();
+                    const auto* effectSlot = effects.slot(slotIndexSize);
+                    if (effectSlot == nullptr || effectSlot->backendType != mw::core::EffectSlotBackendType::CLAP || !effectSlot->plugin.hasPluginIdentity())
+                    {
+                        if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                            (*safeHostContentRef)->setToolbarStatus("CLAP Snapshot clear failed: this slot does not have a CLAP effect assigned.");
+                        return;
+                    }
+
+                    std::string error;
+                    const bool cleared = mw::clap::ClapSnapshotStore::clearAllSnapshots(effectSlot->plugin, mw::clap::ClapSnapshotRole::Effect, &error);
+                    const auto status = cleared
+                        ? (juce::String("Cleared all CLAP Snapshots for Effect Slot ") + juce::String(slotNumber) + ".")
+                        : (juce::String("Clear all CLAP Snapshots failed: ") + juce::String(error));
+                    if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                        (*safeHostContentRef)->setToolbarStatus(status);
+                    logMessage(status + " Track: " + getTrackDisplayName(index));
+                });
+            *safeHostContentRef = juce::Component::SafePointer<VstPluginEditorHostContent>(hostContent);
+            window->setContentOwned(hostContent, true);
+            window->centreWithSize(juce::jmax(kMinimumVstEditorHostWidth, hostContent->getWidth() + 30),
+                                   juce::jmax(kMinimumVstEditorHostHeight, hostContent->getHeight() + 70));
+            window->enforceMinimumVstEditorHostSize();
+            applyPoorMansStudioCustomTitleBar(*window);
+            window->setVisible(true);
+            applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::VSTPlugin);
+            setPoorMansStudioNativeWindowTitle(*window, effectWindowTitle);
+            clapEffectEditorWindows[effectWindowKey] = std::move(window);
+            if (!load.guiCreated)
+                logMessage("Open CLAP Effect Slot: " + juce::String(load.message));
+            updateOpenVstPluginButtonState();
+            return;
+        }
+
+        if (firstSlot->backendType != mw::core::EffectSlotBackendType::VST3)
+        {
+            logMessage("Open Effect Slot: this slot is not assigned to a VST3 effect editor backend.");
             updateOpenVstPluginButtonState();
             return;
         }
@@ -12038,15 +15157,15 @@ namespace mw::gui
                 + "Detected kind: " + juce::String(mw::vst::vstPluginKindToString(resolvedPluginDescriptor->detectedKind)) + "\n"
                 + "Final status: " + vstPluginFinalStatusText(*resolvedPluginDescriptor) + "\n\n"
                 + "Use VST3 Plugin Manager to review details or manually Treat as Effect if you know it is an audio effect.";
-            logMessage(juce::String("Open VST Effect blocked: ") + juce::String(resolvedPluginDescriptor->displayName()) + " is not a supported effect.");
-            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open VST Effect", message);
+            logMessage(juce::String("Open Effect Slot blocked: ") + juce::String(resolvedPluginDescriptor->displayName()) + " is not a supported effect.");
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open Effect Slot", message);
             updateOpenVstPluginButtonState();
             return;
         }
 
         if (effectPlugin.bundlePath.empty() || !std::filesystem::exists(effectPlugin.bundlePath))
         {
-            logMessage("Open VST Effect: plugin bundle was not found: " + effectPlugin.bundlePath.string());
+            logMessage("Open Effect Slot: plugin bundle was not found: " + effectPlugin.bundlePath.string());
             return;
         }
 
@@ -12057,14 +15176,14 @@ namespace mw::gui
         }
 
         const int effectiveWindowLimit = sanitizeMaxOpenVstPluginWindows(vstMaxOpenPluginWindows);
-        const int totalOpenVstWindows = static_cast<int>(vstPluginEditorWindows.size() + vstEffectEditorWindows.size());
+        const int totalOpenVstWindows = static_cast<int>(vstPluginEditorWindows.size() + clapInstrumentEditorWindows.size() + vstEffectEditorWindows.size() + clapEffectEditorWindows.size());
         if (totalOpenVstWindows >= effectiveWindowLimit)
         {
             const auto message = juce::String("Maximum open VST plugin windows reached (")
                 + juce::String(effectiveWindowLimit)
-                + "). Close another VST plugin window first, or use VST Plugins > Close All VST Plugin Windows.";
+                + "). Close another plugin window first, or use VST/CLAP close-window menu commands.";
             logMessage(message);
-            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open VST Effect", message);
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open Effect Slot", message);
             return;
         }
 
@@ -12090,12 +15209,12 @@ namespace mw::gui
                 logMessage(juce::String("VST3 effect plugin marked failed after load/open failure: ") + juce::String(resolvedPluginDescriptor->displayName()) + ".");
             }
 
-            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open VST3 Effect UI", load.message);
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open Effect Slot UI", load.message);
             return;
         }
 
         if (load.savedStateApplied)
-            logMessage(juce::String("Opening VST3 effect editor for ") + getTrackDisplayName(index) + " with that track effect slot's saved state already restored.");
+            logMessage(juce::String("Opening Effect Slot editor for ") + getTrackDisplayName(index) + " with that slot's saved VST3 state already restored.");
         else if (load.savedStateRestoreFailed && !load.savedStateMessage.empty())
             logMessage(juce::String("WARNING: ") + juce::String(load.savedStateMessage) + " Track: " + getTrackDisplayName(index));
 
@@ -12132,7 +15251,7 @@ namespace mw::gui
                 }
                 else
                 {
-                    noEditorLabel.setText("This VST3 effect did not provide a custom editor. State can still be preserved if the plugin returns state data.", juce::dontSendNotification);
+                    noEditorLabel.setText("This Effect Slot plugin did not provide a custom editor. State can still be preserved if the plugin returns state data.", juce::dontSendNotification);
                     noEditorLabel.setJustificationType(juce::Justification::centred);
                     noEditorLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
                     addAndMakeVisible(noEditorLabel);
@@ -12217,9 +15336,8 @@ namespace mw::gui
 
             void stopLiveAuditionForPreview() override
             {
-                // Effect editor windows are edit/state windows in this phase.
-                // Live shared-memory effect preview is still future work; offline
-                // preview/render processing uses the saved state for this effect slot.
+                // Effect editor windows are edit/state windows.
+                // Preview/render and supported live CLAP preview paths use the saved state for this effect slot.
             }
 
             bool canResizeEditor() const noexcept { return editorCanResize; }
@@ -12235,7 +15353,7 @@ namespace mw::gui
 
                 const bool applied = onApplyState && onApplyState(currentState);
                 setStatus(applied
-                    ? "Applied effect changes to this track's VST3 effect slot " + juce::String(effectSlotNumber) + "."
+                    ? "Applied effect changes to this track's Effect Slot " + juce::String(effectSlotNumber) + "."
                     : "Apply failed: effect slot could not be updated.");
             }
 
@@ -12284,7 +15402,7 @@ namespace mw::gui
         {
             vstEffectEditorWindows.erase(effectWindowKey);
             updateOpenVstPluginButtonState();
-            logMessage("Closed track-owned VST effect slot " + juce::String(slotNumber) + " editor for " + getTrackDisplayName(index) + ". Use Apply Changes before closing to keep effect UI edits; unapplied edits are discarded when the editor closes.");
+            logMessage("Closed track-owned Effect Slot " + juce::String(slotNumber) + " editor for " + getTrackDisplayName(index) + ". Use Apply Changes before closing to keep effect UI edits; unapplied edits are discarded when the editor closes.");
         });
         auto safeHostContentRef = std::make_shared<juce::Component::SafePointer<VstPluginEditorHostContent>>();
 
@@ -12316,7 +15434,7 @@ namespace mw::gui
                 recordExternalTrackStateUpdate(index);
                 setProjectDirty();
 
-                logMessage("Applied VST effect UI changes for " + getTrackDisplayName(index) + ". Offline preview/render will use this saved slot " + juce::String(slotNumber) + " effect state; live shared-memory effect processing is still future work.");
+                logMessage("Applied Effect Slot UI changes for " + getTrackDisplayName(index) + ". Preview/render will use this saved Effect Slot " + juce::String(slotNumber) + " effect state.");
                 return true;
             },
             [safeHostContentRef](const juce::String& statusText)
@@ -12356,7 +15474,7 @@ namespace mw::gui
                 if (firstSlot == nullptr || !firstSlot->plugin.hasPluginIdentity())
                 {
                     if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
-                        (*safeHostContentRef)->setToolbarStatus("Snapshot load failed: this track does not have a VST3 effect assigned in this slot.");
+                        (*safeHostContentRef)->setToolbarStatus("Snapshot load failed: this track does not have an effect assigned in this slot.");
                     return;
                 }
 
@@ -12388,7 +15506,7 @@ namespace mw::gui
                 recordExternalTrackStateUpdate(index);
                 setProjectDirty();
 
-                const auto status = juce::String("Loaded Snapshot ") + juce::String(slot) + " for this VST effect.";
+                const auto status = juce::String("Loaded Snapshot ") + juce::String(slot) + " for this Effect Slot.";
                 if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
                     (*safeHostContentRef)->setToolbarStatus(status);
                 logMessage(status + " Track: " + getTrackDisplayName(index));
@@ -12407,7 +15525,7 @@ namespace mw::gui
                 if (firstSlot == nullptr || !firstSlot->plugin.hasPluginIdentity())
                 {
                     if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
-                        (*safeHostContentRef)->setToolbarStatus("Snapshot save failed: this track does not have a VST3 effect assigned in this slot.");
+                        (*safeHostContentRef)->setToolbarStatus("Snapshot save failed: this track does not have an effect assigned in this slot.");
                     return;
                 }
 
@@ -12422,7 +15540,7 @@ namespace mw::gui
                 std::string error;
                 const bool saved = mw::vst::VstSnapshotStore::saveSnapshot(firstSlot->plugin, mw::vst::VstSnapshotRole::Effect, slot, currentState.toStdString(), &error);
                 const auto status = saved
-                    ? (juce::String("Saved Snapshot ") + juce::String(slot) + " for this VST effect.")
+                    ? (juce::String("Saved Snapshot ") + juce::String(slot) + " for this Effect Slot.")
                     : (juce::String("Snapshot ") + juce::String(slot) + " save failed: " + juce::String(error));
                 if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
                     (*safeHostContentRef)->setToolbarStatus(status);
@@ -12442,14 +15560,14 @@ namespace mw::gui
                 if (firstSlot == nullptr || !firstSlot->plugin.hasPluginIdentity())
                 {
                     if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
-                        (*safeHostContentRef)->setToolbarStatus("Snapshot clear failed: this track does not have a VST3 effect assigned in this slot.");
+                        (*safeHostContentRef)->setToolbarStatus("Snapshot clear failed: this track does not have an effect assigned in this slot.");
                     return;
                 }
 
                 std::string error;
                 const bool cleared = mw::vst::VstSnapshotStore::clearSnapshot(firstSlot->plugin, mw::vst::VstSnapshotRole::Effect, slot, &error);
                 const auto status = cleared
-                    ? (juce::String("Cleared Snapshot ") + juce::String(slot) + " for this VST effect.")
+                    ? (juce::String("Cleared Snapshot ") + juce::String(slot) + " for this Effect Slot.")
                     : (juce::String("Snapshot ") + juce::String(slot) + " clear failed: " + juce::String(error));
                 if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
                     (*safeHostContentRef)->setToolbarStatus(status);
@@ -12469,14 +15587,14 @@ namespace mw::gui
                 if (firstSlot == nullptr || !firstSlot->plugin.hasPluginIdentity())
                 {
                     if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
-                        (*safeHostContentRef)->setToolbarStatus("Snapshot clear failed: this track does not have a VST3 effect assigned in this slot.");
+                        (*safeHostContentRef)->setToolbarStatus("Snapshot clear failed: this track does not have an effect assigned in this slot.");
                     return;
                 }
 
                 std::string error;
                 const bool cleared = mw::vst::VstSnapshotStore::clearAllSnapshots(firstSlot->plugin, mw::vst::VstSnapshotRole::Effect, &error);
                 const auto status = cleared
-                    ? juce::String("Cleared all Snapshots for this VST effect.")
+                    ? juce::String("Cleared all Snapshots for this Effect Slot.")
                     : (juce::String("Clear all Snapshots failed: ") + juce::String(error));
                 if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
                     (*safeHostContentRef)->setToolbarStatus(status);
@@ -12500,11 +15618,23 @@ namespace mw::gui
         if (trackIndex < 0)
             return {};
 
-        const auto found = vstPluginEditorWindows.find(trackIndex);
-        if (found == vstPluginEditorWindows.end() || found->second == nullptr)
+        juce::DocumentWindow* editorWindow = nullptr;
+        bool isClapInstrumentEditor = false;
+
+        if (const auto found = vstPluginEditorWindows.find(trackIndex); found != vstPluginEditorWindows.end() && found->second != nullptr)
+        {
+            editorWindow = found->second.get();
+        }
+        else if (const auto foundClap = clapInstrumentEditorWindows.find(trackIndex); foundClap != clapInstrumentEditorWindows.end() && foundClap->second != nullptr)
+        {
+            editorWindow = foundClap->second.get();
+            isClapInstrumentEditor = true;
+        }
+
+        if (editorWindow == nullptr)
             return {};
 
-        auto* content = found->second->getContentComponent();
+        auto* content = editorWindow->getContentComponent();
         auto* stateProvider = dynamic_cast<VstEditorStateProvider*>(content);
         if (stateProvider == nullptr)
             return {};
@@ -12514,7 +15644,7 @@ namespace mw::gui
         if (capturedState.isEmpty())
         {
             if (logCapture)
-                logMessage("VST3 UI state capture skipped: plugin did not return state data.");
+                logMessage(juce::String(isClapInstrumentEditor ? "CLAP" : "VST3") + " instrument UI state capture skipped: plugin did not return state data.");
             return {};
         }
 
@@ -12524,7 +15654,11 @@ namespace mw::gui
         {
             auto& track = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)];
             auto assignment = track.getInstrument();
-            if (assignment.backendType == mw::core::SampleBackendType::VST3
+            const bool backendMatchesOpenEditor = isClapInstrumentEditor
+                ? assignment.backendType == mw::core::SampleBackendType::CLAP
+                : assignment.backendType == mw::core::SampleBackendType::VST3;
+
+            if (backendMatchesOpenEditor
                 && assignment.vst3.stateBase64 != capturedState.toStdString())
             {
                 assignment.vst3.stateBase64 = capturedState.toStdString();
@@ -12532,11 +15666,158 @@ namespace mw::gui
                 setProjectDirty();
                 refreshTrackManagerText();
                 if (logCapture)
-                    logMessage("Captured current VST3 plugin UI state for " + getTrackDisplayName(trackIndex) + ".");
+                    logMessage(juce::String("Captured current ") + juce::String(isClapInstrumentEditor ? "CLAP" : "VST3") + " instrument UI state for " + getTrackDisplayName(trackIndex) + ".");
             }
         }
 
         return capturedState;
+    }
+
+
+    void MainComponent::renderVstInstrumentTestNoteForTrack(int index)
+    {
+        const juce::String actionLabel("Test Instrument");
+
+        if (renderingInProgress)
+        {
+            logMessage(actionLabel + ": render/preview already in progress.");
+            return;
+        }
+
+        if (!currentProject)
+        {
+            logMessage(actionLabel + ": no project loaded.");
+            return;
+        }
+
+        if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+        {
+            logMessage(actionLabel + ": select a valid track first.");
+            return;
+        }
+
+        auto testTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
+        auto assignment = testTrack.getInstrument();
+        if (assignment.backendType != mw::core::SampleBackendType::VST3 || !assignment.vst3.hasPluginIdentity())
+        {
+            logMessage(actionLabel + ": selected track does not have a VST3 instrument assigned.");
+            return;
+        }
+
+        const auto bundlePath = resolveVst3BundlePath(assignment);
+        if (bundlePath.empty())
+        {
+            logMessage(actionLabel + ": selected VST3 instrument bundle could not be resolved.");
+            return;
+        }
+
+        const auto liveEditorState = captureOpenVstPluginStateForTrack(index, false, false);
+        if (liveEditorState.isNotEmpty())
+        {
+            assignment.vst3.stateBase64 = liveEditorState.toStdString();
+            testTrack.setInstrumentAssignment(assignment);
+            logMessage(actionLabel + ": using the current open VST3 instrument editor state without applying it to the project.");
+        }
+        else
+        {
+            logMessage(actionLabel + ": using this track's last applied VST3 instrument state.");
+        }
+
+        const auto previewFolder = mw::app::AppPaths::previewFolder();
+        std::error_code ec;
+        std::filesystem::create_directories(previewFolder, ec);
+        if (ec)
+        {
+            logMessage(actionLabel + ": could not create preview folder: " + juce::String(ec.message()));
+            return;
+        }
+
+        const auto stamp = juce::Time::currentTimeMillis();
+        const auto outputPath = previewFolder / ("vst3_instrument_test_track_" + std::to_string(index + 1) + "_" + std::to_string(stamp) + ".wav");
+
+        setSinglePluginInstrumentTestNote(testTrack, assignment.midiChannel);
+
+        auto previewProject = mw::core::Project("VST3 Instrument Test");
+        previewProject.setTempoBpm(currentProject->getTempoBpm());
+        previewProject.setTimeSignature(currentProject->getTimeSignature());
+        previewProject.getTracks().push_back(testTrack);
+        setPianoRollPreviewNoteMapFromTracks(previewProject.getTracks());
+        setPianoRollPreviewAudioClipMapFromClips({});
+
+        const int previewTempoBpm = currentProject->getTempoBpm();
+        const int previewSampleRate = sampleRateCombo.getText().getIntValue() > 0 ? sampleRateCombo.getText().getIntValue() : 48000;
+        const int previewChannelCount = channelsCombo.getSelectedId() > 0 ? channelsCombo.getSelectedId() : 2;
+
+        cancelRenderRequested = false;
+        setRenderingState(true);
+        logMessage(actionLabel + ": rendering single-note VST3 instrument test sound for " + getTrackDisplayName(index) + ".");
+        logMessage(actionLabel + " temp WAV: " + outputPath.string());
+
+        if (renderThread.joinable())
+            renderThread.join();
+
+        renderThread = std::thread(
+            [this, index, testTrack, outputPath, previewTempoBpm, previewSampleRate, previewChannelCount]
+            {
+                mw::vst::VstRenderRequest request;
+                request.track = testTrack;
+                request.tempoBpm = previewTempoBpm;
+                request.sampleRate = previewSampleRate;
+                request.channelCount = previewChannelCount;
+                request.blockSize = 512;
+                request.wavOutputPath = outputPath;
+                request.cancelRequested = &cancelRenderRequested;
+
+                const auto result = mw::vst::VstInstrumentHost::renderTrackToWav(request);
+
+                juce::MessageManager::callAsync(
+                    [this, index, result]
+                    {
+                        logMessage(result.message);
+
+                        if (result.cancelled)
+                        {
+                            renderStatusLabel.setText("VST3 instrument test cancelled.", juce::dontSendNotification);
+                            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+                            setRenderingState(false);
+                            return;
+                        }
+
+                        if (!result.success || !std::filesystem::exists(result.wavPath))
+                        {
+                            renderStatusLabel.setText("VST3 instrument test failed.", juce::dontSendNotification);
+                            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::red);
+                            setRenderingState(false);
+                            return;
+                        }
+
+                        generatedPreviewFiles.push_back(result.wavPath);
+                        lastPianoRollPreviewWavPath = result.wavPath;
+                        lastPianoRollPreviewDurationBeats = 1.0;
+                        lastPianoRollPreviewTempoBpm = currentProject.has_value()
+                            ? currentProject->getTempoBpm()
+                            : 120.0;
+                        pianoRollPreviewPaused = false;
+                        pendingPianoRollPreviewStartSeconds = 0.0;
+
+                        renderStatusLabel.setText("VST3 instrument test rendered.", juce::dontSendNotification);
+                        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+                        logMessage("Test Instrument: rendered VST3 audition WAV for " + getTrackDisplayName(index) + ": " + result.wavPath.string());
+
+#if JUCE_WINDOWS
+                        const auto path = juce::String(result.wavPath.wstring().c_str());
+                        const auto ok = PlaySoundW(path.toWideCharPointer(), nullptr, SND_FILENAME | SND_ASYNC);
+                        if (ok)
+                            logMessage("Playing VST3 instrument test WAV: " + result.wavPath.string());
+                        else
+                            logMessage("ERROR: Windows could not play VST3 instrument test WAV: " + result.wavPath.string());
+#else
+                        logMessage("VST3 instrument test WAV created. Embedded playback is currently only available on Windows: " + result.wavPath.string());
+#endif
+
+                        setRenderingState(false);
+                    });
+            });
     }
 
 
@@ -12559,6 +15840,1440 @@ namespace mw::gui
         renderVstEffectTestSampleForTrack(index, effectSlotIndex);
     }
 
+
+    void MainComponent::armSelectedTrackClapLiveEngineSession()
+    {
+        showVstExperimentalWarningIfNeeded();
+
+        if (!currentProject)
+        {
+            logMessage("CLAP Live Engine: no project loaded.");
+            return;
+        }
+
+        const auto index = getSelectedTrackIndex();
+        if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+        {
+            logMessage("CLAP Live Engine: select a CLAP instrument track first.");
+            return;
+        }
+
+        const auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
+        auto assignment = track.getInstrument();
+        if (assignment.backendType != mw::core::SampleBackendType::CLAP || !assignment.vst3.hasPluginIdentity())
+        {
+            logMessage("CLAP Live Engine: selected track does not have a CLAP instrument assigned.");
+            return;
+        }
+
+        const auto pluginPath = resolveClapPluginPath(assignment);
+        if (pluginPath.empty())
+        {
+            logMessage("CLAP Live Engine: selected CLAP instrument path could not be resolved.");
+            return;
+        }
+
+        if (!std::filesystem::exists(pluginPath))
+        {
+            logMessage("CLAP Live Engine: selected CLAP instrument was not found: " + pluginPath.string());
+            return;
+        }
+
+        // Keep live arming aligned with the existing VST3/CLAP Apply Changes model:
+        // arming uses the track's last applied/saved plugin state. Open editor tweaks
+        // are not auto-captured here; use Apply Changes to commit them first.
+        disarmClapLiveEngineSession(false);
+
+        auto liveSession = std::make_unique<mw::clap::ClapLiveInstrumentSession>();
+        mw::clap::ClapLiveInstrumentSessionConfig config;
+        config.pluginPath = pluginPath;
+        config.pluginUid = assignment.vst3.uid;
+        config.pluginName = assignment.vst3.name.empty() ? pluginPath.stem().string() : assignment.vst3.name;
+        config.stateBase64 = assignment.vst3.stateBase64;
+        config.sampleRate = sampleRateCombo.getText().getIntValue() > 0 ? sampleRateCombo.getText().getIntValue() : 48000;
+        config.channelCount = channelsCombo.getSelectedId() > 0 ? channelsCombo.getSelectedId() : 2;
+        config.blockSize = 512;
+
+        std::string openError;
+        if (!liveSession->open(config, openError))
+        {
+            renderStatusLabel.setText("CLAP live instance failed.", juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::red);
+            logMessage("CLAP Live Engine: failed to open persistent CLAP live instance: " + juce::String(openError));
+            return;
+        }
+
+        const auto liveInfo = liveSession->info();
+
+        ClapLiveEngineArmedSession session;
+        session.trackIndex = index;
+        session.trackName = juce::String(track.getName()).trim().isEmpty()
+            ? (juce::String("Track ") + juce::String(index + 1))
+            : juce::String(track.getName()).trim();
+        session.pluginPath = pluginPath;
+        session.pluginName = assignment.vst3.name.empty()
+            ? juce::String(pluginPath.stem().string())
+            : juce::String(assignment.vst3.name);
+        session.pluginUid = juce::String(assignment.vst3.uid);
+        session.stateBase64 = assignment.vst3.stateBase64;
+        session.capturedOpenEditorState = false;
+        session.sampleRate = liveInfo.sampleRate > 0 ? liveInfo.sampleRate : config.sampleRate;
+        session.channelCount = liveInfo.channelCount > 0 ? liveInfo.channelCount : config.channelCount;
+        session.blockSize = liveInfo.blockSize > 0 ? liveInfo.blockSize : config.blockSize;
+        session.midiNoteCount = static_cast<int>(track.getNotes().size());
+        session.armedAtMillis = juce::Time::currentTimeMillis();
+        session.liveInstanceOpen = liveInfo.open;
+        session.liveInstanceMessage = juce::String(liveInfo.message);
+        session.liveStateRestored = liveInfo.stateRestored;
+        session.liveAudioPortsAvailable = liveInfo.audioPortsAvailable;
+        session.liveStartedProcessing = liveInfo.startedProcessing;
+        session.liveProcessedBlocks = liveInfo.processedBlocks;
+        session.liveLastProcessStatus = liveInfo.lastProcessStatus;
+        session.liveLastProcessStatusText = juce::String(liveInfo.lastProcessStatusText);
+        session.liveNoteDialectSummary = juce::String(liveInfo.noteDialectSummary);
+
+        clapLiveInstrumentSession = std::move(liveSession);
+        clapLiveEngineArmedSession = std::move(session);
+
+        renderStatusLabel.setText("CLAP live instance armed.", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+        logMessage(juce::String("CLAP Live Engine: persistent CLAP live instance opened for ") + getTrackDisplayName(index)
+            + " using " + clapLiveEngineArmedSession->pluginName
+            + ". This instance is initialized, activated, and started for the next audio-callback phase.");
+        if (clapLiveEngineArmedSession->liveInstanceMessage.isNotEmpty())
+            logMessage("CLAP Live Engine: " + clapLiveEngineArmedSession->liveInstanceMessage);
+        logMessage("CLAP Live Engine: arming uses the last applied CLAP instrument state. Use Apply Changes before arming if editor tweaks should be included.");
+    }
+
+    void MainComponent::disarmClapLiveEngineSession(bool logIfInactive)
+    {
+        if (!clapLiveEngineArmedSession)
+        {
+            if (logIfInactive)
+                logMessage("CLAP Live Engine: no armed session to disarm.");
+            return;
+        }
+
+        stopClapInstrumentLiveAudition(true);
+
+        const auto trackIndex = clapLiveEngineArmedSession->trackIndex;
+        const auto pluginName = clapLiveEngineArmedSession->pluginName;
+        if (clapLiveInstrumentSession != nullptr)
+        {
+            clapLiveInstrumentSession->close();
+            clapLiveInstrumentSession.reset();
+        }
+        clapLiveEngineArmedSession.reset();
+
+        renderStatusLabel.setText("CLAP live engine disarmed.", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+        logMessage(juce::String("CLAP Live Engine: disarmed session") + (trackIndex >= 0 ? (juce::String(" for ") + getTrackDisplayName(trackIndex)) : juce::String()) + " (" + pluginName + ").");
+    }
+
+    void MainComponent::showClapLiveEngineSessionStatus()
+    {
+        if (!clapLiveEngineArmedSession)
+        {
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::InfoIcon,
+                "CLAP Preview Status",
+                "No CLAP preview session is currently prepared. Use Render > Preview Selected Track in Player on a CLAP instrument track."
+            );
+            return;
+        }
+
+        const auto& session = *clapLiveEngineArmedSession;
+        juce::String message;
+        message << "Armed track: #" << (session.trackIndex + 1) << " - " << session.trackName << "\n";
+        message << "Plugin: " << session.pluginName << "\n";
+        message << "Path: " << juce::String(session.pluginPath.string()) << "\n";
+        if (session.pluginUid.isNotEmpty())
+            message << "UID: " << session.pluginUid << "\n";
+        message << "Sample rate: " << session.sampleRate << " Hz\n";
+        message << "Channels: " << session.channelCount << "\n";
+        message << "Block size: " << session.blockSize << "\n";
+        message << "MIDI notes in selected track: " << session.midiNoteCount << "\n";
+        message << "State source: last applied project state" << "\n";
+        message << "Persistent instance: " << (session.liveInstanceOpen ? "Open" : "Closed") << "\n";
+        message << "Started processing: " << (session.liveStartedProcessing ? "Yes" : "No") << "\n";
+        message << "State restored: " << (session.liveStateRestored ? "Yes" : "No / no saved state") << "\n";
+        message << "Audio ports extension: " << (session.liveAudioPortsAvailable ? "Available" : "Unavailable / not required yet") << "\n";
+        message << "Preview prepared: " << (session.callbackBridgePrepared ? "Yes" : "Not yet") << "\n";
+        if (session.callbackBridgePrepared)
+        {
+            message << "Scheduled events: " << session.callbackBridgeScheduledEvents << "\n";
+            message << "Max events/block: " << session.callbackBridgeMaxEventsPerBlock << "\n";
+            message << "Total samples: " << session.callbackBridgeTotalSamples << "\n";
+        }
+        message << "Direct preview output: " << (session.callbackDirectOutputEnabled ? "Enabled" : "Using rendered preview fallback") << "\n";
+        message << "Safe CLAP UI mode: " << (clapSafePluginUiMode ? "On" : "Off") << "\n";
+        message << "Max open CLAP windows: " << sanitizeMaxOpenVstPluginWindows(clapMaxOpenPluginWindows) << "\n";
+        if (session.liveInstanceMessage.isNotEmpty())
+            message << "\nInstance message:\n" << session.liveInstanceMessage << "\n";
+        if (session.callbackBridgeMessage.isNotEmpty())
+            message << "\nPreview message:\n" << session.callbackBridgeMessage << "\n";
+        message << "\nThe selected CLAP instrument is prepared for preview. Direct preview is used when available; rendered preview remains the fallback.";
+
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::InfoIcon,
+            "CLAP Preview Status",
+            message
+        );
+    }
+
+    void MainComponent::probeArmedClapLiveProcessBridge()
+    {
+        if (clapLiveInstrumentSession == nullptr || !clapLiveInstrumentSession->isOpen() || !clapLiveEngineArmedSession)
+        {
+            logMessage("CLAP Live Bridge: no armed/open CLAP live instance. Use Preview Selected Track in Player on a CLAP instrument track first.");
+            renderStatusLabel.setText("CLAP live bridge not armed.", juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+            return;
+        }
+
+        const int blockSize = std::max(64, clapLiveEngineArmedSession->blockSize);
+        mw::clap::ClapLiveProcessRequest request;
+        request.frameCount = blockSize;
+        request.noteEvents.push_back({ mw::clap::ClapLiveNoteEventType::NoteOn, 0u, 60, 100, 1 });
+        request.noteEvents.push_back({ mw::clap::ClapLiveNoteEventType::NoteOff, static_cast<std::uint32_t>(std::max(1, blockSize - 1)), 60, 0, 1 });
+
+        mw::clap::ClapLiveProcessResult result;
+        {
+            std::lock_guard<std::mutex> lock(clapLiveSessionProcessMutex);
+            result = clapLiveInstrumentSession->processBlock(request);
+        }
+        if (!result.success)
+        {
+            renderStatusLabel.setText("CLAP live bridge probe failed.", juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::red);
+            logMessage("CLAP Live Bridge: process-block probe failed: " + juce::String(result.message));
+            return;
+        }
+
+        auto updatedInfo = clapLiveInstrumentSession->info();
+        clapLiveEngineArmedSession->liveProcessedBlocks = updatedInfo.processedBlocks;
+        clapLiveEngineArmedSession->liveLastProcessStatus = updatedInfo.lastProcessStatus;
+        clapLiveEngineArmedSession->liveLastProcessStatusText = juce::String(updatedInfo.lastProcessStatusText);
+        clapLiveEngineArmedSession->liveInstanceMessage = juce::String(updatedInfo.message);
+        clapLiveEngineArmedSession->liveInstanceOpen = updatedInfo.open;
+        clapLiveEngineArmedSession->liveStartedProcessing = updatedInfo.startedProcessing;
+
+        float peak = 0.0f;
+        for (const auto sample : result.interleavedAudio)
+            peak = std::max(peak, std::abs(sample));
+
+        renderStatusLabel.setText("CLAP live bridge probe passed.", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+        logMessage("CLAP Live Bridge: " + juce::String(result.message));
+        logMessage("CLAP Live Bridge: output frames " + juce::String(result.outputFrameCount)
+            + ", channels " + juce::String(result.outputChannelCount)
+            + ", peak " + juce::String(peak, 6)
+            + ". This is a guarded process-block probe; it still does not replace main playback yet.");
+    }
+
+    void MainComponent::preflightSelectedTrackClapInstrumentLiveReadiness()
+    {
+        showVstExperimentalWarningIfNeeded();
+
+        if (!currentProject)
+        {
+            logMessage("CLAP Live Preflight: no project loaded.");
+            return;
+        }
+
+        const auto index = getSelectedTrackIndex();
+        if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+        {
+            logMessage("CLAP Live Preflight: select a CLAP instrument track first.");
+            return;
+        }
+
+        renderClapInstrumentTestNoteForTrack(index, false, false);
+    }
+
+    void MainComponent::renderSelectedTrackWithArmedClapLiveBridgeForAudition(int index)
+    {
+        if (renderingInProgress)
+        {
+            logMessage("CLAP Live Bridge: render/preview already in progress.");
+            return;
+        }
+
+        if (!currentProject)
+        {
+            logMessage("CLAP Live Bridge: no project loaded.");
+            return;
+        }
+
+        if (clapLiveInstrumentSession == nullptr || !clapLiveInstrumentSession->isOpen() || !clapLiveEngineArmedSession)
+        {
+            logMessage("CLAP Live Bridge: no armed/open CLAP live instance. Falling back to the existing CLAP live audition render path.");
+            renderClapInstrumentTestNoteForTrack(index, true, true, true);
+            return;
+        }
+
+        if (clapLiveEngineArmedSession->trackIndex != index)
+        {
+            logMessage("CLAP Live Bridge: armed live instance is for a different track. Falling back to the existing CLAP live audition render path.");
+            renderClapInstrumentTestNoteForTrack(index, true, true, true);
+            return;
+        }
+
+        if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+        {
+            logMessage("CLAP Live Bridge: select a valid CLAP instrument track first.");
+            return;
+        }
+
+        const auto track = currentProject->getTracks()[static_cast<std::size_t>(index)];
+        if (track.getNotes().empty())
+        {
+            logMessage("CLAP Live Bridge: selected track has no MIDI notes. Falling back to the short CLAP live audition phrase.");
+            renderClapInstrumentTestNoteForTrack(index, true, true, true);
+            return;
+        }
+
+        const auto tempoBpm = std::max(1, currentProject->getTempoBpm());
+        const int sampleRate = std::max(8000, clapLiveEngineArmedSession->sampleRate);
+        const int channelCount = std::max(1, clapLiveEngineArmedSession->channelCount);
+        const int blockSize = std::max(64, clapLiveEngineArmedSession->blockSize);
+        const auto previewFolder = mw::app::AppPaths::previewFolder();
+
+        std::error_code ec;
+        std::filesystem::create_directories(previewFolder, ec);
+        if (ec)
+        {
+            logMessage("CLAP Live Bridge: could not create preview folder: " + juce::String(ec.message()));
+            return;
+        }
+
+        const auto stamp = juce::Time::currentTimeMillis();
+        const auto outputPath = previewFolder / ("clap_live_callback_bridge_track_preview_" + std::to_string(index + 1) + "_" + std::to_string(stamp) + ".wav");
+
+        cancelRenderRequested = false;
+        setRenderingState(true);
+        logMessage("CLAP Live Callback Bridge: rendering selected-track notes through the armed persistent CLAP instance for " + getTrackDisplayName(index) + ".");
+        logMessage("CLAP Live Callback Bridge temp WAV: " + outputPath.string());
+
+        if (renderThread.joinable())
+            renderThread.join();
+
+        auto* liveSession = clapLiveInstrumentSession.get();
+
+        renderThread = std::thread(
+            [this, index, track, outputPath, tempoBpm, sampleRate, channelCount, blockSize, liveSession]
+            {
+                bool success = false;
+                juce::String message;
+                int processedBlocks = 0;
+                int submittedEvents = 0;
+                int scheduledEvents = 0;
+                int maxEventsPerBlock = 0;
+                std::int64_t bridgeTotalSamples = 0;
+                juce::String bridgeMessage;
+                float peak = 0.0f;
+
+                if (liveSession == nullptr || !liveSession->isOpen())
+                {
+                    message = "CLAP Live Callback Bridge: armed live instance was not available when rendering started.";
+                }
+                else
+                {
+                    std::vector<mw::clap::ClapLivePlaybackNote> bridgeNotes;
+                    bridgeNotes.reserve(track.getNotes().size());
+                    for (const auto& note : track.getNotes())
+                    {
+                        mw::clap::ClapLivePlaybackNote bridgeNote;
+                        bridgeNote.pitch = note.pitch;
+                        bridgeNote.velocity = note.velocity;
+                        bridgeNote.midiChannel = note.midiChannel;
+                        bridgeNote.startTick = note.startTick;
+                        bridgeNote.durationTicks = note.durationTicks;
+                        bridgeNotes.push_back(bridgeNote);
+                    }
+
+                    mw::clap::ClapLiveCallbackBridgeConfig bridgeConfig;
+                    bridgeConfig.trackIndex = index;
+                    bridgeConfig.trackName = track.getName();
+                    bridgeConfig.outputChannelCount = channelCount;
+                    bridgeConfig.scheduler.tempoBpm = tempoBpm;
+                    bridgeConfig.scheduler.sampleRate = sampleRate;
+                    bridgeConfig.scheduler.blockSize = blockSize;
+                    bridgeConfig.scheduler.ticksPerQuarterNote = mw::core::Project::ticksPerQuarterNote;
+                    bridgeConfig.scheduler.startTick = 0;
+                    bridgeConfig.scheduler.startSample = 0;
+                    bridgeConfig.scheduler.tailSeconds = 1.0;
+
+                    mw::clap::ClapLiveCallbackBridge callbackBridge;
+                    callbackBridge.prepare(std::move(bridgeNotes), std::move(bridgeConfig));
+                    const auto preparedBridgeState = callbackBridge.state();
+                    scheduledEvents = preparedBridgeState.totalScheduledEvents;
+                    maxEventsPerBlock = preparedBridgeState.maxEventsPerBlock;
+                    bridgeTotalSamples = preparedBridgeState.totalSamples;
+                    bridgeMessage = juce::String(preparedBridgeState.message);
+
+                    if (!callbackBridge.isPrepared() || callbackBridge.isFinished())
+                    {
+                        message = "CLAP Live Callback Bridge: selected track did not produce any schedulable note events.";
+                    }
+                    else
+                    {
+                        juce::WavAudioFormat wavFormat;
+                        std::unique_ptr<juce::FileOutputStream> stream(juce::File(outputPath.string()).createOutputStream());
+                        if (stream == nullptr || !stream->openedOk())
+                        {
+                            message = "CLAP Live Callback Bridge: could not create temp WAV for live audition.";
+                        }
+                        else
+                        {
+                            std::unique_ptr<juce::AudioFormatWriter> writer(
+                                wavFormat.createWriterFor(stream.get(), static_cast<double>(sampleRate), static_cast<unsigned int>(channelCount), 24, {}, 0)
+                            );
+
+                            if (writer == nullptr)
+                            {
+                                message = "CLAP Live Callback Bridge: could not create WAV writer for live audition.";
+                            }
+                            else
+                            {
+                                stream.release();
+
+                                juce::AudioBuffer<float> audioBuffer(channelCount, blockSize);
+                                success = true;
+
+                                while (!callbackBridge.isFinished())
+                                {
+                                    if (cancelRenderRequested.load())
+                                    {
+                                        success = false;
+                                        message = "CLAP Live Callback Bridge: live audition cancelled.";
+                                        break;
+                                    }
+
+                                    const auto& request = callbackBridge.nextRequest();
+                                    const int blockSamples = request.frameCount;
+                                    if (blockSamples <= 0)
+                                        break;
+
+                                    submittedEvents += static_cast<int>(request.noteEvents.size());
+                                    mw::clap::ClapLiveProcessResult result;
+                                    {
+                                        std::lock_guard<std::mutex> lock(clapLiveSessionProcessMutex);
+                                        result = liveSession->processBlock(request);
+                                    }
+                                    if (!result.success)
+                                    {
+                                        success = false;
+                                        message = juce::String("CLAP Live Callback Bridge: processBlock failed while rendering selected-track audition: ") + juce::String(result.message);
+                                        break;
+                                    }
+
+                                    audioBuffer.setSize(channelCount, blockSamples, false, false, true);
+                                    audioBuffer.clear();
+
+                                    const auto outputChannels = std::max(0, result.outputChannelCount);
+                                    const auto outputFrames = std::max(0, result.outputFrameCount);
+                                    for (int frame = 0; frame < blockSamples && frame < outputFrames; ++frame)
+                                    {
+                                        for (int ch = 0; ch < channelCount; ++ch)
+                                        {
+                                            float sample = 0.0f;
+                                            if (ch < outputChannels)
+                                            {
+                                                const auto idx = static_cast<std::size_t>(frame * outputChannels + ch);
+                                                if (idx < result.interleavedAudio.size())
+                                                    sample = result.interleavedAudio[idx];
+                                            }
+
+                                            audioBuffer.getWritePointer(ch)[frame] = sample;
+                                            peak = std::max(peak, std::abs(sample));
+                                        }
+                                    }
+
+                                    writer->writeFromAudioSampleBuffer(audioBuffer, 0, blockSamples);
+                                    ++processedBlocks;
+                                }
+
+                                writer.reset();
+
+                                if (success)
+                                {
+                                    const auto finalBridgeState = callbackBridge.state();
+                                    maxEventsPerBlock = finalBridgeState.maxEventsPerBlock;
+                                    bridgeTotalSamples = finalBridgeState.totalSamples;
+                                    bridgeMessage = juce::String(finalBridgeState.message);
+                                    message = juce::String("CLAP Live Callback Bridge: rendered selected-track audition through persistent live instance. Blocks ")
+                                        + juce::String(processedBlocks)
+                                        + ", scheduled events " + juce::String(scheduledEvents)
+                                        + ", submitted events " + juce::String(submittedEvents)
+                                        + ", max events/block " + juce::String(maxEventsPerBlock)
+                                        + ", total samples " + juce::String(static_cast<juce::int64>(bridgeTotalSamples))
+                                        + ", peak " + juce::String(peak, 6)
+                                        + ".";
+                                }
+                            }
+                        }
+                    }
+                }
+
+                juce::MessageManager::callAsync(
+                    [this, index, outputPath, success, message, processedBlocks, submittedEvents, scheduledEvents, maxEventsPerBlock, bridgeTotalSamples, bridgeMessage, peak]
+                    {
+                        if (!success || !std::filesystem::exists(outputPath))
+                        {
+                            renderStatusLabel.setText("CLAP live callback bridge audition failed.", juce::dontSendNotification);
+                            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::red);
+                            logMessage(message);
+                            setRenderingState(false);
+                            return;
+                        }
+
+                        if (clapLiveInstrumentSession != nullptr && clapLiveEngineArmedSession)
+                        {
+                            const auto updatedInfo = clapLiveInstrumentSession->info();
+                            clapLiveEngineArmedSession->liveProcessedBlocks = updatedInfo.processedBlocks;
+                            clapLiveEngineArmedSession->liveLastProcessStatus = updatedInfo.lastProcessStatus;
+                            clapLiveEngineArmedSession->liveLastProcessStatusText = juce::String(updatedInfo.lastProcessStatusText);
+                            clapLiveEngineArmedSession->liveInstanceMessage = juce::String(updatedInfo.message);
+                            clapLiveEngineArmedSession->liveInstanceOpen = updatedInfo.open;
+                            clapLiveEngineArmedSession->liveStartedProcessing = updatedInfo.startedProcessing;
+                            clapLiveEngineArmedSession->callbackBridgePrepared = true;
+                            clapLiveEngineArmedSession->callbackDirectOutputEnabled = false;
+                            clapLiveEngineArmedSession->callbackBridgeScheduledEvents = scheduledEvents;
+                            clapLiveEngineArmedSession->callbackBridgeMaxEventsPerBlock = maxEventsPerBlock;
+                            clapLiveEngineArmedSession->callbackBridgeTotalSamples = bridgeTotalSamples;
+                            clapLiveEngineArmedSession->callbackBridgeMessage = bridgeMessage;
+                        }
+
+                        renderStatusLabel.setText("CLAP live callback bridge audition rendered.", juce::dontSendNotification);
+                        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+                        logMessage(message);
+                        logMessage("CLAP Live Callback Bridge: selected-track temp WAV: " + outputPath.string());
+                        if (bridgeMessage.isNotEmpty())
+                            logMessage(bridgeMessage);
+                        logMessage("CLAP Live Callback Bridge: blocks " + juce::String(processedBlocks)
+                            + ", scheduled events " + juce::String(scheduledEvents)
+                            + ", submitted events " + juce::String(submittedEvents)
+                            + ", max events/block " + juce::String(maxEventsPerBlock)
+                            + ", total samples " + juce::String(static_cast<juce::int64>(bridgeTotalSamples))
+                            + ", peak " + juce::String(peak, 6) + ".");
+                        startClapInstrumentLiveAuditionPlayback(outputPath, index);
+                        setRenderingState(false);
+                    }
+                );
+            }
+        );
+    }
+
+
+    bool MainComponent::startSelectedTrackClapDirectAudition(int index)
+    {
+        if (!currentProject)
+            return false;
+
+        if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+            return false;
+
+        if (clapLiveInstrumentSession == nullptr || !clapLiveInstrumentSession->isOpen() || !clapLiveEngineArmedSession)
+            return false;
+
+        if (clapLiveEngineArmedSession->trackIndex != index)
+            return false;
+
+        for (auto& effectSlot : clapLiveSelectedTrackPreviewEffectSessions)
+            if (effectSlot != nullptr && effectSlot->session != nullptr)
+                effectSlot->session->close();
+        clapLiveSelectedTrackPreviewEffectSessions.clear();
+
+        const auto track = currentProject->getTracks()[static_cast<std::size_t>(index)];
+        if (track.getNotes().empty())
+            return false;
+
+        if (hasEnabledNonClapEffectSlots(track))
+        {
+            logMessage("CLAP Preview: selected track has an enabled non-CLAP effect slot, so rendered preview will be used to preserve existing effect behavior.");
+            return false;
+        }
+
+        const auto tempoBpm = std::max(1, currentProject->getTempoBpm());
+        const int sampleRate = std::max(8000, clapLiveEngineArmedSession->sampleRate);
+        const int channelCount = std::max(1, clapLiveEngineArmedSession->channelCount);
+        const int blockSize = std::max(64, clapLiveEngineArmedSession->blockSize);
+
+        std::vector<mw::clap::ClapLivePlaybackNote> callbackNotes;
+        callbackNotes.reserve(track.getNotes().size());
+        for (const auto& note : track.getNotes())
+        {
+            mw::clap::ClapLivePlaybackNote callbackNote;
+            callbackNote.pitch = note.pitch;
+            callbackNote.velocity = note.velocity;
+            callbackNote.midiChannel = note.midiChannel;
+            callbackNote.startTick = note.startTick;
+            callbackNote.durationTicks = note.durationTicks;
+            callbackNotes.push_back(callbackNote);
+        }
+
+        mw::clap::ClapLiveCallbackBridgeConfig bridgeConfig;
+        bridgeConfig.trackIndex = index;
+        bridgeConfig.trackName = track.getName();
+        bridgeConfig.outputChannelCount = channelCount;
+        bridgeConfig.scheduler.tempoBpm = tempoBpm;
+        bridgeConfig.scheduler.sampleRate = sampleRate;
+        bridgeConfig.scheduler.blockSize = blockSize;
+        bridgeConfig.scheduler.ticksPerQuarterNote = mw::core::Project::ticksPerQuarterNote;
+        bridgeConfig.scheduler.startTick = 0;
+        bridgeConfig.scheduler.startSample = 0;
+        bridgeConfig.scheduler.tailSeconds = 1.0;
+
+        std::vector<std::unique_ptr<ClapLiveProjectPreviewEffectSession>> preparedEffects;
+        std::vector<mw::clap::ClapLiveDirectPreviewEffectRequest> effectRequests;
+
+        const auto& effects = track.getVstEffects();
+        for (std::size_t slotIndex = 0; slotIndex < mw::core::maxEffectSlots; ++slotIndex)
+        {
+            const auto* effectSlot = effects.slot(slotIndex);
+            if (effectSlot == nullptr || !effects.slotEnabled(slotIndex) || !effectSlot->isClapPlugin())
+                continue;
+
+            const auto effectPath = resolveClapEffectPluginPath(effectSlot->plugin);
+            if (effectPath.empty() || !std::filesystem::exists(effectPath))
+            {
+                logMessage("CLAP Preview: selected track CLAP effect slot " + juce::String(static_cast<int>(slotIndex) + 1) + " could not be resolved, so rendered preview will be used.");
+                return false;
+            }
+
+            auto effectSession = std::make_unique<mw::clap::ClapLiveEffectSession>();
+            mw::clap::ClapLiveEffectSessionConfig effectConfig;
+            effectConfig.pluginPath = effectPath;
+            effectConfig.pluginUid = effectSlot->plugin.uid;
+            effectConfig.pluginName = effectSlot->plugin.name.empty() ? effectPath.stem().string() : effectSlot->plugin.name;
+            effectConfig.stateBase64 = effectSlot->plugin.stateBase64;
+            effectConfig.sampleRate = sampleRate;
+            effectConfig.channelCount = channelCount;
+            effectConfig.blockSize = blockSize;
+
+            std::string effectOpenError;
+            if (!effectSession->open(effectConfig, effectOpenError))
+            {
+                logMessage("CLAP Preview: selected track CLAP effect slot " + juce::String(static_cast<int>(slotIndex) + 1) + " failed to open: " + juce::String(effectOpenError) + ". Rendered preview will be used.");
+                return false;
+            }
+
+            auto holder = std::make_unique<ClapLiveProjectPreviewEffectSession>();
+            holder->slotIndex = static_cast<int>(slotIndex);
+            holder->displayName = clapEffectSlotDisplayName(*effectSlot, slotIndex);
+            holder->session = std::move(effectSession);
+
+            mw::clap::ClapLiveDirectPreviewEffectRequest effectRequest;
+            effectRequest.slotIndex = static_cast<int>(slotIndex);
+            effectRequest.displayName = holder->displayName.toStdString();
+            effectRequest.session = holder->session.get();
+            effectRequest.sessionProcessMutex = &holder->processMutex;
+
+            preparedEffects.push_back(std::move(holder));
+            effectRequests.push_back(effectRequest);
+        }
+
+        mw::clap::ClapLiveDirectPreviewTrackRequest directRequest;
+        directRequest.trackIndex = index;
+        directRequest.trackName = track.getName();
+        directRequest.session = clapLiveInstrumentSession.get();
+        directRequest.sessionProcessMutex = &clapLiveSessionProcessMutex;
+        directRequest.notes = std::move(callbackNotes);
+        directRequest.config = std::move(bridgeConfig);
+        directRequest.effects = std::move(effectRequests);
+        directRequest.outputGain = mw::audio::sanitizeMainUiGain(static_cast<float>(static_cast<double>(track.getMixerSettings().volume) * masterVolumeSlider.getValue()));
+
+        std::vector<mw::clap::ClapLiveDirectPreviewTrackRequest> directRequests;
+        directRequests.push_back(std::move(directRequest));
+
+        clapLiveSelectedTrackPreviewEffectSessions = std::move(preparedEffects);
+        auto startResult = clapLiveDirectPreviewEngine.start(std::move(directRequests), channelCount);
+        if (!startResult.started)
+        {
+            const auto reason = startResult.errorMessage.isNotEmpty()
+                ? startResult.errorMessage
+                : juce::String("Direct preview did not start.");
+            logMessage("CLAP Preview: " + reason + " Falling back to rendered preview.");
+            for (auto& effectSlot : clapLiveSelectedTrackPreviewEffectSessions)
+                if (effectSlot != nullptr && effectSlot->session != nullptr)
+                    effectSlot->session->close();
+            clapLiveSelectedTrackPreviewEffectSessions.clear();
+            return false;
+        }
+
+        clapLiveAuditionTrackIndex = index;
+        clapLiveAuditionPlaybackActive = false;
+
+        if (clapLiveEngineArmedSession)
+        {
+            clapLiveEngineArmedSession->callbackBridgePrepared = true;
+            clapLiveEngineArmedSession->callbackDirectOutputEnabled = true;
+            clapLiveEngineArmedSession->callbackBridgeScheduledEvents = startResult.scheduledEvents;
+            clapLiveEngineArmedSession->callbackBridgeMaxEventsPerBlock = startResult.maxEventsPerBlock;
+            clapLiveEngineArmedSession->callbackBridgeTotalSamples = startResult.totalSamples;
+            clapLiveEngineArmedSession->callbackBridgeMessage = startResult.message;
+        }
+
+        renderStatusLabel.setText("CLAP preview playing.", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+        logMessage("CLAP Preview: playing selected-track notes directly through the armed CLAP instance for " + getTrackDisplayName(index) + ".");
+        logMessage("CLAP Preview: scheduled events " + juce::String(startResult.scheduledEvents)
+            + ", max events/block " + juce::String(startResult.maxEventsPerBlock)
+            + ", total samples " + juce::String(static_cast<juce::int64>(startResult.totalSamples))
+            + ", live CLAP effect slots " + juce::String(startResult.liveEffectSlotCount)
+            + ". Temp-WAV preview remains the fallback if direct preview cannot run.");
+        if (startResult.message.isNotEmpty())
+            logMessage("CLAP Preview: " + startResult.message);
+
+        beginClapDirectPreviewCompletionPolling();
+
+        const int cleanupDelayMs = juce::jlimit(1000, 60000, static_cast<int>(std::ceil(startResult.durationSeconds() * 1000.0)) + 1200);
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        juce::Timer::callAfterDelay(cleanupDelayMs, [safeThis]() mutable
+        {
+            if (safeThis != nullptr)
+                safeThis->stopClapInstrumentLiveAudition(true);
+        });
+
+        return true;
+    }
+
+
+    bool MainComponent::tryStartSelectedTrackClapMainTransportPreview(int index)
+    {
+        if (!currentProject)
+            return false;
+
+        if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+            return false;
+
+        const auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
+        const auto assignment = track.getInstrument();
+        if (assignment.backendType != mw::core::SampleBackendType::CLAP || !assignment.vst3.hasPluginIdentity())
+            return false;
+
+        if (track.getNotes().empty())
+        {
+            logMessage("Preview Track: selected CLAP instrument track has no MIDI notes, so regular rendered preview will be used.");
+            return false;
+        }
+
+        showVstExperimentalWarningIfNeeded();
+
+        if (!(clapLiveInstrumentSession != nullptr
+              && clapLiveInstrumentSession->isOpen()
+              && clapLiveEngineArmedSession
+              && clapLiveEngineArmedSession->trackIndex == index))
+        {
+            armSelectedTrackClapLiveEngineSession();
+        }
+
+        if (!(clapLiveInstrumentSession != nullptr
+              && clapLiveInstrumentSession->isOpen()
+              && clapLiveEngineArmedSession
+              && clapLiveEngineArmedSession->trackIndex == index))
+        {
+            logMessage("Preview Track: could not prepare the selected CLAP track for direct playback, so regular rendered preview will be used.");
+            return false;
+        }
+
+        if (!startSelectedTrackClapDirectAudition(index))
+            return false;
+
+        setPianoRollPreviewNoteMapFromTracks({ track });
+        setPianoRollPreviewAudioClipMapFromClips({});
+        lastPianoRollPreviewScope = 1;
+        lastPianoRollPreviewTempoBpm = currentProject->getTempoBpm();
+        lastPianoRollPreviewDurationBeats = std::max(0.01, trackEndBeatForPreview(track));
+        pendingPianoRollPreviewStartSeconds = 0.0;
+        pianoRollPreviewPaused = false;
+
+        renderStatusLabel.setText("Preview Track: CLAP direct playback.", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+        logMessage("Preview Track: selected CLAP instrument is using the direct audio callback path from the main Preview Track command. Rendered preview remains the fallback if direct playback cannot run.");
+        return true;
+    }
+
+
+    bool MainComponent::tryStartMultiTrackClapProjectPreview()
+    {
+        if (!currentProject)
+            return false;
+
+        const auto& tracks = currentProject->getTracks();
+        if (tracks.empty())
+            return false;
+
+        if (!currentProject->getAudioClips().empty())
+            return false;
+
+        const bool anySolo = std::any_of(tracks.begin(), tracks.end(), [](const mw::core::Track& track)
+        {
+            return track.getSolo();
+        });
+
+        int clapCandidateCount = 0;
+        int nonClapMidiContentCount = 0;
+        int unsupportedLiveEffectCount = 0;
+        for (const auto& track : tracks)
+        {
+            const bool shouldInclude = anySolo ? track.getSolo() : !track.getMuted();
+            if (!shouldInclude || track.getNotes().empty())
+                continue;
+
+            const auto assignment = track.getInstrument();
+            if (assignment.backendType == mw::core::SampleBackendType::CLAP && assignment.vst3.hasPluginIdentity())
+            {
+                ++clapCandidateCount;
+                if (hasEnabledNonClapEffectSlots(track))
+                    ++unsupportedLiveEffectCount;
+            }
+            else
+            {
+                ++nonClapMidiContentCount;
+            }
+        }
+
+        if (clapCandidateCount < 2 || nonClapMidiContentCount > 0 || unsupportedLiveEffectCount > 0)
+            return false;
+
+        showVstExperimentalWarningIfNeeded();
+        stopClapInstrumentLiveAudition(true);
+        closeClapProjectPreviewTrackSessions();
+
+        const auto tempoBpm = std::max(1, currentProject->getTempoBpm());
+        const int sampleRate = sampleRateCombo.getText().getIntValue() > 0 ? sampleRateCombo.getText().getIntValue() : 48000;
+        const int channelCount = channelsCombo.getSelectedId() > 0 ? channelsCombo.getSelectedId() : 2;
+        const int blockSize = 512;
+
+        std::vector<std::unique_ptr<ClapLiveProjectPreviewTrackSession>> preparedSessions;
+        std::vector<mw::clap::ClapLiveDirectPreviewTrackRequest> requests;
+        preparedSessions.reserve(static_cast<std::size_t>(clapCandidateCount));
+        requests.reserve(static_cast<std::size_t>(clapCandidateCount));
+
+        for (int i = 0; i < static_cast<int>(tracks.size()); ++i)
+        {
+            const auto& track = tracks[static_cast<std::size_t>(i)];
+            const bool shouldInclude = anySolo ? track.getSolo() : !track.getMuted();
+            if (!shouldInclude || track.getNotes().empty())
+                continue;
+
+            const auto assignment = track.getInstrument();
+            if (assignment.backendType != mw::core::SampleBackendType::CLAP || !assignment.vst3.hasPluginIdentity())
+                continue;
+
+            const auto pluginPath = resolveClapPluginPath(assignment);
+            if (pluginPath.empty() || !std::filesystem::exists(pluginPath))
+            {
+                logMessage("CLAP Multi-Track Preview: skipped " + getTrackDisplayName(i) + " because its CLAP plugin path could not be resolved.");
+                continue;
+            }
+
+            auto session = std::make_unique<mw::clap::ClapLiveInstrumentSession>();
+            mw::clap::ClapLiveInstrumentSessionConfig config;
+            config.pluginPath = pluginPath;
+            config.pluginUid = assignment.vst3.uid;
+            config.pluginName = assignment.vst3.name.empty() ? pluginPath.stem().string() : assignment.vst3.name;
+            config.stateBase64 = assignment.vst3.stateBase64;
+            config.sampleRate = sampleRate;
+            config.channelCount = channelCount;
+            config.blockSize = blockSize;
+
+            std::string openError;
+            if (!session->open(config, openError))
+            {
+                logMessage("CLAP Multi-Track Preview: skipped " + getTrackDisplayName(i) + " because the live CLAP instance failed to open: " + juce::String(openError));
+                continue;
+            }
+
+            auto trackSession = std::make_unique<ClapLiveProjectPreviewTrackSession>();
+            trackSession->trackIndex = i;
+            trackSession->trackName = juce::String(track.getName()).trim().isEmpty()
+                ? (juce::String("Track ") + juce::String(i + 1))
+                : juce::String(track.getName()).trim();
+            trackSession->session = std::move(session);
+
+            std::vector<mw::clap::ClapLiveDirectPreviewEffectRequest> effectRequests;
+            const auto& effects = track.getVstEffects();
+            for (std::size_t slotIndex = 0; slotIndex < mw::core::maxEffectSlots; ++slotIndex)
+            {
+                const auto* effectSlot = effects.slot(slotIndex);
+                if (effectSlot == nullptr || !effects.slotEnabled(slotIndex) || !effectSlot->isClapPlugin())
+                    continue;
+
+                const auto effectPath = resolveClapEffectPluginPath(effectSlot->plugin);
+                if (effectPath.empty() || !std::filesystem::exists(effectPath))
+                {
+                    logMessage("CLAP Multi-Track Preview: CLAP effect slot " + juce::String(static_cast<int>(slotIndex) + 1) + " on " + getTrackDisplayName(i) + " could not be resolved, so rendered project preview will be used.");
+                    for (auto& prepared : preparedSessions)
+                        if (prepared != nullptr && prepared->session != nullptr)
+                            prepared->session->close();
+                    return false;
+                }
+
+                auto effectSession = std::make_unique<mw::clap::ClapLiveEffectSession>();
+                mw::clap::ClapLiveEffectSessionConfig effectConfig;
+                effectConfig.pluginPath = effectPath;
+                effectConfig.pluginUid = effectSlot->plugin.uid;
+                effectConfig.pluginName = effectSlot->plugin.name.empty() ? effectPath.stem().string() : effectSlot->plugin.name;
+                effectConfig.stateBase64 = effectSlot->plugin.stateBase64;
+                effectConfig.sampleRate = sampleRate;
+                effectConfig.channelCount = channelCount;
+                effectConfig.blockSize = blockSize;
+
+                std::string effectOpenError;
+                if (!effectSession->open(effectConfig, effectOpenError))
+                {
+                    logMessage("CLAP Multi-Track Preview: CLAP effect slot " + juce::String(static_cast<int>(slotIndex) + 1) + " on " + getTrackDisplayName(i) + " failed to open: " + juce::String(effectOpenError) + ". Rendered project preview will be used.");
+                    for (auto& prepared : preparedSessions)
+                        if (prepared != nullptr && prepared->session != nullptr)
+                            prepared->session->close();
+                    return false;
+                }
+
+                auto effectHolder = std::make_unique<ClapLiveProjectPreviewEffectSession>();
+                effectHolder->slotIndex = static_cast<int>(slotIndex);
+                effectHolder->displayName = clapEffectSlotDisplayName(*effectSlot, slotIndex);
+                effectHolder->session = std::move(effectSession);
+
+                mw::clap::ClapLiveDirectPreviewEffectRequest effectRequest;
+                effectRequest.slotIndex = static_cast<int>(slotIndex);
+                effectRequest.displayName = effectHolder->displayName.toStdString();
+                effectRequest.session = effectHolder->session.get();
+                effectRequest.sessionProcessMutex = &effectHolder->processMutex;
+
+                trackSession->effectSessions.push_back(std::move(effectHolder));
+                effectRequests.push_back(effectRequest);
+            }
+
+            std::vector<mw::clap::ClapLivePlaybackNote> notes;
+            notes.reserve(track.getNotes().size());
+            for (const auto& note : track.getNotes())
+            {
+                mw::clap::ClapLivePlaybackNote liveNote;
+                liveNote.pitch = note.pitch;
+                liveNote.velocity = note.velocity;
+                liveNote.midiChannel = note.midiChannel;
+                liveNote.startTick = note.startTick;
+                liveNote.durationTicks = note.durationTicks;
+                notes.push_back(liveNote);
+            }
+
+            mw::clap::ClapLiveCallbackBridgeConfig bridgeConfig;
+            bridgeConfig.trackIndex = i;
+            bridgeConfig.trackName = track.getName();
+            bridgeConfig.outputChannelCount = channelCount;
+            bridgeConfig.scheduler.tempoBpm = tempoBpm;
+            bridgeConfig.scheduler.sampleRate = sampleRate;
+            bridgeConfig.scheduler.blockSize = blockSize;
+            bridgeConfig.scheduler.ticksPerQuarterNote = mw::core::Project::ticksPerQuarterNote;
+            bridgeConfig.scheduler.startTick = 0;
+            bridgeConfig.scheduler.startSample = 0;
+            bridgeConfig.scheduler.tailSeconds = 1.0;
+
+            mw::clap::ClapLiveDirectPreviewTrackRequest request;
+            request.trackIndex = i;
+            request.trackName = track.getName();
+            request.session = trackSession->session.get();
+            request.sessionProcessMutex = &trackSession->processMutex;
+            request.notes = std::move(notes);
+            request.config = std::move(bridgeConfig);
+            request.effects = std::move(effectRequests);
+            request.outputGain = mw::audio::sanitizeMainUiGain(static_cast<float>(static_cast<double>(track.getMixerSettings().volume) * masterVolumeSlider.getValue()));
+
+            preparedSessions.push_back(std::move(trackSession));
+            requests.push_back(std::move(request));
+        }
+
+        if (requests.size() < 2)
+        {
+            for (auto& slot : preparedSessions)
+                if (slot != nullptr && slot->session != nullptr)
+                    slot->session->close();
+            logMessage("CLAP Multi-Track Preview: fewer than two CLAP live tracks could be prepared, so rendered project preview will be used.");
+            return false;
+        }
+
+        clapLiveProjectPreviewTrackSessions = std::move(preparedSessions);
+        auto startResult = clapLiveDirectPreviewEngine.start(std::move(requests), channelCount);
+        if (!startResult.started)
+        {
+            const auto reason = startResult.errorMessage.isNotEmpty()
+                ? startResult.errorMessage
+                : juce::String("Direct multi-track preview did not start.");
+            logMessage("CLAP Multi-Track Preview: " + reason + " Falling back to rendered project preview.");
+            closeClapProjectPreviewTrackSessions();
+            return false;
+        }
+
+        clapLiveAuditionTrackIndex = -1;
+        clapLiveAuditionPlaybackActive = false;
+        clapLiveDirectPreviewProjectMode = true;
+
+        setPianoRollPreviewNoteMapFromTracks(tracks);
+        setPianoRollPreviewAudioClipMapFromClips({});
+        lastPianoRollPreviewScope = 3;
+        lastPianoRollPreviewTempoBpm = currentProject->getTempoBpm();
+        lastPianoRollPreviewDurationBeats = std::max(0.01, tracksEndBeatForPreview(tracks));
+        pendingPianoRollPreviewStartSeconds = 0.0;
+        pianoRollPreviewPaused = false;
+
+        renderStatusLabel.setText("Preview Project: CLAP multi-track direct playback.", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+        logMessage("CLAP Multi-Track Preview: playing " + juce::String(startResult.trackCount) + " CLAP instrument tracks directly through the audio callback path.");
+        logMessage("CLAP Multi-Track Preview: scheduled events " + juce::String(startResult.scheduledEvents)
+            + ", max events/block " + juce::String(startResult.maxEventsPerBlock)
+            + ", total samples " + juce::String(static_cast<juce::int64>(startResult.totalSamples))
+            + ", live CLAP effect slots " + juce::String(startResult.liveEffectSlotCount)
+            + ". Rendered project preview remains the fallback for mixed projects, audio clips, unsupported tracks, and unsupported effect slots.");
+        if (startResult.message.isNotEmpty())
+            logMessage("CLAP Multi-Track Preview: " + startResult.message);
+
+        beginClapDirectPreviewCompletionPolling();
+
+        const int cleanupDelayMs = juce::jlimit(1000, 60000, static_cast<int>(std::ceil(startResult.durationSeconds() * 1000.0)) + 1200);
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        juce::Timer::callAfterDelay(cleanupDelayMs, [safeThis]() mutable
+        {
+            if (safeThis != nullptr)
+                safeThis->stopClapInstrumentLiveAudition(true);
+        });
+
+        return true;
+    }
+
+
+    void MainComponent::closeClapProjectPreviewTrackSessions()
+    {
+        for (auto& selectedEffect : clapLiveSelectedTrackPreviewEffectSessions)
+            if (selectedEffect != nullptr && selectedEffect->session != nullptr)
+                selectedEffect->session->close();
+        clapLiveSelectedTrackPreviewEffectSessions.clear();
+
+        for (auto& slot : clapLiveProjectPreviewTrackSessions)
+        {
+            if (slot == nullptr)
+                continue;
+
+            for (auto& effectSlot : slot->effectSessions)
+                if (effectSlot != nullptr && effectSlot->session != nullptr)
+                    effectSlot->session->close();
+
+            if (slot->session != nullptr)
+                slot->session->close();
+        }
+
+        clapLiveProjectPreviewTrackSessions.clear();
+        clapLiveDirectPreviewProjectMode = false;
+    }
+
+
+    void MainComponent::beginClapDirectPreviewCompletionPolling()
+    {
+        clapLiveDirectPreviewCompletionPollActive = true;
+        const int generation = ++clapLiveDirectPreviewCompletionPollGeneration;
+        scheduleClapDirectPreviewCompletionPoll(generation);
+    }
+
+    void MainComponent::cancelClapDirectPreviewCompletionPolling()
+    {
+        clapLiveDirectPreviewCompletionPollActive = false;
+        ++clapLiveDirectPreviewCompletionPollGeneration;
+    }
+
+    void MainComponent::scheduleClapDirectPreviewCompletionPoll(int generation)
+    {
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        juce::Timer::callAfterDelay(200, [safeThis, generation]() mutable
+        {
+            if (safeThis != nullptr)
+                safeThis->handleClapDirectPreviewCompletionPoll(generation);
+        });
+    }
+
+    void MainComponent::handleClapDirectPreviewCompletionPoll(int generation)
+    {
+        if (!clapLiveDirectPreviewCompletionPollActive || generation != clapLiveDirectPreviewCompletionPollGeneration)
+            return;
+
+        const auto status = clapLiveDirectPreviewEngine.status();
+        if (!status.active)
+        {
+            cancelClapDirectPreviewCompletionPolling();
+            return;
+        }
+
+        if (!status.isTerminal())
+        {
+            scheduleClapDirectPreviewCompletionPoll(generation);
+            return;
+        }
+
+        if (clapLiveEngineArmedSession)
+        {
+            clapLiveEngineArmedSession->callbackBridgePrepared = true;
+            clapLiveEngineArmedSession->callbackDirectOutputEnabled = false;
+            clapLiveEngineArmedSession->callbackBridgeScheduledEvents = status.scheduledEvents;
+            clapLiveEngineArmedSession->callbackBridgeMaxEventsPerBlock = status.maxEventsPerBlock;
+            clapLiveEngineArmedSession->callbackBridgeTotalSamples = status.totalSamples;
+            clapLiveEngineArmedSession->callbackBridgeMessage = status.toStatusMessage();
+        }
+
+        const bool hadFailure = status.hadFailure;
+        const auto statusMessage = status.toStatusMessage();
+        stopClapInstrumentLiveAudition(true);
+
+        if (hadFailure)
+        {
+            renderStatusLabel.setText("CLAP preview callback failed.", juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::red);
+            logMessage(statusMessage);
+        }
+        else
+        {
+            renderStatusLabel.setText("CLAP preview complete.", juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+            logMessage(statusMessage);
+        }
+    }
+
+
+    void MainComponent::startSelectedTrackClapInstrumentLiveAudition()
+    {
+        showVstExperimentalWarningIfNeeded();
+
+        if (!currentProject)
+        {
+            logMessage("CLAP Preview: no project loaded.");
+            return;
+        }
+
+        const auto index = getSelectedTrackIndex();
+        if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+        {
+            logMessage("CLAP Preview: select a CLAP instrument track first.");
+            return;
+        }
+
+        stopClapInstrumentLiveAudition(true);
+
+        if (!(clapLiveInstrumentSession != nullptr && clapLiveInstrumentSession->isOpen() && clapLiveEngineArmedSession && clapLiveEngineArmedSession->trackIndex == index))
+            armSelectedTrackClapLiveEngineSession();
+
+        if (clapLiveInstrumentSession != nullptr && clapLiveInstrumentSession->isOpen() && clapLiveEngineArmedSession && clapLiveEngineArmedSession->trackIndex == index)
+        {
+            if (startSelectedTrackClapDirectAudition(index))
+                return;
+
+            renderSelectedTrackWithArmedClapLiveBridgeForAudition(index);
+            return;
+        }
+
+        renderClapInstrumentTestNoteForTrack(index, true, true, true);
+    }
+
+    void MainComponent::startClapInstrumentLiveAuditionPlayback(const std::filesystem::path& wavPath, int trackIndex)
+    {
+        stopClapInstrumentLiveAudition(true);
+
+        if (wavPath.empty())
+        {
+            logMessage("CLAP Preview: no rendered preview WAV was available.");
+            return;
+        }
+
+        if (clapLiveAuditionFormatManager.getNumKnownFormats() == 0)
+            clapLiveAuditionFormatManager.registerBasicFormats();
+
+        juce::File file(wavPath.string());
+        std::unique_ptr<juce::AudioFormatReader> reader(clapLiveAuditionFormatManager.createReaderFor(file));
+        if (!reader)
+        {
+            logMessage("CLAP Preview: could not open rendered preview WAV for playback: " + wavPath.string());
+            std::error_code removeError;
+            std::filesystem::remove(wavPath, removeError);
+            return;
+        }
+
+        const double readerSampleRate = reader->sampleRate > 0.0 ? reader->sampleRate : 48000.0;
+        const double durationSeconds = reader->lengthInSamples > 0
+            ? static_cast<double>(reader->lengthInSamples) / readerSampleRate
+            : 6.0;
+
+        clapLiveAuditionReaderSource = std::make_unique<juce::AudioFormatReaderSource>(reader.release(), true);
+        clapLiveAuditionTransport.setSource(clapLiveAuditionReaderSource.get(), 0, nullptr, readerSampleRate);
+
+        const auto initError = clapLiveAuditionDeviceManager.initialise(0, 2, nullptr, true);
+        if (initError.isNotEmpty())
+        {
+            logMessage("CLAP Preview: playback device did not open. " + initError);
+            stopClapInstrumentLiveAudition(true);
+            std::error_code removeError;
+            std::filesystem::remove(wavPath, removeError);
+            return;
+        }
+
+        clapLiveAuditionSourcePlayer.setSource(&clapLiveAuditionTransport);
+        clapLiveAuditionDeviceManager.addAudioCallback(&clapLiveAuditionSourcePlayer);
+        clapLiveAuditionTransport.setPosition(0.0);
+        clapLiveAuditionTempWavPath = wavPath;
+        clapLiveAuditionTrackIndex = trackIndex;
+        clapLiveAuditionPlaybackActive = true;
+        clapLiveAuditionTransport.start();
+
+        renderStatusLabel.setText("CLAP preview playing.", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+        logMessage("CLAP Preview: playing rendered preview for " + getTrackDisplayName(trackIndex) + ". Use the preview/player stop control to stop early.");
+
+        const int cleanupDelayMs = juce::jlimit(1000, 60000, static_cast<int>(std::ceil(durationSeconds * 1000.0)) + 700);
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        juce::Timer::callAfterDelay(cleanupDelayMs, [safeThis]() mutable
+        {
+            if (safeThis != nullptr)
+                safeThis->stopClapInstrumentLiveAudition(true);
+        });
+    }
+
+    void MainComponent::stopClapInstrumentLiveAudition(bool deleteTempFile)
+    {
+        cancelClapDirectPreviewCompletionPolling();
+
+        const bool projectDirectPreviewWasActive = clapLiveDirectPreviewProjectMode;
+        const auto directStopSummary = clapLiveDirectPreviewEngine.stop();
+        const bool directWasActive = directStopSummary.wasActive;
+        const auto directSummary = directStopSummary.toLogMessage();
+
+        closeClapProjectPreviewTrackSessions();
+
+        const bool transportWasActive = clapLiveAuditionPlaybackActive || clapLiveAuditionReaderSource != nullptr;
+
+        if (directWasActive && !projectDirectPreviewWasActive && clapLiveEngineArmedSession)
+        {
+            clapLiveEngineArmedSession->callbackBridgePrepared = true;
+            clapLiveEngineArmedSession->callbackDirectOutputEnabled = false;
+            clapLiveEngineArmedSession->callbackBridgeScheduledEvents = directStopSummary.scheduledEvents;
+            clapLiveEngineArmedSession->callbackBridgeMaxEventsPerBlock = directStopSummary.maxEventsPerBlock;
+            clapLiveEngineArmedSession->callbackBridgeTotalSamples = directStopSummary.totalSamples;
+            clapLiveEngineArmedSession->callbackBridgeMessage = directSummary;
+        }
+
+        if (clapLiveAuditionPlaybackActive || clapLiveAuditionReaderSource != nullptr)
+        {
+            clapLiveAuditionTransport.stop();
+            clapLiveAuditionSourcePlayer.setSource(nullptr);
+            clapLiveAuditionDeviceManager.removeAudioCallback(&clapLiveAuditionSourcePlayer);
+            clapLiveAuditionTransport.setSource(nullptr);
+            clapLiveAuditionReaderSource.reset();
+            clapLiveAuditionDeviceManager.closeAudioDevice();
+        }
+
+        if (deleteTempFile && !clapLiveAuditionTempWavPath.empty())
+        {
+            std::error_code removeError;
+            std::filesystem::remove(clapLiveAuditionTempWavPath, removeError);
+            if (removeError)
+                logMessage("CLAP Preview: temp WAV cleanup failed: " + juce::String(removeError.message()));
+        }
+
+        clapLiveAuditionTempWavPath.clear();
+        clapLiveAuditionTrackIndex = -1;
+        clapLiveAuditionPlaybackActive = false;
+
+        if (directWasActive || transportWasActive)
+        {
+            renderStatusLabel.setText("CLAP preview stopped.", juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+            if (directSummary.isNotEmpty())
+                logMessage(directSummary);
+            else
+                logMessage("CLAP Preview stopped.");
+        }
+    }
+
+    void MainComponent::renderClapInstrumentTestNoteForTrack(int index, bool playAudition, bool useLiveAuditionTransport, bool useSelectedTrackNotes)
+    {
+        const auto actionLabel = useLiveAuditionTransport
+            ? juce::String("CLAP Live Audition")
+            : (playAudition ? juce::String("Test Instrument") : juce::String("CLAP Live Preflight"));
+
+        if (renderingInProgress)
+        {
+            logMessage(actionLabel + ": render/preview already in progress.");
+            return;
+        }
+
+        if (!currentProject)
+        {
+            logMessage(actionLabel + ": no project loaded.");
+            return;
+        }
+
+        if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+        {
+            logMessage(actionLabel + ": select a valid track first.");
+            return;
+        }
+
+        auto testTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
+        auto assignment = testTrack.getInstrument();
+        if (assignment.backendType != mw::core::SampleBackendType::CLAP || !assignment.vst3.hasPluginIdentity())
+        {
+            logMessage(actionLabel + ": selected track does not have a CLAP instrument assigned.");
+            return;
+        }
+
+        const auto liveEditorState = captureOpenVstPluginStateForTrack(index, false, false);
+        if (liveEditorState.isNotEmpty())
+        {
+            assignment.vst3.stateBase64 = liveEditorState.toStdString();
+            testTrack.setInstrumentAssignment(assignment);
+            logMessage(actionLabel + ": using the current open CLAP instrument editor state without applying it to the project.");
+        }
+        else
+        {
+            logMessage(actionLabel + ": using this track's last applied CLAP instrument state.");
+        }
+
+        const auto previewFolder = mw::app::AppPaths::previewFolder();
+        std::error_code ec;
+        std::filesystem::create_directories(previewFolder, ec);
+        if (ec)
+        {
+            logMessage(actionLabel + ": could not create preview folder: " + juce::String(ec.message()));
+            return;
+        }
+
+        const auto stamp = juce::Time::currentTimeMillis();
+        const auto outputPrefix = useLiveAuditionTransport
+            ? (useSelectedTrackNotes ? std::string("clap_live_track_preview_") : std::string("clap_live_audition_track_"))
+            : (playAudition ? std::string("clap_instrument_test_track_") : std::string("clap_live_preflight_track_"));
+        const auto outputPath = previewFolder / (outputPrefix + std::to_string(index + 1) + "_" + std::to_string(stamp) + ".wav");
+
+        const bool usingSelectedTrackNotes = useSelectedTrackNotes && !testTrack.getNotes().empty();
+        if (usingSelectedTrackNotes)
+        {
+            logMessage(actionLabel + ": using selected track MIDI notes for the live transport audition.");
+        }
+        else
+        {
+            if (useSelectedTrackNotes)
+                logMessage(actionLabel + ": selected track has no MIDI notes, using the single-note instrument test sound instead.");
+
+            setSinglePluginInstrumentTestNote(testTrack, assignment.midiChannel);
+        }
+
+        if (playAudition && !useLiveAuditionTransport)
+        {
+            auto previewProject = mw::core::Project("CLAP Instrument Test");
+            previewProject.setTempoBpm(currentProject->getTempoBpm());
+            previewProject.setTimeSignature(currentProject->getTimeSignature());
+            previewProject.getTracks().push_back(testTrack);
+            setPianoRollPreviewNoteMapFromTracks(previewProject.getTracks());
+            setPianoRollPreviewAudioClipMapFromClips({});
+        }
+
+        const int previewTempoBpm = currentProject->getTempoBpm();
+        const int previewSampleRate = sampleRateCombo.getText().getIntValue() > 0 ? sampleRateCombo.getText().getIntValue() : 48000;
+        const int previewChannelCount = channelsCombo.getSelectedId() > 0 ? channelsCombo.getSelectedId() : 2;
+
+        cancelRenderRequested = false;
+        setRenderingState(true);
+        logMessage(actionLabel + (usingSelectedTrackNotes
+            ? ": rendering selected-track CLAP instrument notes for "
+            : ": rendering single-note CLAP instrument test sound for ") + getTrackDisplayName(index) + ".");
+        logMessage(actionLabel + " temp WAV: " + outputPath.string());
+
+        if (renderThread.joinable())
+            renderThread.join();
+
+        renderThread = std::thread(
+            [this, index, testTrack, outputPath, previewTempoBpm, previewSampleRate, previewChannelCount, playAudition, useLiveAuditionTransport, usingSelectedTrackNotes]
+            {
+                mw::clap::ClapInstrumentRenderRequest request;
+                request.track = testTrack;
+                request.tempoBpm = previewTempoBpm;
+                request.sampleRate = previewSampleRate;
+                request.channelCount = previewChannelCount;
+                request.blockSize = 512;
+                request.tailSeconds = 3.0;
+                request.wavOutputPath = outputPath;
+                request.cancelRequested = &cancelRenderRequested;
+
+                const auto result = mw::clap::ClapInstrumentHost::renderTrackToWav(request);
+
+                juce::MessageManager::callAsync(
+                    [this, index, outputPath, result, playAudition, useLiveAuditionTransport, usingSelectedTrackNotes]
+                    {
+                        logMessage(result.message);
+
+                        if (result.cancelled)
+                        {
+                            renderStatusLabel.setText(useLiveAuditionTransport ? "CLAP live audition cancelled." : (playAudition ? "CLAP instrument test cancelled." : "CLAP live preflight cancelled."), juce::dontSendNotification);
+                            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+                            setRenderingState(false);
+                            return;
+                        }
+
+                        if (!result.success || !std::filesystem::exists(result.wavPath))
+                        {
+                            renderStatusLabel.setText(useLiveAuditionTransport ? "CLAP live audition render failed." : (playAudition ? "CLAP instrument test failed." : "CLAP live preflight failed."), juce::dontSendNotification);
+                            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::red);
+                            setRenderingState(false);
+                            return;
+                        }
+
+                        if (useLiveAuditionTransport)
+                        {
+                            renderStatusLabel.setText(usingSelectedTrackNotes ? "CLAP live track preview rendered." : "CLAP live audition rendered.", juce::dontSendNotification);
+                            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+                            logMessage(juce::String(usingSelectedTrackNotes ? "CLAP Live Audition: rendered selected-track transport WAV for " : "CLAP Live Audition: rendered transport audition WAV for ") + getTrackDisplayName(index) + ": " + result.wavPath.string());
+                            startClapInstrumentLiveAuditionPlayback(result.wavPath, index);
+                        }
+                        else if (playAudition)
+                        {
+                            generatedPreviewFiles.push_back(result.wavPath);
+                            lastPianoRollPreviewWavPath = result.wavPath;
+                            lastPianoRollPreviewDurationBeats = 1.0;
+                            lastPianoRollPreviewTempoBpm = currentProject.has_value()
+                                ? currentProject->getTempoBpm()
+                                : 120.0;
+                            pianoRollPreviewPaused = false;
+                            pendingPianoRollPreviewStartSeconds = 0.0;
+
+                            renderStatusLabel.setText("CLAP instrument test rendered.", juce::dontSendNotification);
+                            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+                            logMessage("Test Instrument: rendered CLAP audition WAV for " + getTrackDisplayName(index) + ": " + result.wavPath.string());
+
+#if JUCE_WINDOWS
+                            const auto path = juce::String(result.wavPath.wstring().c_str());
+                            const auto ok = PlaySoundW(path.toWideCharPointer(), nullptr, SND_FILENAME | SND_ASYNC);
+                            if (ok)
+                                logMessage("Playing CLAP instrument test WAV: " + result.wavPath.string());
+                            else
+                                logMessage("ERROR: Windows could not play CLAP instrument test WAV: " + result.wavPath.string());
+#else
+                            logMessage("CLAP instrument test WAV created. Embedded playback is currently only available on Windows: " + result.wavPath.string());
+#endif
+                        }
+                        else
+                        {
+                            renderStatusLabel.setText("CLAP live preflight passed.", juce::dontSendNotification);
+                            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+                            logMessage("CLAP Live Preflight passed for " + getTrackDisplayName(index) + ". The plugin loaded, restored state, selected a note dialect, activated, processed a short probe, and stopped cleanly.");
+
+                            std::error_code removeError;
+                            std::filesystem::remove(result.wavPath, removeError);
+                            if (removeError)
+                                logMessage("CLAP Live Preflight: temp WAV cleanup failed: " + juce::String(removeError.message()));
+                        }
+
+                        setRenderingState(false);
+                    }
+                );
+            }
+        );
+    }
 
     void MainComponent::renderVstEffectTestSampleForTrack(int index, int effectSlotIndex)
     {
@@ -12596,24 +17311,33 @@ namespace mw::gui
 
         if (!effects.slotEnabled(slotIndexSize))
         {
-            logMessage("Test Effect: Enable is unchecked for VST Effect slot " + juce::String(slotNumber) + ".");
+            logMessage("Test Effect: Enable is unchecked for Effect Slot " + juce::String(slotNumber) + ".");
             recordVstEffectRenderStatusForTrack(index, "Test skipped: slot " + juce::String(slotNumber) + " disabled");
             return;
         }
 
+        if (effectSlot->backendType != mw::core::EffectSlotBackendType::VST3
+            && effectSlot->backendType != mw::core::EffectSlotBackendType::CLAP)
+        {
+            logMessage("Test Effect: Effect Slot " + juce::String(slotNumber) + " is not assigned to a processable effect backend.");
+            recordVstEffectRenderStatusForTrack(index, "Test skipped: unsupported backend");
+            return;
+        }
+
         const int effectWindowKey = index * 10 + safeEffectSlotIndex;
-        if (vstEffectEditorWindows.find(effectWindowKey) != vstEffectEditorWindows.end())
+        if (vstEffectEditorWindows.find(effectWindowKey) != vstEffectEditorWindows.end()
+            || clapEffectEditorWindows.find(effectWindowKey) != clapEffectEditorWindows.end())
         {
             const auto liveEditorState = captureOpenVstEffectStateForTrack(index, safeEffectSlotIndex, false, false);
             if (liveEditorState.isNotEmpty())
             {
                 auto& previewSlot = effects.ensureSlot(slotIndexSize);
                 previewSlot.plugin.stateBase64 = liveEditorState.toStdString();
-                logMessage("Test Effect: auditioning the current live VST effect editor state for slot " + juce::String(slotNumber) + " without applying it to the project.");
+                logMessage("Test Effect: auditioning the current live Effect Slot editor state for slot " + juce::String(slotNumber) + " without applying it to the project.");
             }
             else
             {
-                logMessage("Test Effect: current VST effect editor state could not be captured; using the selected track's last applied state for slot " + juce::String(slotNumber) + ".");
+                logMessage("Test Effect: current Effect Slot editor state could not be captured; using the selected track's last applied state for slot " + juce::String(slotNumber) + ".");
             }
 
             effectSlot = effects.slot(slotIndexSize);
@@ -12640,10 +17364,10 @@ namespace mw::gui
         const auto inputPath = previewFolder / ("vst_effect_test_input_" + std::to_string(stamp) + ".wav");
         const auto outputPath = previewFolder / ("vst_effect_test_track_" + std::to_string(index + 1) + "_slot_" + std::to_string(slotNumber) + "_" + std::to_string(stamp) + ".wav");
 
-        const auto bundledTestSamplePath = mw::app::AppPaths::vst3Folder() / "test" / "pms_vst_effect_test_sample.wav";
+        const auto bundledTestSamplePath = sharedPluginTestSamplePath();
         if (!std::filesystem::exists(bundledTestSamplePath))
         {
-            logMessage("Test Effect: missing VST effect test sample: " + bundledTestSamplePath.string());
+            logMessage("Test Effect: missing effect test sample: " + bundledTestSamplePath.string());
             logMessage("Restore workspace/vst3/test/pms_vst_effect_test_sample.wav from the Poor Man's Studio bundle.");
             recordVstEffectRenderStatusForTrack(index, "Test failed: missing sample");
             return;
@@ -12654,7 +17378,7 @@ namespace mw::gui
             std::filesystem::copy_file(bundledTestSamplePath, inputPath, std::filesystem::copy_options::overwrite_existing, copyError);
             if (copyError || !std::filesystem::exists(inputPath))
             {
-                logMessage("Test Effect: could not copy VST effect test sample from: " + bundledTestSamplePath.string());
+                logMessage("Test Effect: could not copy effect test sample from: " + bundledTestSamplePath.string());
                 if (copyError)
                     logMessage("Test Effect copy error: " + juce::String(copyError.message()));
                 recordVstEffectRenderStatusForTrack(index, "Test failed");
@@ -12664,7 +17388,7 @@ namespace mw::gui
 
         cancelRenderRequested = false;
         setRenderingState(true);
-        logMessage("Test Effect: processing VST effect test sample for " + getTrackDisplayName(index) + " slot " + juce::String(slotNumber) + ".");
+        logMessage("Test Effect: processing effect test sample for " + getTrackDisplayName(index) + " slot " + juce::String(slotNumber) + ".");
         logMessage("Test Effect source WAV: " + bundledTestSamplePath.string() + " | input copy: " + inputPath.string());
 
         if (renderThread.joinable())
@@ -12693,7 +17417,7 @@ namespace mw::gui
                     request.inputWavPath = inputPath;
                     request.outputWavPath = outputPath;
                     request.blockSize = 512;
-                    request.tailSeconds = 2.0;
+                    request.tailSeconds = kEffectSlotPreviewTailOverscanSeconds;
                     request.effectSlotIndex = safeEffectSlotIndex;
                     request.cancelRequested = &cancelRenderRequested;
 
@@ -12708,7 +17432,7 @@ namespace mw::gui
                         if (effectResult.cancelled)
                         {
                             recordVstEffectRenderStatusForTrack(index, "Test cancelled");
-                            renderStatusLabel.setText("VST effect test cancelled.", juce::dontSendNotification);
+                            renderStatusLabel.setText("Effect test cancelled.", juce::dontSendNotification);
                             renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
                             setRenderingState(false);
                             return;
@@ -12717,7 +17441,7 @@ namespace mw::gui
                         if (!effectResult.success || !std::filesystem::exists(effectResult.wavPath))
                         {
                             recordVstEffectRenderStatusForTrack(index, "Test failed");
-                            renderStatusLabel.setText("VST effect test failed.", juce::dontSendNotification);
+                            renderStatusLabel.setText("Effect test failed.", juce::dontSendNotification);
                             renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::red);
                             setRenderingState(false);
                             return;
@@ -12734,7 +17458,7 @@ namespace mw::gui
                         pendingPianoRollPreviewStartSeconds = 0.0;
 
                         recordVstEffectRenderStatusForTrack(index, bypassed ? "Test bypassed" : "Test succeeded");
-                        renderStatusLabel.setText(bypassed ? "VST effect test bypassed." : "VST effect test rendered.", juce::dontSendNotification);
+                        renderStatusLabel.setText(bypassed ? "Effect test bypassed." : "Effect test rendered.", juce::dontSendNotification);
                         renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
                         logMessage("Test Effect slot " + juce::String(slotNumber) + " output WAV: " + effectResult.wavPath.string());
 
@@ -12742,12 +17466,12 @@ namespace mw::gui
                         const auto path = juce::String(effectResult.wavPath.wstring().c_str());
                         const auto ok = PlaySoundW(path.toWideCharPointer(), nullptr, SND_FILENAME | SND_ASYNC);
                         if (ok)
-                            logMessage(bypassed ? "Playing dry VST effect test sample: " + effectResult.wavPath.string()
-                                                : "Playing processed VST effect test sample: " + effectResult.wavPath.string());
+                            logMessage(bypassed ? "Playing dry effect test sample: " + effectResult.wavPath.string()
+                                                : "Playing processed effect test sample: " + effectResult.wavPath.string());
                         else
-                            logMessage("ERROR: Windows could not play VST effect test WAV: " + effectResult.wavPath.string());
+                            logMessage("ERROR: Windows could not play effect test WAV: " + effectResult.wavPath.string());
 #else
-                        logMessage("VST effect test WAV created. Embedded playback is currently only available on Windows: " + effectResult.wavPath.string());
+                        logMessage("Effect test WAV created. Embedded playback is currently only available on Windows: " + effectResult.wavPath.string());
 #endif
                         setRenderingState(false);
                     }
@@ -12764,11 +17488,16 @@ namespace mw::gui
         const int safeEffectSlotIndex = juce::jlimit(0, static_cast<int>(mw::core::maxVstEffectSlots) - 1, effectSlotIndex);
         const auto slotIndexSize = static_cast<std::size_t>(safeEffectSlotIndex);
         const int effectWindowKey = trackIndex * 10 + safeEffectSlotIndex;
-        const auto found = vstEffectEditorWindows.find(effectWindowKey);
-        if (found == vstEffectEditorWindows.end() || found->second == nullptr)
+        juce::DocumentWindow* editorWindow = nullptr;
+        if (auto found = vstEffectEditorWindows.find(effectWindowKey); found != vstEffectEditorWindows.end() && found->second != nullptr)
+            editorWindow = found->second.get();
+        else if (auto foundClap = clapEffectEditorWindows.find(effectWindowKey); foundClap != clapEffectEditorWindows.end() && foundClap->second != nullptr)
+            editorWindow = foundClap->second.get();
+
+        if (editorWindow == nullptr)
             return {};
 
-        auto* content = found->second->getContentComponent();
+        auto* content = editorWindow->getContentComponent();
         auto* stateProvider = dynamic_cast<VstEditorStateProvider*>(content);
         if (stateProvider == nullptr)
             return {};
@@ -12778,7 +17507,7 @@ namespace mw::gui
         if (capturedState.isEmpty())
         {
             if (logCapture)
-                logMessage("VST3 effect UI state capture skipped: plugin did not return state data.");
+                logMessage("Effect Slot UI state capture skipped: plugin did not return state data.");
             return {};
         }
 
@@ -12797,7 +17526,7 @@ namespace mw::gui
                 setProjectDirty();
                 refreshTrackManagerText();
                 if (logCapture)
-                    logMessage("Captured current VST3 effect slot " + juce::String(safeEffectSlotIndex + 1) + " UI state for " + getTrackDisplayName(trackIndex) + ".");
+                    logMessage("Captured current Effect Slot " + juce::String(safeEffectSlotIndex + 1) + " UI state for " + getTrackDisplayName(trackIndex) + ".");
             }
         }
 
@@ -12806,20 +17535,30 @@ namespace mw::gui
 
     int MainComponent::captureOpenVstPluginStatesForPreview(const juce::String& contextLabel)
     {
-        if (!currentProject || (vstPluginEditorWindows.empty() && vstEffectEditorWindows.empty()))
+        if (!currentProject || (vstPluginEditorWindows.empty() && clapInstrumentEditorWindows.empty() && vstEffectEditorWindows.empty() && clapEffectEditorWindows.empty()))
             return 0;
 
         std::vector<int> openInstrumentTrackIndices;
-        openInstrumentTrackIndices.reserve(vstPluginEditorWindows.size());
+        openInstrumentTrackIndices.reserve(vstPluginEditorWindows.size() + clapInstrumentEditorWindows.size());
         for (const auto& [trackIndex, window] : vstPluginEditorWindows)
+        {
+            if (window != nullptr)
+                openInstrumentTrackIndices.push_back(trackIndex);
+        }
+        for (const auto& [trackIndex, window] : clapInstrumentEditorWindows)
         {
             if (window != nullptr)
                 openInstrumentTrackIndices.push_back(trackIndex);
         }
 
         std::vector<int> openEffectWindowKeys;
-        openEffectWindowKeys.reserve(vstEffectEditorWindows.size());
+        openEffectWindowKeys.reserve(vstEffectEditorWindows.size() + clapEffectEditorWindows.size());
         for (const auto& [effectWindowKey, window] : vstEffectEditorWindows)
+        {
+            if (window != nullptr)
+                openEffectWindowKeys.push_back(effectWindowKey);
+        }
+        for (const auto& [effectWindowKey, window] : clapEffectEditorWindows)
         {
             if (window != nullptr)
                 openEffectWindowKeys.push_back(effectWindowKey);
@@ -12835,14 +17574,14 @@ namespace mw::gui
 
         if (!openEffectWindowKeys.empty())
         {
-            logMessage("VST effect editor changes are no longer auto-applied before " + contextLabel + ". Regular preview/export uses the last applied effect state; use Test Effect to audition live tweaks or Apply Changes to commit them.");
+            logMessage("Effect Slot editor changes are no longer auto-applied before " + contextLabel + ". Regular preview/export uses the last applied effect state; use Test Effect to audition live tweaks or Apply Changes to commit them.");
         }
 
         if (capturedCount > 0)
         {
             cleanupPianoRollPreviewFiles();
             refreshTrackManagerText();
-            logMessage(juce::String("Captured ") + juce::String(capturedCount) + " open VST3 editor state"
+            logMessage(juce::String("Captured ") + juce::String(capturedCount) + " open plugin instrument editor state"
                 + (capturedCount == 1 ? "" : "s")
                 + " before re-rendering " + contextLabel + ".");
         }
@@ -12852,20 +17591,30 @@ namespace mw::gui
 
     int MainComponent::captureOpenVstPluginStatesForProjectSave()
     {
-        if (!currentProject || (vstPluginEditorWindows.empty() && vstEffectEditorWindows.empty()))
+        if (!currentProject || (vstPluginEditorWindows.empty() && clapInstrumentEditorWindows.empty() && vstEffectEditorWindows.empty() && clapEffectEditorWindows.empty()))
             return 0;
 
         std::vector<int> openInstrumentTrackIndices;
-        openInstrumentTrackIndices.reserve(vstPluginEditorWindows.size());
+        openInstrumentTrackIndices.reserve(vstPluginEditorWindows.size() + clapInstrumentEditorWindows.size());
         for (const auto& [trackIndex, window] : vstPluginEditorWindows)
+        {
+            if (window != nullptr)
+                openInstrumentTrackIndices.push_back(trackIndex);
+        }
+        for (const auto& [trackIndex, window] : clapInstrumentEditorWindows)
         {
             if (window != nullptr)
                 openInstrumentTrackIndices.push_back(trackIndex);
         }
 
         std::vector<int> openEffectWindowKeys;
-        openEffectWindowKeys.reserve(vstEffectEditorWindows.size());
+        openEffectWindowKeys.reserve(vstEffectEditorWindows.size() + clapEffectEditorWindows.size());
         for (const auto& [effectWindowKey, window] : vstEffectEditorWindows)
+        {
+            if (window != nullptr)
+                openEffectWindowKeys.push_back(effectWindowKey);
+        }
+        for (const auto& [effectWindowKey, window] : clapEffectEditorWindows)
         {
             if (window != nullptr)
                 openEffectWindowKeys.push_back(effectWindowKey);
@@ -12881,14 +17630,14 @@ namespace mw::gui
 
         if (!openEffectWindowKeys.empty())
         {
-            logMessage("Project save uses last applied VST effect states only. Unapplied VST effect editor tweaks were not saved; click Apply Changes in each effect editor to commit them.");
+            logMessage("Project save uses last applied Effect Slot states only. Unapplied Effect Slot editor tweaks were not saved; click Apply Changes in each effect editor to commit them.");
         }
 
         if (capturedCount > 0)
         {
             cleanupPianoRollPreviewFiles();
             refreshTrackManagerText();
-            logMessage(juce::String("Captured ") + juce::String(capturedCount) + " open VST3 editor state"
+            logMessage(juce::String("Captured ") + juce::String(capturedCount) + " open plugin instrument editor state"
                 + (capturedCount == 1 ? "" : "s")
                 + " before saving project.");
         }
@@ -12901,31 +17650,80 @@ namespace mw::gui
         if (trackIndex < 0)
             return false;
 
-        const auto found = vstPluginEditorWindows.find(trackIndex);
-        if (found == vstPluginEditorWindows.end() || found->second == nullptr)
+        bool closed = false;
+
+        if (const auto found = vstPluginEditorWindows.find(trackIndex); found != vstPluginEditorWindows.end() && found->second != nullptr)
+        {
+            // Hide the editor immediately before destroying the holder/window. This
+            // makes Apply Track Settings visibly close stale plugin UI windows even
+            // when the close is triggered from another floating/piano-roll window.
+            found->second->setVisible(false);
+            vstPluginEditorWindows.erase(found);
+            closed = true;
+        }
+
+        if (const auto foundClap = clapInstrumentEditorWindows.find(trackIndex); foundClap != clapInstrumentEditorWindows.end() && foundClap->second != nullptr)
+        {
+            foundClap->second->setVisible(false);
+            clapInstrumentEditorWindows.erase(foundClap);
+            closed = true;
+        }
+
+        if (!closed)
             return false;
 
-        // Hide the editor immediately before destroying the holder/window. This
-        // makes Apply Track Settings visibly close stale plugin UI windows even
-        // when the close is triggered from another floating/piano-roll window.
-        found->second->setVisible(false);
-        vstPluginEditorWindows.erase(found);
         updateOpenVstPluginButtonState();
 
         if (reason.isNotEmpty())
             logMessage(reason);
         else
-            logMessage("Closed open VST plugin window for " + getTrackDisplayName(trackIndex) + ".");
+            logMessage("Closed open plugin instrument window for " + getTrackDisplayName(trackIndex) + ".");
 
         return true;
     }
 
+    int MainComponent::closePluginEditorWindowGroups(bool includeVst, bool includeClap)
+    {
+        int closedCount = 0;
+
+        if (includeVst)
+        {
+            closedCount += static_cast<int>(vstPluginEditorWindows.size() + vstEffectEditorWindows.size());
+            vstPluginEditorWindows.clear();
+            vstEffectEditorWindows.clear();
+        }
+
+        if (includeClap)
+        {
+            closedCount += static_cast<int>(clapInstrumentEditorWindows.size() + clapEffectEditorWindows.size());
+            clapInstrumentEditorWindows.clear();
+            clapEffectEditorWindows.clear();
+        }
+
+        if (includeVst || includeClap)
+            updateOpenVstPluginButtonState();
+
+        return closedCount;
+    }
+
     void MainComponent::closeAllVstPluginWindows()
     {
-        vstPluginEditorWindows.clear();
-        vstEffectEditorWindows.clear();
-        updateOpenVstPluginButtonState();
-        logMessage("Closed all VST plugin/effect windows.");
+        const int closedCount = closePluginEditorWindowGroups(true, false);
+
+        if (closedCount > 0)
+            logMessage("Closed " + juce::String(closedCount) + " VST plugin/effect window" + (closedCount == 1 ? "." : "s."));
+        else
+            logMessage("Close All Plugin Windows: no VST plugin/effect windows are open.");
+    }
+
+    void MainComponent::closeAllPluginWindows()
+    {
+        const int closedCount = closePluginEditorWindowGroups(true, true);
+
+        if (closedCount > 0)
+            logMessage("Closed " + juce::String(closedCount) + " plugin editor window" + (closedCount == 1 ? "." : "s."));
+        else
+            logMessage("Close All Plugin Windows: no plugin editor windows are open.");
     }
 
     void MainComponent::closeAllOpenWindows()
@@ -13123,6 +17921,26 @@ namespace mw::gui
                 }
             }
 
+            if (clapPluginManagerWindow != nullptr)
+            {
+                if (auto* pendingClose = dynamic_cast<WindowPendingCloseHandler*>(clapPluginManagerWindow->getContentComponent()))
+                {
+                    const bool closedImmediately = pendingClose->requestCloseWithPendingPrompt(
+                        [this, continueClose]
+                        {
+                            if (clapPluginManagerWindow != nullptr)
+                            {
+                                clapPluginManagerWindow->setVisible(false);
+                                clapPluginManagerWindow.reset();
+                            }
+                            juce::MessageManager::callAsync([continueClose] { (*continueClose)(); });
+                        });
+
+                    static_cast<void>(closedImmediately);
+                    return;
+                }
+            }
+
             finishClosingAllOpenWindows();
         };
 
@@ -13132,6 +17950,9 @@ namespace mw::gui
     void MainComponent::finishClosingAllOpenWindows()
     {
         int closedCount = 0;
+
+        stopClapInstrumentLiveAudition(true);
+        disarmClapLiveEngineSession(false);
 
         auto closeOwnedWindow = [&closedCount](std::unique_ptr<juce::DocumentWindow>& window)
         {
@@ -13160,6 +17981,14 @@ namespace mw::gui
         {
             closedCount += static_cast<int>(vstPluginEditorWindows.size() + vstEffectEditorWindows.size());
             closeAllVstPluginWindows();
+        }
+
+        if (!clapInstrumentEditorWindows.empty() || !clapEffectEditorWindows.empty())
+        {
+            closedCount += static_cast<int>(clapInstrumentEditorWindows.size() + clapEffectEditorWindows.size());
+            clapInstrumentEditorWindows.clear();
+            clapEffectEditorWindows.clear();
+            updateOpenVstPluginButtonState();
         }
 
         if (trackManagerWindow != nullptr)
@@ -13206,6 +18035,9 @@ namespace mw::gui
         closeOwnedWindow(vstPluginManagerWindow);
         closeOwnedWindow(vstSettingsWindow);
         closeOwnedWindow(vstHostHelperStatusWindow);
+        closeOwnedWindow(clapPluginManagerWindow);
+        closeOwnedWindow(clapSettingsWindow);
+        closeOwnedWindow(clapHostHelperStatusWindow);
 
         updateOpenVstPluginButtonState();
         logMessage(closedCount > 0
@@ -14838,13 +19670,15 @@ namespace mw::gui
             baseNameBox.setText("manual_project");
             captureProjectUserSettings();
 
-            // If the user picked a project-default VST3 backend/plugin before any
+            // If the user picked a project-default plugin backend before any
             // tracks existed, persist that visible selection into the new project
             // before the first manual track or sequence workflow seeds from it.
-            // Otherwise the backend could stay VST3 while the instrument selection
-            // appeared to jump back to the first scanned plugin.
+            // Otherwise the backend could stay plugin-based while the instrument
+            // selection appeared to jump back to the first scanned plugin.
             if (appliedProjectBackendId == 3)
                 captureProjectDefaultVstPluginSelection();
+            else if (appliedProjectBackendId == 4)
+                captureProjectDefaultClapPluginSelection();
         }
 
         if (!canAddAnotherTrack("Add Blank Track"))
@@ -16458,7 +21292,7 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
                     logMessage("Imported AudioClip media already lives in this project's input/audio/imported folder, so the project reused it without creating another copy.");
                 else
                     logMessage("Imported AudioClip media was staged in the current AudioClip session. Save Project will move it into input/audio/imported; Discard will remove the staged copy.");
-                logMessage("Imported AudioClip track selected. Assign a Supported Effect in VST Effect, then use Enable VST Effects to process it during preview/export.");
+                logMessage("Imported AudioClip track selected. Assign a Supported Effect in an Effect Slot, then use Enable to process it during preview/export.");
             }
         );
     }
@@ -16570,8 +21404,8 @@ void MainComponent::openAudioRecorderWindow()
             content->setTrackLiveEffectEnabled(audioRecorderTrackLiveEffectEnabled);
 
         logMessage(enabled
-            ? "AudioClip Recorder Track Live Effect monitor enabled. The applied track VST effect will be printed into the take either way."
-            : "AudioClip Recorder Track Live Effect monitor disabled. Applied track VST effects still print into the recorded take.");
+            ? "AudioClip Recorder Track Live Effect monitor enabled. The applied track Effect Slot will be printed into the take either way."
+            : "AudioClip Recorder Track Live Effect monitor disabled. Applied track Effect Slots still print into the recorded take.");
         refreshAudioRecorderWindowStatus();
     }
 
@@ -16597,15 +21431,16 @@ void MainComponent::openAudioRecorderWindow()
                 if (slot == nullptr
                     || !effects.slotEnabled(slotIndex)
                     || slot->plugin.bypassed
+                    || slot->backendType != mw::core::EffectSlotBackendType::VST3
                     || !slot->plugin.hasPluginIdentity()
                     || slot->plugin.bundlePath.empty())
                     continue;
 
                 options.enabled = true;
-                options.trackName = track.getName() + " - VST Effect " + std::to_string(slotIndex + 1);
+                options.trackName = track.getName() + " - Effect Slot " + std::to_string(slotIndex + 1);
                 if (slot->plugin.stateBase64.empty())
                 {
-                    options.unavailableMessage = "Track VST effect recording requested, but this effect slot has no applied parameter state yet. Open the effect editor and click Apply Changes once before recording; unapplied live editor tweaks are not printed into the take.";
+                    options.unavailableMessage = "Track effect recording requested, but this Effect Slot has no applied parameter state yet. Open the effect editor and click Apply Changes once before recording; unapplied live editor tweaks are not printed into the take.";
                     return true;
                 }
 
@@ -16842,6 +21677,7 @@ void MainComponent::openAudioRecorderWindow()
             if (slot != nullptr
                 && effects.slotEnabled(slotIndex)
                 && !slot->plugin.bypassed
+                && slot->backendType == mw::core::EffectSlotBackendType::VST3
                 && slot->plugin.hasPluginIdentity()
                 && !slot->plugin.bundlePath.empty()
                 && !slot->plugin.stateBase64.empty())
@@ -16898,6 +21734,7 @@ void MainComponent::openAudioRecorderWindow()
                 if (slot != nullptr
                     && effects.slotEnabled(slotIndex)
                     && !slot->plugin.bypassed
+                    && slot->backendType == mw::core::EffectSlotBackendType::VST3
                     && slot->plugin.hasPluginIdentity()
                     && !slot->plugin.stateBase64.empty())
                 {
@@ -16999,7 +21836,7 @@ void MainComponent::openAudioRecorderWindow()
 
         const bool trackLiveEffectUsable = trackHasUsableLiveEffectForAudioRecorder(trackIndex);
         if (trackLiveEffectUsable)
-            logMessage("AudioClip Recorder will print the selected track's last applied VST effect state into the take. Unapplied open effect-editor tweaks are ignored until Apply Changes is clicked.");
+            logMessage("AudioClip Recorder will print the selected track's last applied Effect Slot state into the take. Unapplied open effect-editor tweaks are ignored until Apply Changes is clicked.");
         if (audioRecorderTrackLiveEffectEnabled && trackLiveEffectUsable)
             logMessage("AudioClip Recorder Track Live Effect monitor is enabled for the same applied wet signal.");
 
@@ -17972,6 +22809,10 @@ void MainComponent::openAudioRecorderWindow()
         updateRenderTargetLabel();
         cleanupPianoRollPreviewFiles();
         lastPianoRollPreviewScope = 1;
+
+        if (tryStartSelectedTrackClapMainTransportPreview(index))
+            return;
+
         captureOpenVstPluginStatesForPreview("selected track preview");
 
         auto job = createRenderJobSnapshot();
@@ -18167,6 +23008,9 @@ void MainComponent::openAudioRecorderWindow()
         cleanupPianoRollPreviewFiles();
         lastPianoRollPreviewScope = 3;
         captureOpenVstPluginStatesForPreview("project preview");
+
+        if (tryStartMultiTrackClapProjectPreview())
+            return;
 
         auto job = createRenderJobSnapshot();
         setPianoRollPreviewNoteMapFromTracks(job.project.getTracks());
@@ -18413,6 +23257,8 @@ void MainComponent::refreshSoundFontList()
 
     mw::core::SampleBackendType MainComponent::getProjectDefaultBackendType() const
     {
+        if (appliedProjectBackendId == 4)
+            return mw::core::SampleBackendType::CLAP;
         if (appliedProjectBackendId == 3)
             return mw::core::SampleBackendType::VST3;
         return appliedProjectBackendId == 2 ? mw::core::SampleBackendType::SFZ : mw::core::SampleBackendType::SF2;
@@ -18477,6 +23323,47 @@ void MainComponent::refreshSoundFontList()
         return instrumentPlugins.front();
     }
 
+    std::optional<mw::clap::ClapPluginDescriptor> MainComponent::getProjectDefaultClapPluginDescriptor()
+    {
+        if (detectedClapPlugins.empty())
+            scanClapPlugins(false);
+
+        std::vector<mw::clap::ClapPluginDescriptor> instrumentPlugins;
+        for (const auto& plugin : detectedClapPlugins)
+        {
+            if (isSupportedClapInstrumentPlugin(plugin))
+                instrumentPlugins.push_back(plugin);
+        }
+
+        if (instrumentPlugins.empty())
+            return std::nullopt;
+
+        std::filesystem::path savedPath;
+        std::string savedUid;
+        if (currentProject)
+        {
+            const auto& settings = currentProject->getUserSettings();
+            savedPath = settings.clapPluginPath;
+            savedUid = settings.clapPluginUid;
+        }
+
+        if (!savedUid.empty() || !savedPath.empty())
+        {
+            for (const auto& plugin : instrumentPlugins)
+            {
+                if ((!savedUid.empty() && plugin.uid == savedUid)
+                    || (!savedPath.empty() && pathsReferToSameLocation(plugin.pluginPath, savedPath)))
+                    return plugin;
+            }
+        }
+
+        const int selectedId = instrumentCombo.getSelectedId();
+        if (selectedId > 0 && selectedId <= static_cast<int>(instrumentPlugins.size()))
+            return instrumentPlugins[static_cast<std::size_t>(selectedId - 1)];
+
+        return instrumentPlugins.front();
+    }
+
     void MainComponent::applyVstPluginDescriptorToAssignment(mw::core::InstrumentAssignment& assignment, const mw::vst::VstPluginDescriptor& descriptor) const
     {
         const auto previousStateBase64 = assignment.vst3.stateBase64;
@@ -18509,26 +23396,84 @@ void MainComponent::refreshSoundFontList()
             assignment.vst3.stateBase64 = previousStateBase64;
     }
 
-    void MainComponent::applyVstPluginDescriptorToEffectSlot(mw::core::VstPluginAssignment& slot, const mw::vst::VstPluginDescriptor& descriptor) const
+    void MainComponent::applyClapPluginDescriptorToAssignment(mw::core::InstrumentAssignment& assignment, const mw::clap::ClapPluginDescriptor& descriptor) const
     {
-        const auto previousStateBase64 = slot.stateBase64;
-        const bool samePluginIdentity = (!slot.uid.empty() && !descriptor.uid.empty() && slot.uid == descriptor.uid)
-            || (!slot.bundlePath.empty()
-                && !descriptor.bundlePath.empty()
-                && pathsReferToSameLocation(slot.bundlePath, descriptor.bundlePath));
+        const auto previousStateBase64 = assignment.vst3.stateBase64;
+        const auto previousPluginPath = resolveClapPluginPath(assignment);
+        const bool samePluginIdentity = assignment.backendType == mw::core::SampleBackendType::CLAP
+            && ((!assignment.vst3.uid.empty() && !descriptor.uid.empty() && assignment.vst3.uid == descriptor.uid)
+                || (!previousPluginPath.empty()
+                    && !descriptor.pluginPath.empty()
+                    && pathsReferToSameLocation(previousPluginPath, descriptor.pluginPath)));
 
-        slot = {};
-        slot.bundlePath = descriptor.bundlePath;
-        slot.name = descriptor.displayName();
-        slot.vendor = descriptor.vendor;
-        slot.version = descriptor.version;
-        slot.category = descriptor.category;
-        slot.uid = descriptor.uid;
-        slot.compatibilitySummary = descriptor.compatibility.summary();
+        assignment.backendType = mw::core::SampleBackendType::CLAP;
+        assignment.vst3 = {};
+        assignment.sampleLibraryPath = descriptor.pluginPath;
+        assignment.sampleLibraryDisplayName = descriptor.pluginPath.filename().string();
+        assignment.displayName = descriptor.displayName();
+        assignment.normalizedName = descriptor.displayName();
+        assignment.presetName = descriptor.displayName();
+        assignment.vst3.bundlePath = descriptor.pluginPath;
+        assignment.vst3.name = descriptor.displayName();
+        assignment.vst3.vendor = descriptor.vendor;
+        assignment.vst3.version = descriptor.version;
+        assignment.vst3.category = descriptor.category.empty() ? "CLAP" : descriptor.category;
+        assignment.vst3.uid = descriptor.uid;
+        assignment.vst3.compatibilitySummary = "CLAP Instrument assignment saved. Compatible instruments can preview live and render/export.";
+
+        // Reserved for future CLAP instrument state support. Same-plugin re-selection
+        // preserves any state blob that later builds may attach to the track.
+        if (samePluginIdentity)
+            assignment.vst3.stateBase64 = previousStateBase64;
+    }
+
+    void MainComponent::applyVstPluginDescriptorToEffectSlot(mw::core::VstEffectSlotAssignment& slot, const mw::vst::VstPluginDescriptor& descriptor) const
+    {
+        const auto previousStateBase64 = slot.plugin.stateBase64;
+        const bool samePluginIdentity = slot.backendType == mw::core::EffectSlotBackendType::VST3
+            && (((!slot.plugin.uid.empty() && !descriptor.uid.empty() && slot.plugin.uid == descriptor.uid)
+                || (!slot.plugin.bundlePath.empty()
+                    && !descriptor.bundlePath.empty()
+                    && pathsReferToSameLocation(slot.plugin.bundlePath, descriptor.bundlePath))));
+
+        slot.backendType = mw::core::EffectSlotBackendType::VST3;
+        slot.plugin = {};
+        slot.plugin.bundlePath = descriptor.bundlePath;
+        slot.plugin.name = descriptor.displayName();
+        slot.plugin.vendor = descriptor.vendor;
+        slot.plugin.version = descriptor.version;
+        slot.plugin.category = descriptor.category;
+        slot.plugin.uid = descriptor.uid;
+        slot.plugin.compatibilitySummary = descriptor.compatibility.summary();
 
         // Same-plugin effect re-selection preserves the track-owned editor state blob.
         if (samePluginIdentity)
-            slot.stateBase64 = previousStateBase64;
+            slot.plugin.stateBase64 = previousStateBase64;
+    }
+
+    void MainComponent::applyClapPluginDescriptorToEffectSlot(mw::core::VstEffectSlotAssignment& slot, const mw::clap::ClapPluginDescriptor& descriptor) const
+    {
+        const auto previousStateBase64 = slot.plugin.stateBase64;
+        const bool samePluginIdentity = slot.backendType == mw::core::EffectSlotBackendType::CLAP
+            && (((!slot.plugin.uid.empty() && !descriptor.uid.empty() && slot.plugin.uid == descriptor.uid)
+                || (!slot.plugin.bundlePath.empty()
+                    && !descriptor.pluginPath.empty()
+                    && pathsReferToSameLocation(slot.plugin.bundlePath, descriptor.pluginPath))));
+
+        slot.backendType = mw::core::EffectSlotBackendType::CLAP;
+        slot.plugin = {};
+        slot.plugin.bundlePath = descriptor.pluginPath;
+        slot.plugin.name = descriptor.displayName();
+        slot.plugin.vendor = descriptor.vendor;
+        slot.plugin.version = descriptor.version;
+        slot.plugin.category = descriptor.category.empty() ? "CLAP" : descriptor.category;
+        slot.plugin.uid = descriptor.uid;
+        slot.plugin.compatibilitySummary = "CLAP Effect assignment saved. Compatible effects are available for preview/render, live preview where safe, and compatible editor windows when the plugin exposes a supported GUI/state extension.";
+
+        // Reserved for future CLAP state support. Same-plugin re-selection preserves
+        // any state blob that later builds may attach to the slot.
+        if (samePluginIdentity)
+            slot.plugin.stateBase64 = previousStateBase64;
     }
 
     void MainComponent::setVstEffectStatusText(int trackIndex, const juce::String& baseStatus)
@@ -18565,6 +23510,8 @@ void MainComponent::refreshSoundFontList()
 
     void MainComponent::populateVstEffectCombo()
     {
+        constexpr int clapEffectComboBaseId = 10000;
+
         auto resetSlotControls = [](juce::ComboBox& combo, juce::ToggleButton& enable, juce::ToggleButton& bypass, const juce::String& label)
         {
             combo.clear(juce::dontSendNotification);
@@ -18577,45 +23524,65 @@ void MainComponent::refreshSoundFontList()
             bypass.setEnabled(false);
         };
 
-        auto populateSlotCombo = [this](int trackIndex,
-                                        std::size_t slotIndex,
-                                        const std::vector<mw::vst::VstPluginDescriptor>& effectPlugins,
-                                        juce::ComboBox& combo,
-                                        juce::ToggleButton& enable,
-                                        juce::ToggleButton& bypass)
+        auto populateSlotCombo = [this, clapEffectComboBaseId](int trackIndex,
+                                                              std::size_t slotIndex,
+                                                              const std::vector<mw::vst::VstPluginDescriptor>& vstEffectPlugins,
+                                                              const std::vector<mw::clap::ClapPluginDescriptor>& clapEffectPlugins,
+                                                              juce::ComboBox& combo,
+                                                              juce::ToggleButton& enable,
+                                                              juce::ToggleButton& bypass)
         {
             combo.clear(juce::dontSendNotification);
 
             const auto& effects = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getVstEffects();
             const auto* slot = effects.slot(slotIndex);
+            const auto selectedBackend = slot != nullptr ? slot->backendType : mw::core::EffectSlotBackendType::None;
             const auto selectedBundlePath = slot != nullptr ? slot->plugin.bundlePath : std::filesystem::path{};
             const auto selectedUid = slot != nullptr ? slot->plugin.uid : std::string{};
 
             int itemId = 1;
             int selectedId = 0;
-            for (const auto& plugin : effectPlugins)
+            for (const auto& plugin : vstEffectPlugins)
             {
-                juce::String label = plugin.displayName();
+                juce::String label = "[VST3] ";
+                label << juce::String(plugin.displayName());
                 if (!plugin.vendor.empty())
                     label << " - " << plugin.vendor;
                 if (plugin.status == mw::vst::VstPluginScanStatus::Warning || plugin.compatibility.hasAnyGpuOrUiRisk())
                     label << "  ⚠";
 
                 combo.addItem(label, itemId);
-                if ((!selectedUid.empty() && selectedUid == plugin.uid)
-                    || (!selectedBundlePath.empty() && pathsReferToSameLocation(selectedBundlePath, plugin.bundlePath)))
+                if (selectedBackend == mw::core::EffectSlotBackendType::VST3
+                    && ((!selectedUid.empty() && selectedUid == plugin.uid)
+                        || (!selectedBundlePath.empty() && pathsReferToSameLocation(selectedBundlePath, plugin.bundlePath))))
                     selectedId = itemId;
                 ++itemId;
             }
 
+            int clapItemId = clapEffectComboBaseId + 1;
+            for (const auto& plugin : clapEffectPlugins)
+            {
+                juce::String label = "[CLAP Effect] ";
+                label << juce::String(plugin.displayName());
+                if (!plugin.vendor.empty())
+                    label << " - " << juce::String(plugin.vendor);
+
+                combo.addItem(label, clapItemId);
+                if (selectedBackend == mw::core::EffectSlotBackendType::CLAP
+                    && ((!selectedUid.empty() && selectedUid == plugin.uid)
+                        || (!selectedBundlePath.empty() && pathsReferToSameLocation(selectedBundlePath, plugin.pluginPath))))
+                    selectedId = clapItemId;
+                ++clapItemId;
+            }
+
             if (combo.getNumItems() == 0)
             {
-                combo.addItem("No Supported Effects - use VST3 Plugin Manager", 1);
+                combo.addItem("No Supported Effects - use VST3 or CLAP Plugin Manager", 1);
                 selectedId = 1;
             }
 
             combo.setSelectedId(selectedId, juce::dontSendNotification);
-            combo.setEnabled(!effectPlugins.empty());
+            combo.setEnabled(!vstEffectPlugins.empty() || !clapEffectPlugins.empty());
             enable.setEnabled(true);
             enable.setToggleState(effects.slotEnabled(slotIndex), juce::dontSendNotification);
 
@@ -18628,7 +23595,7 @@ void MainComponent::refreshSoundFontList()
         {
             resetSlotControls(vstEffectCombo, enableVstEffectsToggle, bypassVstEffectToggle, "No project loaded");
             resetSlotControls(vstEffect2Combo, enableVstEffect2Toggle, bypassVstEffect2Toggle, "No project loaded");
-            vstEffectStatusLabel.setText("VST effect status is shown in the log.", juce::dontSendNotification);
+            vstEffectStatusLabel.setText("Effect slot status is shown in the log.", juce::dontSendNotification);
             updateOpenVstPluginButtonState();
             return;
         }
@@ -18638,20 +23605,29 @@ void MainComponent::refreshSoundFontList()
         {
             resetSlotControls(vstEffectCombo, enableVstEffectsToggle, bypassVstEffectToggle, "No track selected");
             resetSlotControls(vstEffect2Combo, enableVstEffect2Toggle, bypassVstEffect2Toggle, "No track selected");
-            vstEffectStatusLabel.setText("VST effect status is shown in the log.", juce::dontSendNotification);
+            vstEffectStatusLabel.setText("Effect slot status is shown in the log.", juce::dontSendNotification);
             updateOpenVstPluginButtonState();
             return;
         }
 
-        // The VST Effect dropdowns are assignment controls, not only enable
+        // The Effect Slot dropdowns are assignment controls, not only enable
         // controls. Keep both populated so MIDI, recorded, and imported
         // AudioClip tracks can pick/open effects before processing is enabled.
         if (detectedVstPlugins.empty())
             scanVstPlugins(false);
+        if (detectedClapPlugins.empty())
+            scanClapPlugins(false);
 
-        const auto effectPlugins = supportedVstEffectPlugins(detectedVstPlugins);
-        populateSlotCombo(index, 0, effectPlugins, vstEffectCombo, enableVstEffectsToggle, bypassVstEffectToggle);
-        populateSlotCombo(index, 1, effectPlugins, vstEffect2Combo, enableVstEffect2Toggle, bypassVstEffect2Toggle);
+        const auto vstEffectPlugins = supportedVstEffectPlugins(detectedVstPlugins);
+        std::vector<mw::clap::ClapPluginDescriptor> clapEffectPlugins;
+        for (const auto& plugin : detectedClapPlugins)
+        {
+            if (isSupportedClapEffectPlugin(plugin))
+                clapEffectPlugins.push_back(plugin);
+        }
+
+        populateSlotCombo(index, 0, vstEffectPlugins, clapEffectPlugins, vstEffectCombo, enableVstEffectsToggle, bypassVstEffectToggle);
+        populateSlotCombo(index, 1, vstEffectPlugins, clapEffectPlugins, vstEffect2Combo, enableVstEffect2Toggle, bypassVstEffect2Toggle);
 
         updateOpenVstPluginButtonState();
     }
@@ -18691,6 +23667,8 @@ void MainComponent::refreshSoundFontList()
 
     void MainComponent::applySelectedTrackVstEffectSlots()
     {
+        constexpr int clapEffectComboBaseId = 10000;
+
         if (!currentProject)
             return;
 
@@ -18704,22 +23682,40 @@ void MainComponent::refreshSoundFontList()
 
         if (detectedVstPlugins.empty())
             scanVstPlugins(false);
+        if (detectedClapPlugins.empty())
+            scanClapPlugins(false);
 
-        const auto effectPlugins = supportedVstEffectPlugins(detectedVstPlugins);
+        const auto vstEffectPlugins = supportedVstEffectPlugins(detectedVstPlugins);
+        std::vector<mw::clap::ClapPluginDescriptor> clapEffectPlugins;
+        for (const auto& plugin : detectedClapPlugins)
+        {
+            if (isSupportedClapEffectPlugin(plugin))
+                clapEffectPlugins.push_back(plugin);
+        }
 
-        auto applySlotFromControls = [this, &effects, &effectPlugins](std::size_t slotIndex,
-                                                                      juce::ComboBox& combo,
-                                                                      juce::ToggleButton& enable,
-                                                                      juce::ToggleButton& bypass)
+        auto applySlotFromControls = [this, &effects, &vstEffectPlugins, &clapEffectPlugins, clapEffectComboBaseId](std::size_t slotIndex,
+                                                                                                                  juce::ComboBox& combo,
+                                                                                                                  juce::ToggleButton& enable,
+                                                                                                                  juce::ToggleButton& bypass)
         {
             auto& slot = effects.ensureSlot(slotIndex);
             slot.enabled = enable.getToggleState();
 
-            const int selectedIndex = combo.getSelectedId() - 1;
-            if (selectedIndex >= 0 && selectedIndex < static_cast<int>(effectPlugins.size()))
-                applyVstPluginDescriptorToEffectSlot(slot.plugin, effectPlugins[static_cast<std::size_t>(selectedIndex)]);
+            const int selectedId = combo.getSelectedId();
+            const int vstSelectedIndex = selectedId - 1;
+            const int clapSelectedIndex = selectedId - clapEffectComboBaseId - 1;
+            if (vstSelectedIndex >= 0 && vstSelectedIndex < static_cast<int>(vstEffectPlugins.size()))
+            {
+                applyVstPluginDescriptorToEffectSlot(slot, vstEffectPlugins[static_cast<std::size_t>(vstSelectedIndex)]);
+            }
+            else if (clapSelectedIndex >= 0 && clapSelectedIndex < static_cast<int>(clapEffectPlugins.size()))
+            {
+                applyClapPluginDescriptorToEffectSlot(slot, clapEffectPlugins[static_cast<std::size_t>(clapSelectedIndex)]);
+            }
             else if (slot.enabled && !slot.plugin.hasPluginIdentity())
-                logMessage("VST Effects: slot " + juce::String(static_cast<int>(slotIndex + 1)) + " enabled for selected track, but no Supported Effects plugin is selected.");
+            {
+                logMessage("Effect Slots: slot " + juce::String(static_cast<int>(slotIndex + 1)) + " enabled for selected track, but no Supported Effects plugin is selected.");
+            }
 
             slot.plugin.bypassed = bypass.getToggleState();
         };
@@ -18734,7 +23730,11 @@ void MainComponent::refreshSoundFontList()
             const auto* afterSlot = effects.slot(slotIndex);
             const auto beforePlugin = beforeSlot != nullptr ? beforeSlot->plugin : mw::core::VstPluginAssignment{};
             const auto afterPlugin = afterSlot != nullptr ? afterSlot->plugin : mw::core::VstPluginAssignment{};
-            return beforePlugin.bundlePath != afterPlugin.bundlePath
+            const auto beforeBackend = beforeSlot != nullptr ? beforeSlot->backendType : mw::core::EffectSlotBackendType::None;
+            const auto afterBackend = afterSlot != nullptr ? afterSlot->backendType : mw::core::EffectSlotBackendType::None;
+            const bool eitherPluginAssigned = beforePlugin.hasPluginIdentity() || afterPlugin.hasPluginIdentity();
+            return (eitherPluginAssigned && beforeBackend != afterBackend)
+                || beforePlugin.bundlePath != afterPlugin.bundlePath
                 || beforePlugin.uid != afterPlugin.uid
                 || beforePlugin.name != afterPlugin.name;
         };
@@ -18745,9 +23745,13 @@ void MainComponent::refreshSoundFontList()
             const auto* afterSlot = effects.slot(slotIndex);
             const auto beforePlugin = beforeSlot != nullptr ? beforeSlot->plugin : mw::core::VstPluginAssignment{};
             const auto afterPlugin = afterSlot != nullptr ? afterSlot->plugin : mw::core::VstPluginAssignment{};
+            const auto beforeBackend = beforeSlot != nullptr ? beforeSlot->backendType : mw::core::EffectSlotBackendType::None;
+            const auto afterBackend = afterSlot != nullptr ? afterSlot->backendType : mw::core::EffectSlotBackendType::None;
             const bool beforeEnabled = beforeSlot != nullptr && beforeEffects.slotEnabled(slotIndex);
             const bool afterEnabled = afterSlot != nullptr && effects.slotEnabled(slotIndex);
+            const bool eitherPluginAssigned = beforePlugin.hasPluginIdentity() || afterPlugin.hasPluginIdentity();
             return beforeEnabled != afterEnabled
+                || (eitherPluginAssigned && beforeBackend != afterBackend)
                 || beforePlugin.bundlePath != afterPlugin.bundlePath
                 || beforePlugin.uid != afterPlugin.uid
                 || beforePlugin.name != afterPlugin.name
@@ -18766,11 +23770,19 @@ void MainComponent::refreshSoundFontList()
                     continue;
 
                 const int key = index * 10 + static_cast<int>(slotIndex);
+                bool closedStaleEditor = false;
                 if (auto found = vstEffectEditorWindows.find(key); found != vstEffectEditorWindows.end())
                 {
                     vstEffectEditorWindows.erase(found);
-                    logMessage("Closed stale VST effect editor for " + getTrackDisplayName(index) + " slot " + juce::String(static_cast<int>(slotIndex + 1)) + " after changing that slot's plugin.");
+                    closedStaleEditor = true;
                 }
+                if (auto foundClap = clapEffectEditorWindows.find(key); foundClap != clapEffectEditorWindows.end())
+                {
+                    clapEffectEditorWindows.erase(foundClap);
+                    closedStaleEditor = true;
+                }
+                if (closedStaleEditor)
+                    logMessage("Closed stale Effect Slot editor for " + getTrackDisplayName(index) + " slot " + juce::String(static_cast<int>(slotIndex + 1)) + " after changing that slot's plugin.");
             }
         }
         populateVstEffectCombo();
@@ -18784,7 +23796,7 @@ void MainComponent::refreshSoundFontList()
             setProjectDirty();
             const auto& savedEffects = track.getVstEffects();
             juce::String message;
-            message << "Updated VST Effect chain for " << getTrackDisplayName(index) << ": ";
+            message << "Updated Effect Slot chain for " << getTrackDisplayName(index) << ": ";
             for (std::size_t slotIndex = 0; slotIndex < mw::core::maxVstEffectSlots; ++slotIndex)
             {
                 if (slotIndex > 0)
@@ -18796,12 +23808,13 @@ void MainComponent::refreshSoundFontList()
                 {
                     if (slot->plugin.bypassed)
                         message << "/bypassed";
-                    message << " " << (slot->plugin.name.empty() ? slot->plugin.bundlePath.filename().string() : slot->plugin.name);
+                    message << " [" << juce::String(mw::core::effectSlotBackendTypeToString(slot->backendType)) << "] "
+                            << (slot->plugin.name.empty() ? slot->plugin.bundlePath.filename().string() : slot->plugin.name);
                 }
                 else
                     message << " no plugin";
             }
-            message << ". Offline preview/render runs slot 1 then slot 2; live processing is still future work.";
+            message << ". VST3 and CLAP effects are assigned as Effect Slots and process during preview/render when enabled and not bypassed.";
             logMessage(message);
         }
     }
@@ -18851,6 +23864,51 @@ void MainComponent::refreshSoundFontList()
         settings.vst3PluginCompatibilitySummary = descriptor->compatibility.summary();
     }
 
+    void MainComponent::captureProjectDefaultClapPluginSelection()
+    {
+        if (!currentProject)
+            return;
+
+        if (detectedClapPlugins.empty())
+            scanClapPlugins(false);
+
+        std::optional<mw::clap::ClapPluginDescriptor> descriptor;
+        std::vector<mw::clap::ClapPluginDescriptor> instrumentPlugins;
+        for (const auto& plugin : detectedClapPlugins)
+        {
+            if (isSupportedClapInstrumentPlugin(plugin))
+                instrumentPlugins.push_back(plugin);
+        }
+
+        const int selectedId = instrumentCombo.getSelectedId();
+        if (selectedId > 0 && selectedId <= static_cast<int>(instrumentPlugins.size()))
+            descriptor = instrumentPlugins[static_cast<std::size_t>(selectedId - 1)];
+        else
+            descriptor = getProjectDefaultClapPluginDescriptor();
+
+        auto& settings = currentProject->getUserSettings();
+
+        if (!descriptor)
+        {
+            settings.clapPluginPath.clear();
+            settings.clapPluginName.clear();
+            settings.clapPluginVendor.clear();
+            settings.clapPluginVersion.clear();
+            settings.clapPluginCategory.clear();
+            settings.clapPluginUid.clear();
+            settings.clapPluginCompatibilitySummary.clear();
+            return;
+        }
+
+        settings.clapPluginPath = descriptor->pluginPath;
+        settings.clapPluginName = descriptor->displayName();
+        settings.clapPluginVendor = descriptor->vendor;
+        settings.clapPluginVersion = descriptor->version;
+        settings.clapPluginCategory = descriptor->category;
+        settings.clapPluginUid = descriptor->uid;
+        settings.clapPluginCompatibilitySummary = "CLAP project default instrument. Compatible CLAP instruments can preview live and render/export.";
+    }
+
     void MainComponent::seedTrackSoundLibraryFromProjectDefaults(mw::core::Track& track)
     {
         auto assignment = track.getInstrument();
@@ -18869,7 +23927,8 @@ void MainComponent::refreshSoundFontList()
         assignment.backendType = backendType;
         assignment.sampleLibraryPath = libraryPath;
         assignment.sampleLibraryDisplayName = libraryPath.empty() ? std::string() : libraryPath.filename().string();
-        if (backendType != mw::core::SampleBackendType::VST3)
+        if (backendType != mw::core::SampleBackendType::VST3
+            && backendType != mw::core::SampleBackendType::CLAP)
             assignment.vst3 = {};
 
         if (backendType == mw::core::SampleBackendType::VST3)
@@ -18886,6 +23945,23 @@ void MainComponent::refreshSoundFontList()
                 assignment.displayName = "No VST3 plugin selected";
                 assignment.normalizedName = "vst3 missing";
                 assignment.presetName = "No VST3 plugin selected";
+                assignment.vst3 = {};
+            }
+        }
+        else if (backendType == mw::core::SampleBackendType::CLAP)
+        {
+            if (auto descriptor = getProjectDefaultClapPluginDescriptor())
+            {
+                applyClapPluginDescriptorToAssignment(assignment, *descriptor);
+            }
+            else
+            {
+                assignment.backendType = mw::core::SampleBackendType::CLAP;
+                assignment.sampleLibraryPath.clear();
+                assignment.sampleLibraryDisplayName.clear();
+                assignment.displayName = "No CLAP plugin selected";
+                assignment.normalizedName = "clap missing";
+                assignment.presetName = "No CLAP plugin selected";
                 assignment.vst3 = {};
             }
         }
@@ -18923,7 +23999,10 @@ void MainComponent::refreshSoundFontList()
             const auto& assignment = track.getInstrument();
             if (assignment.backendType == mw::core::SampleBackendType::None
                 || (assignment.backendType == mw::core::SampleBackendType::VST3 && !hasResolvableVst3BundlePath(assignment))
-                || (assignment.backendType != mw::core::SampleBackendType::VST3 && assignment.sampleLibraryPath.empty()))
+                || (assignment.backendType == mw::core::SampleBackendType::CLAP && !hasResolvableClapPluginPath(assignment))
+                || (assignment.backendType != mw::core::SampleBackendType::VST3
+                    && assignment.backendType != mw::core::SampleBackendType::CLAP
+                    && assignment.sampleLibraryPath.empty()))
                 seedTrackSoundLibraryFromProjectDefaults(track);
         }
     }
@@ -18955,20 +24034,27 @@ void MainComponent::refreshSoundFontList()
         }
 
         auto assignment = track.getInstrument();
-        if (repairVst3BundlePathIfPossible(assignment))
+        bool repairedPluginPath = repairVst3BundlePathIfPossible(assignment);
+        repairedPluginPath = repairClapPluginPathIfPossible(assignment) || repairedPluginPath;
+        if (repairedPluginPath)
             track.setInstrumentAssignment(assignment);
 
         if (track.getInstrument().backendType == mw::core::SampleBackendType::None
             || (track.getInstrument().backendType == mw::core::SampleBackendType::VST3 && !hasResolvableVst3BundlePath(track.getInstrument()))
-            || (track.getInstrument().backendType != mw::core::SampleBackendType::VST3 && track.getInstrument().sampleLibraryPath.empty()))
+            || (track.getInstrument().backendType == mw::core::SampleBackendType::CLAP && !hasResolvableClapPluginPath(track.getInstrument()))
+            || (track.getInstrument().backendType != mw::core::SampleBackendType::VST3
+                && track.getInstrument().backendType != mw::core::SampleBackendType::CLAP
+                && track.getInstrument().sampleLibraryPath.empty()))
             seedTrackSoundLibraryFromProjectDefaults(track);
 
         const auto& appliedAssignment = track.getInstrument();
         auto label = getTrackLibrarySummaryLabel(appliedAssignment).trim();
         if (label.isEmpty())
-            label = appliedAssignment.backendType == mw::core::SampleBackendType::VST3
-                ? juce::String("VST3")
-                : juce::String("No library selected");
+            label = appliedAssignment.backendType == mw::core::SampleBackendType::CLAP
+                ? juce::String("CLAP")
+                : (appliedAssignment.backendType == mw::core::SampleBackendType::VST3
+                    ? juce::String("VST3")
+                    : juce::String("No library selected"));
 
         trackSoundLibraryBox.setText(label, juce::dontSendNotification);
         updateOpenVstPluginButtonState();
@@ -18979,12 +24065,20 @@ void MainComponent::refreshSoundFontList()
         appliedProjectBackendId = backendCombo.getSelectedId() > 0 ? backendCombo.getSelectedId() : 1;
 
         std::optional<mw::vst::VstPluginDescriptor> selectedProjectDefaultVstPlugin;
+        std::optional<mw::clap::ClapPluginDescriptor> selectedProjectDefaultClapPlugin;
         if (appliedProjectBackendId == 3)
         {
             if (detectedVstPlugins.empty())
                 scanVstPlugins(false);
 
             selectedProjectDefaultVstPlugin = getProjectDefaultVstPluginDescriptor();
+        }
+        else if (appliedProjectBackendId == 4)
+        {
+            if (detectedClapPlugins.empty())
+                scanClapPlugins(false);
+
+            selectedProjectDefaultClapPlugin = getProjectDefaultClapPluginDescriptor();
         }
 
         if (currentProject)
@@ -19000,12 +24094,21 @@ void MainComponent::refreshSoundFontList()
                 else
                     logMessage("Applied VST3 project backend default: " + settings.vst3PluginName);
             }
+            else if (appliedProjectBackendId == 4)
+            {
+                captureProjectDefaultClapPluginSelection();
+                const auto& settings = currentProject->getUserSettings();
+                if (settings.clapPluginPath.empty())
+                    logMessage("Applied CLAP as project backend, but no default CLAP instrument is selected. Use CLAP Plugins > Scan CLAP Plugins, then choose a plugin in the instrument dropdown and apply again.");
+                else
+                    logMessage("Applied CLAP project backend default: " + settings.clapPluginName);
+            }
 
             setProjectDirty();
         }
 
-        juce::ignoreUnused(selectedProjectDefaultVstPlugin);
-        if (appliedProjectBackendId == 3)
+        juce::ignoreUnused(selectedProjectDefaultVstPlugin, selectedProjectDefaultClapPlugin);
+        if (appliedProjectBackendId == 3 || appliedProjectBackendId == 4)
             showVstExperimentalWarningIfNeeded();
 
         populateInstrumentCombo();
@@ -19044,7 +24147,8 @@ void MainComponent::refreshSoundFontList()
         assignment.backendType = backendType;
         assignment.sampleLibraryPath = libraryPath;
         assignment.sampleLibraryDisplayName = libraryPath.empty() ? std::string() : libraryPath.filename().string();
-        if (backendType != mw::core::SampleBackendType::VST3)
+        if (backendType != mw::core::SampleBackendType::VST3
+            && backendType != mw::core::SampleBackendType::CLAP)
             assignment.vst3 = {};
 
         if (backendType == mw::core::SampleBackendType::SFZ)
@@ -19074,12 +24178,14 @@ void MainComponent::refreshSoundFontList()
         track.setInstrumentAssignment(assignment);
         if (!instrumentAssignmentsEqual(instrumentBeforeApply, assignment)
             && (instrumentBeforeApply.backendType == mw::core::SampleBackendType::VST3
-                || assignment.backendType == mw::core::SampleBackendType::VST3))
+                || instrumentBeforeApply.backendType == mw::core::SampleBackendType::CLAP
+                || assignment.backendType == mw::core::SampleBackendType::VST3
+                || assignment.backendType == mw::core::SampleBackendType::CLAP))
         {
             closeVstPluginWindowForTrack(index,
                 "Closed open VST plugin window after changing the selected track library.");
         }
-        trackBackendCombo.setSelectedId(backendType == mw::core::SampleBackendType::SFZ ? 3 : 2, juce::dontSendNotification);
+        trackBackendCombo.setSelectedId(backendType == mw::core::SampleBackendType::CLAP ? 5 : (backendType == mw::core::SampleBackendType::VST3 ? 4 : (backendType == mw::core::SampleBackendType::SFZ ? 3 : 2)), juce::dontSendNotification);
         populateInstrumentCombo();
         populateVstEffectCombo();
         syncTrackInspectorFromSelection();
@@ -19180,6 +24286,93 @@ void MainComponent::refreshSoundFontList()
         );
     }
 
+    void MainComponent::showScannedClapInstrumentChooserDialog(const juce::String& title,
+                                                              const juce::String& message,
+                                                              std::function<void(const mw::clap::ClapPluginDescriptor&)> onChoose)
+    {
+        if (detectedClapPlugins.empty())
+            scanClapPlugins(false);
+
+        std::vector<mw::clap::ClapPluginDescriptor> candidates;
+        juce::StringArray pluginNames;
+
+        for (const auto& plugin : detectedClapPlugins)
+        {
+            if (!isSupportedClapInstrumentPlugin(plugin))
+                continue;
+
+            candidates.push_back(plugin);
+
+            juce::String label = juce::String(plugin.displayName()).trim();
+            if (label.isEmpty())
+                label = juce::String(plugin.pluginPath.filename().string());
+
+            const auto vendor = juce::String(plugin.vendor).trim();
+            if (vendor.isNotEmpty() && !label.containsIgnoreCase(vendor))
+                label << " - " << vendor;
+
+            const auto bundleName = juce::String(plugin.pluginPath.filename().string()).trim();
+            if (bundleName.isNotEmpty() && !label.containsIgnoreCase(bundleName))
+                label << " [" << bundleName << "]";
+
+            pluginNames.add(label);
+        }
+
+        if (candidates.empty())
+        {
+            logMessage("No CLAP instrument candidates found. Use CLAP Plugins > Scan CLAP Plugins, then mark instruments as Supported Instruments in the CLAP Plugin Manager.");
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::WarningIcon,
+                title,
+                "No supported scanned CLAP instrument plugins were found.\n\nUse CLAP Plugins > Scan CLAP Plugins, then mark instruments as Supported Instruments in the CLAP Plugin Manager.");
+            return;
+        }
+
+        auto* alert = new juce::AlertWindow(
+            title,
+            message,
+            juce::AlertWindow::QuestionIcon
+        );
+
+        alert->addComboBox("clapInstrument", pluginNames, "Scanned CLAP Instrument:");
+        alert->addButton("Choose Plugin", 1, juce::KeyPress(juce::KeyPress::returnKey));
+        alert->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+
+        if (auto* combo = alert->getComboBoxComponent("clapInstrument"))
+        {
+            combo->setSelectedId(1, juce::dontSendNotification);
+            combo->setTooltip("Choose one of the supported CLAP instrument plugins found by the scanner.");
+        }
+
+        alert->setSize(700, 280);
+        alert->enterModalState(
+            true,
+            juce::ModalCallbackFunction::create(
+                [this, alert, candidates, onChoose = std::move(onChoose)](int result) mutable
+                {
+                    std::unique_ptr<juce::AlertWindow> cleanup(alert);
+
+                    if (result != 1)
+                        return;
+
+                    const auto* combo = alert->getComboBoxComponent("clapInstrument");
+                    const int selectedId = combo != nullptr ? combo->getSelectedId() : 1;
+                    const int selectedIndex = selectedId - 1;
+
+                    if (selectedIndex < 0 || selectedIndex >= static_cast<int>(candidates.size()))
+                    {
+                        logMessage("CLAP plugin selection cancelled: no plugin was selected.");
+                        return;
+                    }
+
+                    if (onChoose)
+                        onChoose(candidates[static_cast<std::size_t>(selectedIndex)]);
+                }
+            ),
+            false
+        );
+    }
+
     void MainComponent::chooseTrackSoundLibrary()
     {
         if (!currentProject)
@@ -19202,6 +24395,7 @@ void MainComponent::refreshSoundFontList()
         menu.addItem(3, "Choose SF2/SF3 file...");
         menu.addItem(4, "Choose SFZ file...");
         menu.addItem(5, "Choose scanned VST3 plugin...");
+        menu.addItem(6, "Choose scanned CLAP instrument...");
         menu.showMenuAsync(
             juce::PopupMenu::Options().withTargetComponent(&changeTrackLibraryButton),
             [this](int result)
@@ -19238,6 +24432,16 @@ void MainComponent::refreshSoundFontList()
                         [this](const mw::vst::VstPluginDescriptor& plugin)
                         {
                             assignSelectedTrackVstPlugin(plugin);
+                        });
+                }
+                else if (result == 6)
+                {
+                    showScannedClapInstrumentChooserDialog(
+                        "Choose Scanned CLAP Instrument",
+                        "Choose one of the supported CLAP instrument plugins found by the scanner for the selected track.",
+                        [this](const mw::clap::ClapPluginDescriptor& plugin)
+                        {
+                            assignSelectedTrackClapPlugin(plugin);
                         });
                 }
             }
@@ -19277,13 +24481,21 @@ void MainComponent::refreshSoundFontList()
         }
 
         auto appliedAssignment = track.getInstrument();
-        if (!state.hasPendingInstrumentAssignment && repairVst3BundlePathIfPossible(appliedAssignment))
-            track.setInstrumentAssignment(appliedAssignment);
+        if (!state.hasPendingInstrumentAssignment)
+        {
+            bool repairedPluginPath = repairVst3BundlePathIfPossible(appliedAssignment);
+            repairedPluginPath = repairClapPluginPathIfPossible(appliedAssignment) || repairedPluginPath;
+            if (repairedPluginPath)
+                track.setInstrumentAssignment(appliedAssignment);
+        }
 
         if (!state.hasPendingInstrumentAssignment
             && (track.getInstrument().backendType == mw::core::SampleBackendType::None
                 || (track.getInstrument().backendType == mw::core::SampleBackendType::VST3 && !hasResolvableVst3BundlePath(track.getInstrument()))
-                || (track.getInstrument().backendType != mw::core::SampleBackendType::VST3 && track.getInstrument().sampleLibraryPath.empty())))
+                || (track.getInstrument().backendType == mw::core::SampleBackendType::CLAP && !hasResolvableClapPluginPath(track.getInstrument()))
+                || (track.getInstrument().backendType != mw::core::SampleBackendType::VST3
+                    && track.getInstrument().backendType != mw::core::SampleBackendType::CLAP
+                    && track.getInstrument().sampleLibraryPath.empty())))
             seedTrackSoundLibraryFromProjectDefaults(track);
 
         const auto& assignment = state.hasPendingInstrumentAssignment
@@ -19296,7 +24508,7 @@ void MainComponent::refreshSoundFontList()
         label << getTrackLibrarySummaryLabel(assignment);
         label = label.trim();
         if (label.isEmpty())
-            label = assignment.backendType == mw::core::SampleBackendType::VST3 ? juce::String("VST3") : juce::String("No library selected");
+            label = assignment.backendType == mw::core::SampleBackendType::CLAP ? juce::String("CLAP") : (assignment.backendType == mw::core::SampleBackendType::VST3 ? juce::String("VST3") : juce::String("No library selected"));
         state.trackSoundLibraryBox.setText(label, juce::dontSendNotification);
 
         if (auto* content = dynamic_cast<PianoRollWindowContent*>(state.content.get()))
@@ -19380,6 +24592,7 @@ void MainComponent::refreshSoundFontList()
         state.trackBackendCombo.addItem("SF2", 2);
         state.trackBackendCombo.addItem("SFZ", 3);
         state.trackBackendCombo.addItem("VST3 Plugin", 4);
+        state.trackBackendCombo.addItem("CLAP Instrument", 5);
         state.trackBackendCombo.setTextWhenNothingSelected("Choose backend");
         state.instrumentCombo.setTextWhenNothingSelected("Choose instrument");
 
@@ -19405,22 +24618,60 @@ void MainComponent::refreshSoundFontList()
 
         if (!state.hasPendingInstrumentAssignment
             && (track.getInstrument().backendType == mw::core::SampleBackendType::None
-                || (track.getInstrument().backendType != mw::core::SampleBackendType::VST3 && track.getInstrument().sampleLibraryPath.empty())))
+                || (track.getInstrument().backendType == mw::core::SampleBackendType::VST3 && !hasResolvableVst3BundlePath(track.getInstrument()))
+                || (track.getInstrument().backendType == mw::core::SampleBackendType::CLAP && !hasResolvableClapPluginPath(track.getInstrument()))
+                || (track.getInstrument().backendType != mw::core::SampleBackendType::VST3
+                    && track.getInstrument().backendType != mw::core::SampleBackendType::CLAP
+                    && track.getInstrument().sampleLibraryPath.empty())))
             seedTrackSoundLibraryFromProjectDefaults(track);
 
         const auto& assignment = state.hasPendingInstrumentAssignment
             ? state.pendingInstrumentAssignment
             : track.getInstrument();
 
-        const auto backendType = assignment.backendType == mw::core::SampleBackendType::VST3
-            ? mw::core::SampleBackendType::VST3
-            : (assignment.backendType == mw::core::SampleBackendType::SFZ
-                ? mw::core::SampleBackendType::SFZ
-                : mw::core::SampleBackendType::SF2);
+        const auto backendType = assignment.backendType == mw::core::SampleBackendType::CLAP
+            ? mw::core::SampleBackendType::CLAP
+            : (assignment.backendType == mw::core::SampleBackendType::VST3
+                ? mw::core::SampleBackendType::VST3
+                : (assignment.backendType == mw::core::SampleBackendType::SFZ
+                    ? mw::core::SampleBackendType::SFZ
+                    : mw::core::SampleBackendType::SF2));
 
         state.trackBackendCombo.setSelectedId(
-            backendType == mw::core::SampleBackendType::VST3 ? 4 : (backendType == mw::core::SampleBackendType::SFZ ? 3 : 2),
+            backendType == mw::core::SampleBackendType::CLAP ? 5 : (backendType == mw::core::SampleBackendType::VST3 ? 4 : (backendType == mw::core::SampleBackendType::SFZ ? 3 : 2)),
             juce::dontSendNotification);
+
+        if (backendType == mw::core::SampleBackendType::CLAP)
+        {
+            if (detectedClapPlugins.empty())
+                scanClapPlugins(false);
+
+            int selectedId = 1;
+            int itemId = 1;
+            const auto selectedPluginPath = resolveClapPluginPath(assignment);
+            for (const auto& plugin : detectedClapPlugins)
+            {
+                if (!isSupportedClapInstrumentPlugin(plugin))
+                    continue;
+
+                juce::String label = plugin.displayName();
+                if (!plugin.vendor.empty())
+                    label << " - " << juce::String(plugin.vendor);
+
+                state.instrumentCombo.addItem(label, itemId);
+                if (!selectedPluginPath.empty() && pathsReferToSameLocation(plugin.pluginPath, selectedPluginPath))
+                    selectedId = itemId;
+                ++itemId;
+            }
+
+            if (state.instrumentCombo.getNumItems() == 0)
+                state.instrumentCombo.addItem("No CLAP instruments found", 1);
+
+            state.instrumentCombo.setSelectedId(selectedId, juce::dontSendNotification);
+            refreshPianoRollTrackSoundLibraryDisplay(state);
+            state.suppressInstrumentChange = false;
+            return;
+        }
 
         if (backendType == mw::core::SampleBackendType::VST3)
         {
@@ -19553,7 +24804,8 @@ void MainComponent::refreshSoundFontList()
         assignment.backendType = backendType;
         assignment.sampleLibraryPath = libraryPath;
         assignment.sampleLibraryDisplayName = libraryPath.empty() ? std::string() : libraryPath.filename().string();
-        if (backendType != mw::core::SampleBackendType::VST3)
+        if (backendType != mw::core::SampleBackendType::VST3
+            && backendType != mw::core::SampleBackendType::CLAP)
             assignment.vst3 = {};
 
         if (backendType == mw::core::SampleBackendType::SFZ)
@@ -19624,17 +24876,23 @@ void MainComponent::refreshSoundFontList()
 
         if (!state.hasPendingInstrumentAssignment
             && (track.getInstrument().backendType == mw::core::SampleBackendType::None
-                || (track.getInstrument().backendType != mw::core::SampleBackendType::VST3 && track.getInstrument().sampleLibraryPath.empty())))
+                || (track.getInstrument().backendType == mw::core::SampleBackendType::VST3 && !hasResolvableVst3BundlePath(track.getInstrument()))
+                || (track.getInstrument().backendType == mw::core::SampleBackendType::CLAP && !hasResolvableClapPluginPath(track.getInstrument()))
+                || (track.getInstrument().backendType != mw::core::SampleBackendType::VST3
+                    && track.getInstrument().backendType != mw::core::SampleBackendType::CLAP
+                    && track.getInstrument().sampleLibraryPath.empty())))
             seedTrackSoundLibraryFromProjectDefaults(track);
 
         auto assignment = state.hasPendingInstrumentAssignment ? state.pendingInstrumentAssignment : track.getInstrument();
 
         const auto backendId = state.trackBackendCombo.getSelectedId();
-        const auto backendType = backendId == 4
-            ? mw::core::SampleBackendType::VST3
-            : (backendId == 3
-                ? mw::core::SampleBackendType::SFZ
-                : (backendId == 2 ? mw::core::SampleBackendType::SF2 : getProjectDefaultBackendType()));
+        const auto backendType = backendId == 5
+            ? mw::core::SampleBackendType::CLAP
+            : (backendId == 4
+                ? mw::core::SampleBackendType::VST3
+                : (backendId == 3
+                    ? mw::core::SampleBackendType::SFZ
+                    : (backendId == 2 ? mw::core::SampleBackendType::SF2 : getProjectDefaultBackendType())));
 
         if (backendType != assignment.backendType)
         {
@@ -19649,23 +24907,20 @@ void MainComponent::refreshSoundFontList()
                         candidates.push_back(plugin);
 
                 if (!candidates.empty())
-                {
-                    const auto& plugin = candidates.front();
-                    assignment.backendType = mw::core::SampleBackendType::VST3;
-                    assignment.vst3 = {};
-                    assignment.sampleLibraryPath = plugin.bundlePath;
-                    assignment.sampleLibraryDisplayName = plugin.bundlePath.filename().string();
-                    assignment.displayName = plugin.displayName();
-                    assignment.normalizedName = plugin.displayName();
-                    assignment.presetName = plugin.displayName();
-                    assignment.vst3.bundlePath = plugin.bundlePath;
-                    assignment.vst3.name = plugin.displayName();
-                    assignment.vst3.vendor = plugin.vendor;
-                    assignment.vst3.version = plugin.version;
-                    assignment.vst3.category = plugin.category;
-                    assignment.vst3.uid = plugin.uid;
-                    assignment.vst3.compatibilitySummary = plugin.compatibility.summary();
-                }
+                    applyVstPluginDescriptorToAssignment(assignment, candidates.front());
+            }
+            else if (backendType == mw::core::SampleBackendType::CLAP)
+            {
+                if (detectedClapPlugins.empty())
+                    scanClapPlugins(false);
+
+                std::vector<mw::clap::ClapPluginDescriptor> candidates;
+                for (const auto& plugin : detectedClapPlugins)
+                    if (isSupportedClapInstrumentPlugin(plugin))
+                        candidates.push_back(plugin);
+
+                if (!candidates.empty())
+                    applyClapPluginDescriptorToAssignment(assignment, candidates.front());
             }
             else
             {
@@ -19688,23 +24943,20 @@ void MainComponent::refreshSoundFontList()
                     candidates.push_back(plugin);
 
             if (instrumentIndex >= 0 && instrumentIndex < static_cast<int>(candidates.size()))
-            {
-                const auto& plugin = candidates[static_cast<std::size_t>(instrumentIndex)];
-                assignment.backendType = mw::core::SampleBackendType::VST3;
-                assignment.vst3 = {};
-                assignment.sampleLibraryPath = plugin.bundlePath;
-                assignment.sampleLibraryDisplayName = plugin.bundlePath.filename().string();
-                assignment.displayName = plugin.displayName();
-                assignment.normalizedName = plugin.displayName();
-                assignment.presetName = plugin.displayName();
-                assignment.vst3.bundlePath = plugin.bundlePath;
-                assignment.vst3.name = plugin.displayName();
-                assignment.vst3.vendor = plugin.vendor;
-                assignment.vst3.version = plugin.version;
-                assignment.vst3.category = plugin.category;
-                assignment.vst3.uid = plugin.uid;
-                assignment.vst3.compatibilitySummary = plugin.compatibility.summary();
-            }
+                applyVstPluginDescriptorToAssignment(assignment, candidates[static_cast<std::size_t>(instrumentIndex)]);
+        }
+        else if (backendType == mw::core::SampleBackendType::CLAP)
+        {
+            if (detectedClapPlugins.empty())
+                scanClapPlugins(false);
+
+            std::vector<mw::clap::ClapPluginDescriptor> candidates;
+            for (const auto& plugin : detectedClapPlugins)
+                if (isSupportedClapInstrumentPlugin(plugin))
+                    candidates.push_back(plugin);
+
+            if (instrumentIndex >= 0 && instrumentIndex < static_cast<int>(candidates.size()))
+                applyClapPluginDescriptorToAssignment(assignment, candidates[static_cast<std::size_t>(instrumentIndex)]);
         }
         else if (backendType == mw::core::SampleBackendType::SFZ)
         {
@@ -19762,7 +25014,8 @@ void MainComponent::refreshSoundFontList()
             return;
         }
 
-        if (assignment.backendType == mw::core::SampleBackendType::VST3)
+        if (assignment.backendType == mw::core::SampleBackendType::VST3
+            || assignment.backendType == mw::core::SampleBackendType::CLAP)
             showVstExperimentalWarningIfNeeded();
 
         state.pendingInstrumentAssignment = assignment;
@@ -19820,7 +25073,8 @@ void MainComponent::refreshSoundFontList()
             return false;
         }
 
-        if (assignment.backendType == mw::core::SampleBackendType::VST3)
+        if (assignment.backendType == mw::core::SampleBackendType::VST3
+            || assignment.backendType == mw::core::SampleBackendType::CLAP)
             showVstExperimentalWarningIfNeeded();
 
         capturePianoRollInstrumentUndoState(state, "Apply Piano Roll Track Settings");
@@ -19869,6 +25123,7 @@ void MainComponent::refreshSoundFontList()
         menu.addItem(3, "Choose SF2/SF3 file...");
         menu.addItem(4, "Choose SFZ file...");
         menu.addItem(5, "Choose scanned VST3 plugin...");
+        menu.addItem(6, "Choose scanned CLAP instrument...");
         menu.showMenuAsync(
             juce::PopupMenu::Options().withTargetComponent(&state.changeLibraryButton),
             [this, trackIndex](int result)
@@ -19916,20 +25171,7 @@ void MainComponent::refreshSoundFontList()
 
                             auto& trackForVst = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)];
                             auto assignment = stateForVst->hasPendingInstrumentAssignment ? stateForVst->pendingInstrumentAssignment : trackForVst.getInstrument();
-                            assignment.backendType = mw::core::SampleBackendType::VST3;
-                            assignment.vst3 = {};
-                            assignment.sampleLibraryPath = plugin.bundlePath;
-                            assignment.sampleLibraryDisplayName = plugin.bundlePath.filename().string();
-                            assignment.displayName = plugin.displayName();
-                            assignment.normalizedName = plugin.displayName();
-                            assignment.presetName = plugin.displayName();
-                            assignment.vst3.bundlePath = plugin.bundlePath;
-                            assignment.vst3.name = plugin.displayName();
-                            assignment.vst3.vendor = plugin.vendor;
-                            assignment.vst3.version = plugin.version;
-                            assignment.vst3.category = plugin.category;
-                            assignment.vst3.uid = plugin.uid;
-                            assignment.vst3.compatibilitySummary = plugin.compatibility.summary();
+                            applyVstPluginDescriptorToAssignment(assignment, plugin);
 
                             showVstExperimentalWarningIfNeeded();
 
@@ -19940,6 +25182,32 @@ void MainComponent::refreshSoundFontList()
                             updatePianoRollWindowDirtyIndicator(*stateForVst);
                             refreshAggregatePianoRollDirtyFlag();
                             logMessage("Piano Roll VST3 plugin selected for " + getTrackDisplayName(trackIndex) + ". Click Apply Track Settings to confirm.");
+                        });
+                }
+                else if (result == 6)
+                {
+                    showScannedClapInstrumentChooserDialog(
+                        "Choose Scanned CLAP Instrument",
+                        "Choose one of the supported CLAP instrument plugins found by the scanner for this Piano Roll track. Click Apply Track Settings after choosing to confirm the assignment.",
+                        [this, trackIndex](const mw::clap::ClapPluginDescriptor& plugin)
+                        {
+                            auto* stateForClap = findPianoRollEditorWindow(trackIndex);
+                            if (stateForClap == nullptr || !currentProject)
+                                return;
+
+                            auto& trackForClap = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)];
+                            auto assignment = stateForClap->hasPendingInstrumentAssignment ? stateForClap->pendingInstrumentAssignment : trackForClap.getInstrument();
+                            applyClapPluginDescriptorToAssignment(assignment, plugin);
+
+                            showVstExperimentalWarningIfNeeded();
+
+                            stateForClap->pendingInstrumentAssignment = assignment;
+                            stateForClap->hasPendingInstrumentAssignment = true;
+                            populatePianoRollInstrumentCombo(*stateForClap);
+                            refreshPianoRollTrackSoundLibraryDisplay(*stateForClap);
+                            updatePianoRollWindowDirtyIndicator(*stateForClap);
+                            refreshAggregatePianoRollDirtyFlag();
+                            logMessage("Piano Roll CLAP plugin selected for " + getTrackDisplayName(trackIndex) + ". Click Apply Track Settings to confirm. Compatible CLAP instruments can preview live and render/export.");
                         });
                 }
             }
@@ -20250,13 +25518,16 @@ void MainComponent::refreshSoundFontList()
 
         std::filesystem::path selectedTrackLibraryPath;
         std::filesystem::path selectedTrackVstBundlePath;
+        std::filesystem::path selectedTrackClapPluginPath;
         std::filesystem::path projectDefaultVstBundlePath;
+        std::filesystem::path projectDefaultClapPluginPath;
         auto selectedTrackBackend = mw::core::SampleBackendType::None;
         bool selectedTrackIsAudioClip = false;
 
         if (currentProject)
         {
             projectDefaultVstBundlePath = currentProject->getUserSettings().vst3PluginPath;
+            projectDefaultClapPluginPath = currentProject->getUserSettings().clapPluginPath;
             const auto index = getSelectedTrackIndex();
             if (index >= 0 && index < static_cast<int>(currentProject->getTracks().size()))
             {
@@ -20266,6 +25537,7 @@ void MainComponent::refreshSoundFontList()
                 selectedTrackBackend = assignment.backendType;
                 selectedTrackLibraryPath = assignment.sampleLibraryPath;
                 selectedTrackVstBundlePath = resolveVst3BundlePath(assignment);
+                selectedTrackClapPluginPath = resolveClapPluginPath(assignment);
             }
         }
 
@@ -20284,6 +25556,42 @@ void MainComponent::refreshSoundFontList()
             || selectedTrackBackendChoice == 4
             || (selectedTrackBackendChoice == 1 && visibleProjectBackendId == 3)
             || (selectedTrackBackend == mw::core::SampleBackendType::None && visibleProjectBackendId == 3);
+
+        const bool trackWantsClap =
+            selectedTrackBackend == mw::core::SampleBackendType::CLAP
+            || selectedTrackBackendChoice == 5
+            || (selectedTrackBackendChoice == 1 && visibleProjectBackendId == 4)
+            || (selectedTrackBackend == mw::core::SampleBackendType::None && visibleProjectBackendId == 4);
+
+        if (trackWantsClap)
+        {
+            if (detectedClapPlugins.empty())
+                scanClapPlugins(false);
+
+            int itemId = 1;
+            int selectedId = 1;
+            for (const auto& plugin : detectedClapPlugins)
+            {
+                if (!isSupportedClapInstrumentPlugin(plugin))
+                    continue;
+
+                juce::String label = plugin.displayName();
+                if (!plugin.vendor.empty())
+                    label << " - " << juce::String(plugin.vendor);
+
+                instrumentCombo.addItem(label, itemId);
+                if ((!selectedTrackClapPluginPath.empty() && pathsReferToSameLocation(plugin.pluginPath, selectedTrackClapPluginPath))
+                    || (selectedTrackClapPluginPath.empty() && !projectDefaultClapPluginPath.empty() && pathsReferToSameLocation(plugin.pluginPath, projectDefaultClapPluginPath)))
+                    selectedId = itemId;
+                ++itemId;
+            }
+
+            if (instrumentCombo.getNumItems() == 0)
+                instrumentCombo.addItem("No CLAP instruments found - use CLAP Plugins > Scan", 1);
+
+            instrumentCombo.setSelectedId(selectedId, juce::dontSendNotification);
+            return;
+        }
 
         if (trackWantsVst)
         {
@@ -20552,18 +25860,25 @@ void MainComponent::refreshTrackSelector()
         }
 
         auto assignment = track.getInstrument();
-        if (repairVst3BundlePathIfPossible(assignment))
+        bool repairedPluginPath = repairVst3BundlePathIfPossible(assignment);
+        repairedPluginPath = repairClapPluginPathIfPossible(assignment) || repairedPluginPath;
+        if (repairedPluginPath)
             track.setInstrumentAssignment(assignment);
 
         if (track.getInstrument().backendType == mw::core::SampleBackendType::None
             || (track.getInstrument().backendType == mw::core::SampleBackendType::VST3 && !hasResolvableVst3BundlePath(track.getInstrument()))
-            || (track.getInstrument().backendType != mw::core::SampleBackendType::VST3 && track.getInstrument().sampleLibraryPath.empty()))
+            || (track.getInstrument().backendType == mw::core::SampleBackendType::CLAP && !hasResolvableClapPluginPath(track.getInstrument()))
+            || (track.getInstrument().backendType != mw::core::SampleBackendType::VST3
+                && track.getInstrument().backendType != mw::core::SampleBackendType::CLAP
+                && track.getInstrument().sampleLibraryPath.empty()))
             seedTrackSoundLibraryFromProjectDefaults(track);
 
         const auto& trackAssignment = track.getInstrument();
-        const int backendComboId = trackAssignment.backendType == mw::core::SampleBackendType::VST3
-            ? 4
-            : (trackAssignment.backendType == mw::core::SampleBackendType::SFZ ? 3 : 2);
+        const int backendComboId = trackAssignment.backendType == mw::core::SampleBackendType::CLAP
+            ? 5
+            : (trackAssignment.backendType == mw::core::SampleBackendType::VST3
+                ? 4
+                : (trackAssignment.backendType == mw::core::SampleBackendType::SFZ ? 3 : 2));
         trackBackendCombo.setSelectedId(backendComboId, juce::dontSendNotification);
 
         // Rebuild the instrument list before selecting the MIDI track's instrument.
@@ -20572,12 +25887,13 @@ void MainComponent::refreshTrackSelector()
         // repopulate the project-default SF2/SFZ/VST choices first.
         populateInstrumentCombo();
 
-        if (trackAssignment.backendType == mw::core::SampleBackendType::VST3)
+        if (trackAssignment.backendType == mw::core::SampleBackendType::VST3
+            || trackAssignment.backendType == mw::core::SampleBackendType::CLAP)
         {
-            // populateInstrumentCombo() already selects the VST plugin matching the
-            // selected track's bundle path. Do not force item #1 here; that made a
+            // populateInstrumentCombo() already selects the plugin matching the
+            // selected track's plugin path. Do not force item #1 here; that made a
             // newly added blank track appear to reset the selected plugin even while
-            // the backend/library still showed VST3 correctly.
+            // the backend/library still showed correctly.
         }
         else if (trackAssignment.backendType == mw::core::SampleBackendType::SFZ)
         {
@@ -20646,7 +25962,7 @@ void MainComponent::refreshTrackSelector()
             refreshOpenPianoRollInstrumentControls();
 
             // AudioClip tracks (imported and recorded) share the same track-owned
-            // first VST Effect slot. Keep Apply Track Settings as the explicit
+            // first Effect Slot. Keep Apply Track Settings as the explicit
             // workflow commit point for the slot assignment, Enable flag, and
             // Bypass flag; the VST editor toolbar Apply Changes still commits
             // plugin parameter state only.
@@ -20661,7 +25977,7 @@ void MainComponent::refreshTrackSelector()
             if (trackSettingsChanged)
             {
                 setProjectDirty();
-                logMessage("Applied AudioClip track settings. Custom Audio is fixed for AudioClip tracks. VST Effect assignment, Enable, and Bypass state were applied for offline preview/export.");
+                logMessage("Applied AudioClip track settings. Custom Audio is fixed for AudioClip tracks. Effect Slot assignment, Enable, and Bypass state were applied for offline preview/export.");
             }
 
             return;
@@ -20673,12 +25989,17 @@ void MainComponent::refreshTrackSelector()
         // Plugin windows are closed later only when the track assignment actually
         // changes to a different backend/plugin.
         auto assignment = track.getInstrument();
-        if (repairVst3BundlePathIfPossible(assignment))
+        bool repairedPluginPath = repairVst3BundlePathIfPossible(assignment);
+        repairedPluginPath = repairClapPluginPathIfPossible(assignment) || repairedPluginPath;
+        if (repairedPluginPath)
             track.setInstrumentAssignment(assignment);
 
         if (track.getInstrument().backendType == mw::core::SampleBackendType::None
             || (track.getInstrument().backendType == mw::core::SampleBackendType::VST3 && !hasResolvableVst3BundlePath(track.getInstrument()))
-            || (track.getInstrument().backendType != mw::core::SampleBackendType::VST3 && track.getInstrument().sampleLibraryPath.empty()))
+            || (track.getInstrument().backendType == mw::core::SampleBackendType::CLAP && !hasResolvableClapPluginPath(track.getInstrument()))
+            || (track.getInstrument().backendType != mw::core::SampleBackendType::VST3
+                && track.getInstrument().backendType != mw::core::SampleBackendType::CLAP
+                && track.getInstrument().sampleLibraryPath.empty()))
             seedTrackSoundLibraryFromProjectDefaults(track);
 
         const auto instrumentBeforeApply = track.getInstrument();
@@ -20686,9 +26007,11 @@ void MainComponent::refreshTrackSelector()
         const auto instrumentIndex = instrumentCombo.getSelectedId() - 1;
         const int requestedTrackBackendId = trackBackendCombo.getSelectedId() > 0
             ? trackBackendCombo.getSelectedId()
-            : (track.getInstrument().backendType == mw::core::SampleBackendType::VST3
-                ? 4
-                : (track.getInstrument().backendType == mw::core::SampleBackendType::SFZ ? 3 : 2));
+            : (track.getInstrument().backendType == mw::core::SampleBackendType::CLAP
+                ? 5
+                : (track.getInstrument().backendType == mw::core::SampleBackendType::VST3
+                    ? 4
+                    : (track.getInstrument().backendType == mw::core::SampleBackendType::SFZ ? 3 : 2)));
         const bool trackWantsVst = requestedTrackBackendId == 4
             || (requestedTrackBackendId == 1 && appliedProjectBackendId == 3);
 
@@ -20708,6 +26031,29 @@ void MainComponent::refreshTrackSelector()
                 assignSelectedTrackVstPlugin(instrumentPlugins[static_cast<std::size_t>(instrumentIndex)]);
             else
                 logMessage("Apply Track Settings: no VST3 instrument selected.");
+
+            return;
+        }
+
+        const bool trackWantsClap = requestedTrackBackendId == 5
+            || (requestedTrackBackendId == 1 && appliedProjectBackendId == 4);
+
+        if (trackWantsClap)
+        {
+            if (detectedClapPlugins.empty())
+                scanClapPlugins(false);
+
+            std::vector<mw::clap::ClapPluginDescriptor> instrumentPlugins;
+            for (const auto& plugin : detectedClapPlugins)
+            {
+                if (isSupportedClapInstrumentPlugin(plugin))
+                    instrumentPlugins.push_back(plugin);
+            }
+
+            if (instrumentIndex >= 0 && instrumentIndex < static_cast<int>(instrumentPlugins.size()))
+                assignSelectedTrackClapPlugin(instrumentPlugins[static_cast<std::size_t>(instrumentIndex)]);
+            else
+                logMessage("Apply Track Settings: no CLAP instrument selected.");
 
             return;
         }
@@ -20786,7 +26132,9 @@ void MainComponent::refreshTrackSelector()
         const auto instrumentAfterApply = track.getInstrument();
         if (!instrumentAssignmentsEqual(instrumentBeforeApply, instrumentAfterApply)
             && (instrumentBeforeApply.backendType == mw::core::SampleBackendType::VST3
-                || instrumentAfterApply.backendType == mw::core::SampleBackendType::VST3))
+                || instrumentBeforeApply.backendType == mw::core::SampleBackendType::CLAP
+                || instrumentAfterApply.backendType == mw::core::SampleBackendType::VST3
+                || instrumentAfterApply.backendType == mw::core::SampleBackendType::CLAP))
         {
             closeVstPluginWindowForTrack(index,
                 "Closed open VST plugin window after applying changed track settings.");
@@ -20808,7 +26156,7 @@ void MainComponent::refreshTrackSelector()
         logMessage("Applied track settings: " + track.getName());
     }
 
-    
+
 
     int MainComponent::getSelectedTrackEndBeat() const
     {
@@ -23742,13 +29090,15 @@ void MainComponent::refreshTrackSelector()
             baseNameBox.setText("manual_project");
             captureProjectUserSettings();
 
-            // If the user picked a project-default VST3 backend/plugin before any
+            // If the user picked a project-default plugin backend before any
             // tracks existed, persist that visible selection into the new project
             // before the first manual track or sequence workflow seeds from it.
-            // Otherwise the backend could stay VST3 while the instrument selection
-            // appeared to jump back to the first scanned plugin.
+            // Otherwise the backend could stay plugin-based while the instrument
+            // selection appeared to jump back to the first scanned plugin.
             if (appliedProjectBackendId == 3)
                 captureProjectDefaultVstPluginSelection();
+            else if (appliedProjectBackendId == 4)
+                captureProjectDefaultClapPluginSelection();
         }
 
         if (static_cast<int>(importSections.size()) >= mw::core::Project::maxSequenceCount)
@@ -27896,12 +33246,15 @@ void MainComponent::openPianoRollWindow()
                     return;
 
                 const auto backendId = s->trackBackendCombo.getSelectedId();
-                const auto backendType = backendId == 4
-                    ? mw::core::SampleBackendType::VST3
-                    : (backendId == 3
-                        ? mw::core::SampleBackendType::SFZ
-                        : (backendId == 2 ? mw::core::SampleBackendType::SF2 : getProjectDefaultBackendType()));
-                if (backendType == mw::core::SampleBackendType::VST3)
+                const auto backendType = backendId == 5
+                    ? mw::core::SampleBackendType::CLAP
+                    : (backendId == 4
+                        ? mw::core::SampleBackendType::VST3
+                        : (backendId == 3
+                            ? mw::core::SampleBackendType::SFZ
+                            : (backendId == 2 ? mw::core::SampleBackendType::SF2 : getProjectDefaultBackendType())));
+                if (backendType == mw::core::SampleBackendType::VST3
+                    || backendType == mw::core::SampleBackendType::CLAP)
                 {
                     populatePianoRollInstrumentCombo(*s);
                     applyPianoRollInstrumentSelection(*s, true);
@@ -28357,6 +33710,7 @@ void MainComponent::openPianoRollWindow()
 
     void MainComponent::stopPianoRollPreview()
     {
+        stopClapInstrumentLiveAudition(true);
 #if JUCE_WINDOWS
         mciSendStringW(L"stop PoorMansStudioPianoRollPreview", nullptr, 0, nullptr);
         mciSendStringW(L"close PoorMansStudioPianoRollPreview", nullptr, 0, nullptr);
@@ -28467,6 +33821,7 @@ void MainComponent::openPianoRollWindow()
 
     void MainComponent::stopProjectPreview()
     {
+        stopClapInstrumentLiveAudition(true);
 #if JUCE_WINDOWS
         PlaySoundW(nullptr, nullptr, 0);
         logMessage("Stopped project preview playback.");
@@ -28546,9 +33901,9 @@ void MainComponent::renderPianoRollPreview()
             return;
         }
 
-        // Preview Player re-renders should pick up the latest open VST editor
-        // state, including recently tweaked effect settings, before taking the
-        // track snapshot used by the background render thread.
+        // Preview Player re-renders should pick up the latest open plugin
+        // instrument editor state before taking the track snapshot used by the
+        // background render thread. Effect Slot editors remain explicit-apply only.
         captureOpenVstPluginStatesForPreview("Piano Roll preview");
 
         auto selectedTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
@@ -28594,13 +33949,22 @@ void MainComponent::renderPianoRollPreview()
         const bool trackExplicitVst =
             selectedTrack.getInstrument().backendType == mw::core::SampleBackendType::VST3;
 
+        const bool trackExplicitClap =
+            selectedTrack.getInstrument().backendType == mw::core::SampleBackendType::CLAP;
+
+        const bool backendIsClap = trackExplicitClap
+            || trackBackendCombo.getSelectedId() == 5
+            || (!trackExplicitSf2 && !trackExplicitSfz && trackBackendCombo.getSelectedId() == 1 && appliedProjectBackendId == 4);
+
         const bool backendIsVst =
-            trackExplicitVst
-            || trackBackendCombo.getSelectedId() == 4
-            || (!trackExplicitSf2 && !trackExplicitSfz && trackBackendCombo.getSelectedId() == 1 && appliedProjectBackendId == 3);
+            !backendIsClap
+            && (trackExplicitVst
+                || trackBackendCombo.getSelectedId() == 4
+                || (!trackExplicitSf2 && !trackExplicitSfz && trackBackendCombo.getSelectedId() == 1 && appliedProjectBackendId == 3));
 
         const bool backendIsSfz =
-            !backendIsVst
+            !backendIsClap
+            && !backendIsVst
             && (trackExplicitSfz
                 || (!trackExplicitSf2
                     && (trackBackendCombo.getSelectedId() == 3
@@ -28623,7 +33987,22 @@ void MainComponent::renderPianoRollPreview()
         const auto fluidSynthPath = std::filesystem::path(fluidSynthPathBox.getText().toStdString());
         const auto sfizzPath = std::filesystem::path(sfizzPathBox.getText().toStdString());
 
-        if (backendIsVst)
+        if (backendIsClap)
+        {
+            showVstExperimentalWarningIfNeeded();
+            const auto clapPluginPath = resolveClapPluginPath(selectedTrack.getInstrument());
+            if (clapPluginPath.empty() || !std::filesystem::exists(clapPluginPath))
+            {
+                logMessage("ERROR: Cannot preview CLAP. Plugin bundle was not found: " + clapPluginPath.string());
+                return;
+            }
+            if (clapInstrumentEditorWindows.find(index) != clapInstrumentEditorWindows.end())
+                logMessage("CLAP Piano Roll preview will capture the open CLAP instrument editor state before rendering. Use Apply Changes to commit state permanently.");
+            else
+                logMessage("CLAP Piano Roll preview will use the assigned CLAP Instrument and last applied state.");
+        }
+
+        else if (backendIsVst)
         {
             showVstExperimentalWarningIfNeeded();
 
@@ -28722,7 +34101,7 @@ void MainComponent::renderPianoRollPreview()
         lastPianoRollPreviewTempoBpm = previewProject.getTempoBpm();
         pendingPianoRollPreviewStartSeconds = 0.0;
 
-        logMessage("Preview backend: " + juce::String(backendIsVst ? "VST3 plugin" : (backendIsSfz ? "SFZ / sfizz-render" : "SF2 / FluidSynth")));
+        logMessage("Preview backend: " + juce::String(backendIsClap ? "CLAP plugin" : (backendIsVst ? "VST3 plugin" : (backendIsSfz ? "SFZ / sfizz-render" : "SF2 / FluidSynth"))));
         logMessage("Preview track: " + selectedTrack.getName());
         logMessage("Preview note count: " + juce::String(static_cast<int>(selectedTrack.getNotes().size())));
         logMessage("Preview temporary MIDI: " + previewMidiPath.string());
@@ -28754,12 +34133,31 @@ void MainComponent::renderPianoRollPreview()
             renderThread.join();
 
         renderThread = std::thread(
-            [this, previewMidiPath, previewWavPath, backendIsVst, backendIsSfz, soundFontPath, sfzPath, fluidSynthPath, sfizzPath, selectedTrack, index, previewTempoBpm, previewSampleRate, previewChannelCount]
+            [this, previewMidiPath, previewWavPath, backendIsClap, backendIsVst, backendIsSfz, soundFontPath, sfzPath, fluidSynthPath, sfizzPath, selectedTrack, index, previewTempoBpm, previewSampleRate, previewChannelCount]
             {
                 bool success = false;
                 std::string finalMessage;
 
-                if (backendIsVst)
+                if (backendIsClap)
+                {
+                    mw::clap::ClapInstrumentRenderRequest request;
+                    request.track = selectedTrack;
+                    request.tempoBpm = previewTempoBpm;
+                    request.sampleRate = previewSampleRate;
+                    request.channelCount = previewChannelCount;
+                    request.blockSize = 512;
+                    request.tailSeconds = 4.0;
+                    request.wavOutputPath = previewWavPath;
+                    request.cancelRequested = &cancelRenderRequested;
+
+                    const auto result = mw::clap::ClapInstrumentHost::renderTrackToWav(request);
+                    logMessage(result.message);
+                    success = result.success && std::filesystem::exists(previewWavPath);
+                    finalMessage = success
+                        ? "Piano roll CLAP preview rendered temporary WAV: " + previewWavPath.string()
+                        : "ERROR: Piano roll CLAP preview render failed or WAV was not created.";
+                }
+                else if (backendIsVst)
                 {
                     mw::vst::VstRenderRequest request;
                     request.track = selectedTrack;
@@ -28829,7 +34227,7 @@ void MainComponent::renderPianoRollPreview()
                     effectRequest.inputWavPath = previewWavPath;
                     effectRequest.outputWavPath = previewWavPath;
                     effectRequest.blockSize = 512;
-                    effectRequest.tailSeconds = 2.0;
+                    effectRequest.tailSeconds = kEffectSlotPreviewTailOverscanSeconds;
                     effectRequest.cancelRequested = &cancelRenderRequested;
 
                     const auto effectResult = mw::vst::VstInstrumentHost::processWavWithTrackEffectChain(effectRequest);
@@ -28837,17 +34235,17 @@ void MainComponent::renderPianoRollPreview()
                     success = effectResult.success && !effectResult.cancelled && std::filesystem::exists(previewWavPath);
                     if (success)
                     {
-                        finalMessage += " VST3 effect chain was processed offline for this preview.";
+                        finalMessage += " Effect Slot chain was applied for this preview.";
                         recordVstEffectRenderStatusForTrack(index, "Preview succeeded");
                     }
                     else if (effectResult.cancelled)
                     {
-                        finalMessage = "Piano roll preview VST3 effect processing was cancelled.";
+                        finalMessage = "Piano roll preview Effect Slot processing was cancelled.";
                         recordVstEffectRenderStatusForTrack(index, "Preview cancelled");
                     }
                     else
                     {
-                        finalMessage = "ERROR: Piano roll preview rendered, but VST3 effect chain processing failed.";
+                        finalMessage = "ERROR: Piano roll preview rendered, but Effect Slot chain processing failed.";
                         recordVstEffectRenderStatusForTrack(index, "Preview failed");
                     }
                 }
@@ -29360,6 +34758,9 @@ void MainComponent::renderPianoRollPreview()
         preferences.vstGraphicsProfileSummary = vstGraphicsProfile.summary();
         saveGraphicsAdaptersToCacheFile(vstGraphicsProfile.adapters);
         preferences.vstExperimentalWarningAcknowledged = vstExperimentalWarningAcknowledged;
+        preferences.clapCompatibilityWarningsEnabled = clapCompatibilityWarningsEnabled;
+        preferences.clapSafePluginUiMode = clapSafePluginUiMode;
+        preferences.clapMaxOpenPluginWindows = sanitizeMaxOpenVstPluginWindows(clapMaxOpenPluginWindows);
 
         if (mw::app::UserPreferencesStore::save(preferences))
             logMessage("Settings saved.");
@@ -29762,7 +35163,7 @@ void MainComponent::updateTrackSummary(const mw::core::Project& project)
             summary << "Instrument: " << track.getInstrument().displayName << "\n";
             summary << "Sound Library: " << getTrackLibrarySummaryLabel(track.getInstrument()) << "\n";
             const auto& vstEffects = track.getVstEffects();
-            summary << "VST Effect Chain: ";
+            summary << "Effect Slot Chain: ";
             for (std::size_t slotIndex = 0; slotIndex < mw::core::maxVstEffectSlots; ++slotIndex)
             {
                 if (slotIndex > 0)
@@ -29772,14 +35173,15 @@ void MainComponent::updateTrackSummary(const mw::core::Project& project)
                         << (vstEffects.slotEnabled(slotIndex) ? "enabled" : "disabled");
                 if (effectSlot != nullptr && effectSlot->plugin.hasPluginIdentity())
                 {
-                    summary << " - " << (effectSlot->plugin.name.empty() ? juce::String(effectSlot->plugin.bundlePath.filename().string()) : juce::String(effectSlot->plugin.name));
+                    summary << " - [" << juce::String(mw::core::effectSlotBackendTypeToString(effectSlot->backendType)) << "] "
+                            << (effectSlot->plugin.name.empty() ? juce::String(effectSlot->plugin.bundlePath.filename().string()) : juce::String(effectSlot->plugin.name));
                     if (effectSlot->plugin.bypassed)
                         summary << " [bypassed]";
                 }
                 else
                     summary << " - none";
             }
-            summary << " (offline chain processing)\n";
+            summary << " (Effect Slots saved for preview/render)\n";
             summary << "Muted: " << (track.getMuted() ? "yes" : "no") << "    Solo: " << (track.getSolo() ? "yes" : "no") << "    Volume: " << juce::String(track.getMixerSettings().volume, 2) << "\n";
             summary << "Notes: " << static_cast<int>(track.getNotes().size()) << "\n";
             if (track.isAudioClipTrack())
@@ -29829,7 +35231,7 @@ void MainComponent::updateTrackSummary(const mw::core::Project& project)
             summary << "Instrument: " << track.getInstrument().displayName << "\n";
             summary << "Sound Library: " << getTrackLibrarySummaryLabel(track.getInstrument()) << "\n";
             const auto& vstEffects = track.getVstEffects();
-            summary << "VST Effect Chain: ";
+            summary << "Effect Slot Chain: ";
             for (std::size_t slotIndex = 0; slotIndex < mw::core::maxVstEffectSlots; ++slotIndex)
             {
                 if (slotIndex > 0)
@@ -29839,14 +35241,15 @@ void MainComponent::updateTrackSummary(const mw::core::Project& project)
                         << (vstEffects.slotEnabled(slotIndex) ? "enabled" : "disabled");
                 if (effectSlot != nullptr && effectSlot->plugin.hasPluginIdentity())
                 {
-                    summary << " - " << (effectSlot->plugin.name.empty() ? juce::String(effectSlot->plugin.bundlePath.filename().string()) : juce::String(effectSlot->plugin.name));
+                    summary << " - [" << juce::String(mw::core::effectSlotBackendTypeToString(effectSlot->backendType)) << "] "
+                            << (effectSlot->plugin.name.empty() ? juce::String(effectSlot->plugin.bundlePath.filename().string()) : juce::String(effectSlot->plugin.name));
                     if (effectSlot->plugin.bypassed)
                         summary << " [bypassed]";
                 }
                 else
                     summary << " - none";
             }
-            summary << " (offline chain processing)\n";
+            summary << " (Effect Slots saved for preview/render)\n";
             summary << "Normalized: " << track.getInstrument().normalizedName << "\n";
             summary << "GM Program: " << track.getInstrument().midiProgram << "\n";
             summary << "MIDI Channel: " << track.getInstrument().midiChannel << "\n";

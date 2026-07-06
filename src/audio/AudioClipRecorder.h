@@ -30,7 +30,7 @@ namespace mw::audio
 
     struct AudioClipRecorderLiveEffectOptions
     {
-        // enabled means the selected track's applied VST effect should be printed into the recorded take.
+        // enabled means the selected track's applied Effect Slot should be printed into the recorded take.
         bool enabled = false;
         // monitorEnabled only controls whether that same wet signal is sent to the output while recording.
         bool monitorEnabled = false;

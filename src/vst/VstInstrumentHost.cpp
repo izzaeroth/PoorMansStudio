@@ -1,5 +1,6 @@
 #include "vst/VstInstrumentHost.h"
 
+#include "clap/ClapEffectHost.h"
 #include "core/Project.h"
 
 #include <algorithm>
@@ -38,8 +39,107 @@ namespace
     std::filesystem::path temporaryEffectRenderPathFor(const std::filesystem::path& input)
     {
         auto temp = input;
-        temp.replace_filename(input.stem().string() + ".vstfx.tmp.wav");
+        temp.replace_filename(input.stem().string() + ".fx.tmp.wav");
         return temp;
+    }
+
+    std::filesystem::path temporaryEffectTailTrimPathFor(const std::filesystem::path& input)
+    {
+        auto temp = input;
+        temp.replace_filename(input.stem().string() + ".tail.trim.tmp.wav");
+        return temp;
+    }
+
+    constexpr float kDynamicTailSilenceThreshold = 1.0e-5f;
+    constexpr double kDynamicTailSilenceHoldSeconds = 0.75;
+    constexpr double kDynamicTailPadSeconds = 0.10;
+
+    int lastAudibleSampleInBlock(const juce::AudioBuffer<float>& buffer, int numSamples)
+    {
+        const auto channels = buffer.getNumChannels();
+        for (int sample = numSamples - 1; sample >= 0; --sample)
+        {
+            for (int ch = 0; ch < channels; ++ch)
+            {
+                if (std::abs(buffer.getReadPointer(ch)[sample]) > kDynamicTailSilenceThreshold)
+                    return sample;
+            }
+        }
+        return -1;
+    }
+
+    bool rewriteWavTrimmedToSamples(const std::filesystem::path& wavPath,
+                                    std::int64_t keepSamples,
+                                    int channelCount,
+                                    int sampleRate,
+                                    std::string& error)
+    {
+        if (keepSamples < 0)
+            keepSamples = 0;
+
+        juce::AudioFormatManager formatManager;
+        formatManager.registerBasicFormats();
+
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(juce::File(wavPath.string())));
+        if (reader == nullptr)
+        {
+            error = "Could not reopen wet WAV for dynamic tail trim: " + wavPath.string();
+            return false;
+        }
+
+        keepSamples = std::min<std::int64_t>(keepSamples, static_cast<std::int64_t>(reader->lengthInSamples));
+        if (keepSamples >= static_cast<std::int64_t>(reader->lengthInSamples))
+            return true;
+
+        const auto trimPath = temporaryEffectTailTrimPathFor(wavPath);
+        std::error_code ec;
+        if (std::filesystem::exists(trimPath, ec))
+            std::filesystem::remove(trimPath, ec);
+
+        juce::WavAudioFormat wavFormat;
+        std::unique_ptr<juce::FileOutputStream> stream(juce::File(trimPath.string()).createOutputStream());
+        if (stream == nullptr || !stream->openedOk())
+        {
+            error = "Could not create dynamic tail trim temp WAV: " + trimPath.string();
+            return false;
+        }
+
+        std::unique_ptr<juce::AudioFormatWriter> writer(
+            wavFormat.createWriterFor(stream.get(), static_cast<double>(sampleRate), static_cast<unsigned int>(channelCount), 24, {}, 0)
+        );
+        if (writer == nullptr)
+        {
+            error = "Could not create dynamic tail trim WAV writer.";
+            return false;
+        }
+        stream.release();
+
+        constexpr int blockSize = 32768;
+        juce::AudioBuffer<float> buffer(channelCount, blockSize);
+        std::int64_t position = 0;
+        while (position < keepSamples)
+        {
+            const int blockSamples = static_cast<int>(std::min<std::int64_t>(blockSize, keepSamples - position));
+            buffer.setSize(channelCount, blockSamples, false, false, true);
+            buffer.clear();
+            reader->read(&buffer, 0, blockSamples, position, true, true);
+            writer->writeFromAudioSampleBuffer(buffer, 0, blockSamples);
+            position += blockSamples;
+        }
+
+        writer.reset();
+        reader.reset();
+
+        std::filesystem::remove(wavPath, ec);
+        ec.clear();
+        std::filesystem::rename(trimPath, wavPath, ec);
+        if (ec)
+        {
+            error = "Could not replace wet WAV with dynamic tail trim result: " + ec.message();
+            return false;
+        }
+
+        return true;
     }
 }
 
@@ -60,6 +160,8 @@ namespace mw::vst
             if (slot != nullptr
                 && effects.slotEnabled(slotIndex)
                 && !slot->plugin.bypassed
+                && (slot->backendType == mw::core::EffectSlotBackendType::VST3
+                    || slot->backendType == mw::core::EffectSlotBackendType::CLAP)
                 && slot->plugin.hasPluginIdentity()
                 && !slot->plugin.bundlePath.empty())
                 return true;
@@ -379,7 +481,7 @@ namespace mw::vst
             if (request.cancelRequested != nullptr && request.cancelRequested->load())
             {
                 result.cancelled = true;
-                result.message = "VST3 effect processing cancelled before start.";
+                result.message = "Effect Slot processing cancelled before start.";
                 return result;
             }
 
@@ -391,8 +493,8 @@ namespace mw::vst
                 result.success = copyAudioFileForUnprocessedEffect(request.inputWavPath, result.wavPath, copyError);
                 result.effectApplied = false;
                 result.message = result.success
-                    ? ("No assigned VST3 effect in slot " + std::to_string(slotIndex + 1) + "; WAV left unchanged.")
-                    : ("No assigned VST3 effect in slot " + std::to_string(slotIndex + 1) + "; dry WAV copy failed: " + copyError);
+                    ? ("No assigned effect in slot " + std::to_string(slotIndex + 1) + "; WAV left unchanged.")
+                    : ("No assigned effect in slot " + std::to_string(slotIndex + 1) + "; dry WAV copy failed: " + copyError);
                 return result;
             }
 
@@ -401,9 +503,42 @@ namespace mw::vst
                 std::string copyError;
                 result.success = copyAudioFileForUnprocessedEffect(request.inputWavPath, result.wavPath, copyError);
                 result.effectApplied = false;
+                const auto backendText = mw::core::effectSlotBackendTypeToString(slot->backendType);
                 result.message = result.success
-                    ? ("VST3 effect slot " + std::to_string(slotIndex + 1) + (slot->plugin.bypassed ? " bypassed" : " disabled") + "; WAV left unchanged.")
-                    : ("VST3 effect slot " + std::to_string(slotIndex + 1) + " dry WAV copy failed: " + copyError);
+                    ? (backendText + " effect slot " + std::to_string(slotIndex + 1) + (slot->plugin.bypassed ? " bypassed" : " disabled") + "; WAV left unchanged.")
+                    : (backendText + " effect slot " + std::to_string(slotIndex + 1) + " dry WAV copy failed: " + copyError);
+                return result;
+            }
+
+            if (slot->backendType == mw::core::EffectSlotBackendType::CLAP)
+            {
+                mw::clap::ClapEffectProcessRequest clapRequest;
+                clapRequest.plugin = slot->plugin;
+                clapRequest.inputWavPath = request.inputWavPath;
+                clapRequest.outputWavPath = request.outputWavPath;
+                clapRequest.blockSize = request.blockSize;
+                clapRequest.tailSeconds = request.tailSeconds;
+                clapRequest.cancelRequested = request.cancelRequested;
+
+                const auto clapResult = mw::clap::ClapEffectHost::processWavWithPlugin(clapRequest);
+                result.success = clapResult.success;
+                result.cancelled = clapResult.cancelled;
+                result.effectApplied = clapResult.effectApplied;
+                result.message = clapResult.message.empty()
+                    ? "CLAP effect processing did not return a status message."
+                    : ("Effect slot " + std::to_string(slotIndex + 1) + " [CLAP]: " + clapResult.message);
+                result.wavPath = clapResult.wavPath;
+                return result;
+            }
+
+            if (slot->backendType != mw::core::EffectSlotBackendType::VST3)
+            {
+                std::string copyError;
+                result.success = copyAudioFileForUnprocessedEffect(request.inputWavPath, result.wavPath, copyError);
+                result.effectApplied = false;
+                result.message = result.success
+                    ? ("Effect slot " + std::to_string(slotIndex + 1) + " does not have a processable backend; WAV left unchanged.")
+                    : ("Effect slot " + std::to_string(slotIndex + 1) + " does not have a processable backend; dry WAV copy failed: " + copyError);
                 return result;
             }
 
@@ -475,6 +610,12 @@ namespace mw::vst
             juce::AudioBuffer<float> audio(channelCount, blockSize);
             juce::MidiBuffer emptyMidi;
             std::int64_t sample = 0;
+            std::int64_t writtenSamples = 0;
+            std::int64_t lastAudibleOutputSample = totalInputSamples > 0 ? totalInputSamples - 1 : 0;
+            std::int64_t silentTailSamples = 0;
+            const auto silenceHoldSamples = static_cast<std::int64_t>(kDynamicTailSilenceHoldSeconds * static_cast<double>(sampleRate));
+            const auto trimPadSamples = static_cast<std::int64_t>(kDynamicTailPadSeconds * static_cast<double>(sampleRate));
+            bool dynamicTailStoppedOnSilence = false;
 
             try
             {
@@ -494,8 +635,12 @@ namespace mw::vst
                     reader->read(&audio, 0, blockSamples, sample, true, true);
                     emptyMidi.clear();
                     load.instance->processBlock(audio, emptyMidi);
+                    const auto audibleIndex = lastAudibleSampleInBlock(audio, blockSamples);
+                    if (audibleIndex >= 0)
+                        lastAudibleOutputSample = writtenSamples + audibleIndex;
                     writer->writeFromAudioSampleBuffer(audio, 0, blockSamples);
                     sample += blockSamples;
+                    writtenSamples += blockSamples;
                 }
 
                 std::int64_t tailWritten = 0;
@@ -514,8 +659,25 @@ namespace mw::vst
                     audio.clear();
                     emptyMidi.clear();
                     load.instance->processBlock(audio, emptyMidi);
+                    const auto audibleIndex = lastAudibleSampleInBlock(audio, blockSamples);
+                    if (audibleIndex >= 0)
+                    {
+                        lastAudibleOutputSample = writtenSamples + audibleIndex;
+                        silentTailSamples = blockSamples - audibleIndex - 1;
+                    }
+                    else
+                    {
+                        silentTailSamples += blockSamples;
+                    }
                     writer->writeFromAudioSampleBuffer(audio, 0, blockSamples);
                     tailWritten += blockSamples;
+                    writtenSamples += blockSamples;
+
+                    if (silenceHoldSamples > 0 && silentTailSamples >= silenceHoldSamples)
+                    {
+                        dynamicTailStoppedOnSilence = true;
+                        break;
+                    }
                 }
             }
             catch (const std::exception& ex)
@@ -534,6 +696,19 @@ namespace mw::vst
             load.instance->releaseResources();
             writer.reset();
             reader.reset();
+
+            const auto minimumKeepSamples = std::max<std::int64_t>(0, totalInputSamples);
+            const auto dynamicKeepSamples = std::min<std::int64_t>(writtenSamples, std::max<std::int64_t>(minimumKeepSamples, lastAudibleOutputSample + 1 + trimPadSamples));
+            const auto trimmedSamples = std::max<std::int64_t>(0, writtenSamples - dynamicKeepSamples);
+            if (trimmedSamples > 0)
+            {
+                std::string trimError;
+                if (!rewriteWavTrimmedToSamples(actualOutputPath, dynamicKeepSamples, channelCount, sampleRate, trimError))
+                {
+                    result.message = trimError;
+                    return result;
+                }
+            }
 
             if (replacingInput)
             {
@@ -559,6 +734,9 @@ namespace mw::vst
             result.message = "Processed WAV through track VST3 effect slot " + std::to_string(slotIndex + 1) + ". Plugin: " + effectName
                 + "; saved state present: " + std::string(hasSavedEffectState ? "yes" : "no")
                 + "; state restored: " + std::string(load.savedStateApplied ? "yes" : "no")
+                + "; max tail overscan seconds: " + std::to_string(std::max(0.0, request.tailSeconds))
+                + "; dynamic tail stopped on silence: " + std::string(dynamicTailStoppedOnSilence ? "yes" : "no")
+                + "; dynamic tail trimmed samples: " + std::to_string(trimmedSamples)
                 + "; input: " + request.inputWavPath.string()
                 + "; output: " + result.wavPath.string();
             return result;
@@ -573,7 +751,7 @@ namespace mw::vst
         if (request.cancelRequested != nullptr && request.cancelRequested->load())
         {
             result.cancelled = true;
-            result.message = "VST3 effect chain processing cancelled before start.";
+            result.message = "Effect Slot chain processing cancelled before start.";
             return result;
         }
 
@@ -593,6 +771,8 @@ namespace mw::vst
                 if (slot != nullptr
                     && effects.slotEnabled(slotIndex)
                     && !slot->plugin.bypassed
+                    && (slot->backendType == mw::core::EffectSlotBackendType::VST3
+                        || slot->backendType == mw::core::EffectSlotBackendType::CLAP)
                     && slot->plugin.hasPluginIdentity()
                     && !slot->plugin.bundlePath.empty())
                     activeSlots.push_back(slotIndex);
@@ -605,8 +785,8 @@ namespace mw::vst
             result.success = copyAudioFileForUnprocessedEffect(request.inputWavPath, result.wavPath, copyError);
             result.effectApplied = false;
             result.message = result.success
-                ? "No enabled VST3 effect slots on this track; WAV left unchanged."
-                : "No enabled VST3 effect slots on this track; dry WAV copy failed: " + copyError;
+                ? "No enabled processable Effect Slot plugins on this track; WAV left unchanged."
+                : "No enabled processable Effect Slot plugins on this track; dry WAV copy failed: " + copyError;
             return result;
         }
 
@@ -614,7 +794,7 @@ namespace mw::vst
         std::vector<std::filesystem::path> temporaryChainFiles;
         bool anyApplied = false;
         std::ostringstream chainLog;
-        chainLog << "Processed WAV through track VST3 effect chain";
+        chainLog << "Processed WAV through track Effect Slot chain";
 
         for (std::size_t i = 0; i < activeSlots.size(); ++i)
         {
@@ -622,7 +802,7 @@ namespace mw::vst
             const bool lastSlot = (i + 1 == activeSlots.size());
             auto slotOutputPath = lastSlot
                 ? (request.outputWavPath.empty() ? request.inputWavPath : request.outputWavPath)
-                : currentInputPath.parent_path() / (currentInputPath.stem().string() + ".slot" + std::to_string(slotIndex + 1) + ".vstfx.tmp.wav");
+                : currentInputPath.parent_path() / (currentInputPath.stem().string() + ".slot" + std::to_string(slotIndex + 1) + ".fx.tmp.wav");
 
             VstEffectProcessRequest slotRequest = request;
             slotRequest.inputWavPath = currentInputPath;

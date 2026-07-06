@@ -91,11 +91,11 @@ namespace mw::audio
             }
             else if (!liveEffectOptions.effect.hasPluginIdentity() || liveEffectOptions.effect.bundlePath.empty())
             {
-                result.recordEffectMessage = "Track effect recording requested, but the target track does not have a VST3 effect assignment.";
+                result.recordEffectMessage = "Track effect recording requested, but the target track does not have an Effect Slot assignment.";
                 recordEffectSummary = result.recordEffectMessage;
                 if (liveEffectOptions.monitorEnabled)
                 {
-                    result.liveEffectMessage = "Track Live Effect requested, but the target track does not have a VST3 effect assignment.";
+                    result.liveEffectMessage = "Track Live Effect requested, but the target track does not have an Effect Slot assignment.";
                     liveEffectMonitorSummary = result.liveEffectMessage;
                 }
             }
@@ -122,7 +122,7 @@ namespace mw::audio
                     recordEffectProcessChannels = requestedProcessChannels;
                     recordEffectActive = true;
                     result.recordEffectActive = true;
-                    result.recordEffectMessage = "Track VST effect will be printed into the recorded take: " + effectName
+                    result.recordEffectMessage = "Track Effect Slot will be printed into the recorded take: " + effectName
                         + (liveEffectOptions.trackName.empty() ? std::string() : (" on " + liveEffectOptions.trackName));
                     recordEffectSummary = result.recordEffectMessage;
 
@@ -146,12 +146,12 @@ namespace mw::audio
                 }
                 else
                 {
-                    result.recordEffectMessage = "Track VST effect could not load for wet recording; dry recording continues: " + load.message;
+                    result.recordEffectMessage = "Track Effect Slot could not load for wet recording; dry recording continues: " + load.message;
                     recordEffectSummary = result.recordEffectMessage;
                     recordEffectProcessChannels = 0;
                     if (liveEffectOptions.monitorEnabled)
                     {
-                        result.liveEffectMessage = "Track Live Effect could not load the VST3 effect for live monitoring: " + load.message;
+                        result.liveEffectMessage = "Track Live Effect could not load the assigned Effect Slot for live monitoring: " + load.message;
                         liveEffectMonitorSummary = result.liveEffectMessage;
                         liveEffectMonitorChannels = 0;
                     }
@@ -408,7 +408,7 @@ namespace mw::audio
             {
                 recordEffectActive = false;
                 liveEffectMonitorActive = false;
-                recordEffectSummary = "Track VST effect failed while printing into the take; dry recording continued.";
+                recordEffectSummary = "Track Effect Slot failed while printing into the take; dry recording continued.";
                 liveEffectMonitorSummary = "Track Live Effect failed during monitoring; dry recording continued.";
                 for (int ch = 0; ch < numOutputChannels; ++ch)
                     if (outputChannelData[ch] != nullptr)

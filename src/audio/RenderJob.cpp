@@ -1,11 +1,14 @@
 #include "audio/RenderJob.h"
 
+#include "audio/GainLimits.h"
+
 #include "app/AppPaths.h"
 #include "audio/ExternalFfmpegEncoder.h"
 #include "audio/ExternalFfmpegMixer.h"
 #include "audio/ExternalFluidSynthRenderer.h"
 #include "audio/ExternalSfizzRenderer.h"
 #include "audio/SfzValidator.h"
+#include "clap/ClapInstrumentHost.h"
 #include "vst/VstInstrumentHost.h"
 #include "exporting/ExportSettings.h"
 #include "midi/MidiExporter.h"
@@ -90,6 +93,7 @@ namespace
         double gain = 1.0;
     };
 
+    constexpr double kEffectSlotTailOverscanSeconds = 12.0;
     double ticksToSeconds(std::int64_t ticks, int tempoBpm)
     {
         const auto safeTempo = tempoBpm > 0 ? tempoBpm : 120;
@@ -261,8 +265,8 @@ namespace
         const double clipGain = std::isfinite(static_cast<double>(clip.gain)) ? static_cast<double>(clip.gain) : 1.0;
         const double masterVolume = std::isfinite(static_cast<double>(job.masterVolume)) ? static_cast<double>(job.masterVolume) : 1.0;
         // Match the existing MIDI render convention: track volume and master volume
-        // combine into one final render gain capped at the app's 1.5 slider ceiling.
-        return std::clamp(trackVolume * clipGain * masterVolume, 0.0, 1.5);
+        // combine into one final render gain capped at the app's main UI slider ceiling.
+        return mw::audio::sanitizeMainUiGain(trackVolume * clipGain * masterVolume);
     }
 
     std::vector<AudioClipRenderInput> collectAudioClipInputs(
@@ -391,8 +395,8 @@ namespace
                 continue;
             }
 
-            status(callbacks, "Processing " + sourceKind + " AudioClip track VST3 effect: " + track->getName());
-            log(callbacks, sourceKindTitle + " AudioClip VST3 effect source stays dry/unchanged: " + path.string());
+            status(callbacks, "Processing " + sourceKind + " AudioClip track Effect Slot chain: " + track->getName());
+            log(callbacks, sourceKindTitle + " AudioClip Effect Slot source stays dry/unchanged: " + path.string());
 
             std::error_code ec;
             std::filesystem::create_directories(effectFolder, ec);
@@ -419,7 +423,7 @@ namespace
                 log(callbacks, convertResult.message);
                 if (!convertResult.success || !std::filesystem::exists(convertedWav))
                 {
-                    errorMessage = "Failed to prepare " + sourceKind + " AudioClip media for VST3 effect processing.";
+                    errorMessage = "Failed to prepare " + sourceKind + " AudioClip media for Effect Slot processing.";
                     return {};
                 }
                 sourceWav = convertedWav;
@@ -431,28 +435,29 @@ namespace
             effectRequest.inputWavPath = sourceWav;
             effectRequest.outputWavPath = processedWav;
             effectRequest.blockSize = 512;
-            effectRequest.tailSeconds = 2.0;
+            effectRequest.tailSeconds = kEffectSlotTailOverscanSeconds;
             effectRequest.cancelRequested = &cancelRequested;
 
             const auto effectResult = mw::vst::VstInstrumentHost::processWavWithTrackEffectChain(effectRequest);
             log(callbacks, effectResult.message);
             if (effectResult.cancelled)
             {
-                errorMessage = sourceKindTitle + " AudioClip VST3 effect processing was cancelled.";
+                errorMessage = sourceKindTitle + " AudioClip Effect Slot processing was cancelled.";
                 return {};
             }
             if (!effectResult.success || !std::filesystem::exists(processedWav))
             {
-                errorMessage = "Failed to process " + sourceKind + " AudioClip through VST3 effect chain for track: " + track->getName();
+                errorMessage = "Failed to process " + sourceKind + " AudioClip through Effect Slot chain for track: " + track->getName();
                 return {};
             }
 
-            if (hasActiveTrim
-                && !capAudioClipPreparedWavToIntendedDuration(job, processedWav, intendedDurationSeconds, callbacks, errorMessage))
-                return {};
+            if (hasActiveTrim)
+            {
+                log(callbacks, sourceKindTitle + " AudioClip Effect Slot tail preservation enabled: processed clip was not capped back to the trimmed source duration, so plugin tail/length extension can remain audible.");
+            }
 
-            inputs.push_back({ processedWav, startOffsetSeconds, intendedDurationSeconds, renderGain });
-            log(callbacks, sourceKindTitle + " AudioClip VST3 effect processed for track: " + track->getName() + " -> " + processedWav.string());
+            inputs.push_back({ processedWav, startOffsetSeconds, intendedDurationSeconds + kEffectSlotTailOverscanSeconds, renderGain });
+            log(callbacks, sourceKindTitle + " AudioClip Effect Slot processed for track: " + track->getName() + " -> " + processedWav.string());
             ++clipIndex;
         }
 
@@ -610,10 +615,26 @@ namespace
 
         if (backend == mw::core::SampleBackendType::SF2
             || backend == mw::core::SampleBackendType::SFZ
-            || backend == mw::core::SampleBackendType::VST3)
+            || backend == mw::core::SampleBackendType::VST3
+            || backend == mw::core::SampleBackendType::CLAP)
             return backend;
 
         return fallbackBackendForJob(job);
+    }
+
+    bool projectHasClapInstrumentTracks(const mw::audio::RenderJob& job)
+    {
+        return std::any_of(
+            job.project.getTracks().begin(),
+            job.project.getTracks().end(),
+            [](const auto& track)
+            {
+                return !track.isAudioClipTrack()
+                    && !track.getMuted()
+                    && !track.getNotes().empty()
+                    && track.getInstrument().backendType == mw::core::SampleBackendType::CLAP;
+            }
+        );
     }
 
     bool projectHasPerTrackBackends(const mw::audio::RenderJob& job)
@@ -670,7 +691,8 @@ namespace
             const auto backend = resolveTrackRenderBackend(job, track);
             if (backend == mw::core::SampleBackendType::SF2
                 || backend == mw::core::SampleBackendType::SFZ
-                || backend == mw::core::SampleBackendType::VST3)
+                || backend == mw::core::SampleBackendType::VST3
+                || backend == mw::core::SampleBackendType::CLAP)
                 ++count;
         }
 
@@ -868,12 +890,13 @@ namespace
             const auto trackBackend = resolveTrackRenderBackend(job, track);
             if (trackBackend != mw::core::SampleBackendType::SF2
                 && trackBackend != mw::core::SampleBackendType::SFZ
-                && trackBackend != mw::core::SampleBackendType::VST3)
+                && trackBackend != mw::core::SampleBackendType::VST3
+                && trackBackend != mw::core::SampleBackendType::CLAP)
                 continue;
 
             auto stemProject = makeSingleTrackProject(job.project, track);
             for (auto& stemTrack : stemProject.getTracks())
-                stemTrack.getMixerSettings().volume = std::clamp(stemTrack.getMixerSettings().volume * masterVolume, 0.0f, 1.5f);
+                stemTrack.getMixerSettings().volume = mw::audio::sanitizeMainUiGain(stemTrack.getMixerSettings().volume * static_cast<float>(masterVolume));
 
             if (trackBackend == mw::core::SampleBackendType::SFZ)
             {
@@ -966,6 +989,29 @@ namespace
             }
             stemRendered = vstResult.success;
         }
+        else if (task.backend == mw::core::SampleBackendType::CLAP)
+        {
+            status(callbacks, "Rendering CLAP instrument stem: " + task.trackName);
+
+            mw::clap::ClapInstrumentRenderRequest request;
+            request.track = task.stemProject.getTracks().front();
+            request.tempoBpm = task.stemProject.getTempoBpm();
+            request.sampleRate = job.sampleRate;
+            request.channelCount = job.channelCount;
+            request.blockSize = 512;
+            request.tailSeconds = 4.0;
+            request.wavOutputPath = task.stemWav;
+            request.cancelRequested = &cancelRequested;
+
+            const auto clapResult = mw::clap::ClapInstrumentHost::renderTrackToWav(request);
+            log(callbacks, clapResult.message);
+            if (clapResult.cancelled)
+            {
+                result.cancelled = true;
+                return result;
+            }
+            stemRendered = clapResult.success;
+        }
         else if (task.backend == mw::core::SampleBackendType::SFZ)
         {
             const auto validation = mw::audio::SfzValidator::validateSampleReferences(task.libraryPath);
@@ -1025,14 +1071,14 @@ namespace
         const auto& renderedTrack = task.stemProject.getTracks().front();
         if (mw::vst::VstInstrumentHost::trackHasEnabledVstEffect(renderedTrack))
         {
-            status(callbacks, "Processing VST3 effect chain: " + task.trackName);
+            status(callbacks, "Processing Effect Slot chain: " + task.trackName);
 
             mw::vst::VstEffectProcessRequest effectRequest;
             effectRequest.track = renderedTrack;
             effectRequest.inputWavPath = task.stemWav;
             effectRequest.outputWavPath = task.stemWav;
             effectRequest.blockSize = 512;
-            effectRequest.tailSeconds = 2.0;
+            effectRequest.tailSeconds = kEffectSlotTailOverscanSeconds;
             effectRequest.cancelRequested = &cancelRequested;
 
             const auto effectResult = mw::vst::VstInstrumentHost::processWavWithTrackEffectChain(effectRequest);
@@ -1044,7 +1090,7 @@ namespace
             }
             if (!effectResult.success)
             {
-                result.errorMessage = "Failed to process VST3 effect chain for track: " + task.trackName;
+                result.errorMessage = "Failed to process Effect Slot chain for track: " + task.trackName;
                 return result;
             }
         }
@@ -1084,7 +1130,7 @@ namespace mw::audio
         auto renderProject = job.project;
 
         for (auto& track : renderProject.getTracks())
-            track.getMixerSettings().volume = std::clamp(track.getMixerSettings().volume * job.masterVolume, 0.0f, 1.5f);
+            track.getMixerSettings().volume = mw::audio::sanitizeMainUiGain(track.getMixerSettings().volume * static_cast<float>(job.masterVolume));
 
         // Render actions create audio/MIDI exports only. .mwproj files are written only by Save Project / Save As.
         result.projectPath.clear();
@@ -1100,16 +1146,19 @@ namespace mw::audio
         const int eligibleStemCount = countEligibleStemTracks(job);
         const int prospectiveWorkerCount = resolveRenderWorkerCount(job, eligibleStemCount);
         const bool hasTrackVstEffectChains = projectHasEnabledVstEffectChains(job);
-        const bool useStemRendering = hasTrackVstEffectChains || projectHasPerTrackBackends(job) || (prospectiveWorkerCount > 1 && eligibleStemCount > 1);
+        const bool hasClapInstrumentTracks = projectHasClapInstrumentTracks(job);
+        const bool useStemRendering = hasTrackVstEffectChains || hasClapInstrumentTracks || projectHasPerTrackBackends(job) || (prospectiveWorkerCount > 1 && eligibleStemCount > 1);
 
         if (useStemRendering)
         {
             status(callbacks, "Preparing mixed stem render...");
             log(callbacks, hasTrackVstEffectChains
-                ? "Enabled VST3 effect chains detected. Rendering stems so effects remain track-owned."
-                : (projectHasPerTrackBackends(job)
-                    ? "Per-track backend assignments detected. Rendering stems."
-                    : "Multiple renderable tracks detected. Rendering independent stems with the Parallel Stem Renders setting."));
+                ? "Enabled Effect Slot chains detected. Rendering stems so effects remain track-owned."
+                : (hasClapInstrumentTracks
+                    ? "CLAP instrument assignments detected. Rendering stems so CLAP instruments remain track-owned."
+                    : (projectHasPerTrackBackends(job)
+                        ? "Per-track backend assignments detected. Rendering stems."
+                        : "Multiple renderable tracks detected. Rendering independent stems with the Parallel Stem Renders setting.")));
 
             const auto stemFolder = job.exportFolder / (job.baseFileName + "_stems");
             std::error_code ignored;

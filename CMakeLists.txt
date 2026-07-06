@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(PoorMansStudio VERSION 0.64.0)
+project(PoorMansStudio VERSION 0.66.0)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,7 +23,7 @@ add_subdirectory(${JUCE_DIR} external/JUCE-build)
 juce_add_gui_app(PoorMansStudio
     PRODUCT_NAME "Poor Man's Studio"
     COMPANY_NAME "PoorMansStudio"
-    VERSION "0.64.0"
+    VERSION "0.66.0"
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/resources/app_icon_512.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/resources/app_icon_256.png"
 )
@@ -57,6 +57,18 @@ target_sources(PoorMansStudio PRIVATE
 
     src/vst/VstPluginTypes.cpp
     src/vst/VstPluginScanner.cpp
+
+    src/clap/ClapPluginTypes.cpp
+    src/clap/ClapPluginScanner.cpp
+    src/clap/ClapEffectHost.cpp
+    src/clap/ClapInstrumentHost.cpp
+    src/clap/ClapLiveInstrumentSession.cpp
+    src/clap/ClapLiveEffectSession.cpp
+    src/clap/ClapLivePlaybackScheduler.cpp
+    src/clap/ClapLiveCallbackBridge.cpp
+    src/clap/ClapLiveDirectPreviewEngine.cpp
+    src/clap/ClapEffectEditorHost.cpp
+    src/clap/ClapSnapshotStore.cpp
     src/vst/VstGraphicsProfile.cpp
     src/vst/VstInstrumentHost.cpp
     src/vst/VstSnapshotStore.cpp
@@ -96,12 +108,13 @@ target_link_libraries(PoorMansStudio PRIVATE
     juce::juce_audio_utils
     juce::juce_audio_processors
     PoorMansStudioAssets
+    ${CMAKE_DL_LIBS}
 )
 
 juce_add_console_app(PoorMansStudioVstHost
     PRODUCT_NAME "PoorMansStudioVstHost"
     COMPANY_NAME "PoorMansStudio"
-    VERSION "0.64.0"
+    VERSION "0.66.0"
 )
 
 target_sources(PoorMansStudioVstHost PRIVATE
@@ -133,12 +146,48 @@ target_link_libraries(PoorMansStudioVstHost PRIVATE
     juce::juce_audio_processors
 )
 
+
+
+juce_add_console_app(PoorMansStudioClapHost
+    PRODUCT_NAME "PoorMansStudioClapHost"
+    COMPANY_NAME "PoorMansStudio"
+    VERSION "0.66.0"
+)
+
+target_sources(PoorMansStudioClapHost PRIVATE
+    src/clap_host_helper/PoorMansStudioClapHostMain.cpp
+    src/app/AppVersion.h
+
+    src/app/AppPaths.cpp
+
+    src/clap/ClapPluginTypes.cpp
+    src/clap/ClapPluginScanner.cpp
+    src/clap/ClapAbiProbe.cpp
+)
+
+target_include_directories(PoorMansStudioClapHost PRIVATE
+    src
+)
+
+target_compile_definitions(PoorMansStudioClapHost PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:PoorMansStudioClapHost,JUCE_PRODUCT_NAME>"
+    JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:PoorMansStudioClapHost,JUCE_VERSION>"
+)
+
+target_link_libraries(PoorMansStudioClapHost PRIVATE
+    juce::juce_core
+    ${CMAKE_DL_LIBS}
+)
+
 if (WIN32)
     target_link_libraries(PoorMansStudio PRIVATE winmm dxgi)
     target_link_libraries(PoorMansStudioVstHost PRIVATE winmm)
+    target_link_libraries(PoorMansStudioClapHost PRIVATE winmm)
 endif()
 
-message(STATUS "PoorMansStudio v0.64.0 configured successfully")
+message(STATUS "PoorMansStudio v0.66.0 configured successfully")
 
 
 # Copy the built executable to a stable runtime location.
@@ -162,4 +211,16 @@ add_custom_command(TARGET PoorMansStudioVstHost POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "$<TARGET_FILE:PoorMansStudioVstHost>"
         "${CMAKE_CURRENT_SOURCE_DIR}/workspace/vst_host/$<TARGET_FILE_NAME:PoorMansStudioVstHost>"
+)
+
+
+# Copy the CLAP host helper to its reserved runtime/helper location:
+#   workspace/clap_host/PoorMansStudioClapHost.exe
+add_custom_command(TARGET PoorMansStudioClapHost POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/workspace/clap_host"
+
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_FILE:PoorMansStudioClapHost>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/workspace/clap_host/$<TARGET_FILE_NAME:PoorMansStudioClapHost>"
 )

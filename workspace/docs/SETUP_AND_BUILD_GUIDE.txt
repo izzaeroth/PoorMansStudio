@@ -15,7 +15,21 @@ Desktop development with C++ workload	Yes	Installs MSVC compiler, Windows SDK, a
 CMake	Yes	Generates Visual Studio build files from CMakeLists.txt
 Git for Windows	Recommended	Cloning, version control, tags, and source management
 JUCE source tree	Yes	Audio/application framework used by the app
-VST3 plugins	Optional for app launch, needed for VST testing	Used to test instrument/effect scanning and hosting
+VST3 plugins	Optional for app launch, needed for VST testing	Used to test VST3 instrument/effect scanning and hosting
+CLAP plugins	Optional for app launch, needed for CLAP testing	Used to test CLAP instrument/effect scanning, direct preview, and hosting
+Current tested tool versions
+
+Shawn's current local toolchain snapshot:
+
+Tool	Current local version / note
+FluidSynth	2.5.6
+JUCE	8.0.14
+CMake	4.4.0-rc3
+FFmpeg	Latest available Windows build in the workspace
+Visual Studio / MSVC	Visual Studio with x64 MSVC build tools; recent local build logs used MSVC 14.51.36231
+
+These are the current versions to mention when diagnosing build or runtime issues. Other nearby versions may still work, but compile issues should be checked against this snapshot first.
+
 2. Recommended Folder Layout
 
 Use a short path with no special characters.
@@ -57,7 +71,7 @@ Confirm that Desktop development with C++ is checked.
 
 4. Install CMake
 
-Install the current stable Windows CMake installer.
+Install CMake. Shawn's current local setup uses CMake 4.4.0-rc3.
 
 During setup, choose one of these PATH options:
 
@@ -73,7 +87,9 @@ cmake --version
 
 Expected result:
 
-cmake version ...
+cmake version 4.4.0-rc3
+
+A newer stable CMake may also work, but when comparing build logs, treat 4.4.0-rc3 as the current local reference.
 
 If Windows says cmake is not recognized, close and reopen Command Prompt. If it still fails, reinstall CMake and enable the PATH option.
 
@@ -96,7 +112,7 @@ Verify installation:
 git --version
 6. Get JUCE
 
-Poor Man’s Studio uses JUCE as its application/audio framework.
+Poor Man’s Studio uses JUCE as its application/audio framework. Shawn's current local setup uses JUCE 8.0.14.
 
 Recommended folder:
 
@@ -114,6 +130,8 @@ Extract it to:
 C:\Dev\JUCE
 Confirm this file exists:
 C:\Dev\JUCE\CMakeLists.txt
+
+For the current reference setup, confirm you are using JUCE 8.0.14.
 
 If that file is missing, the folder is probably nested one level too deep, such as:
 
@@ -148,7 +166,7 @@ From a regular Command Prompt:
 cd C:\Dev\PoorMansStudio
 cmake -S . -B builds -G "Visual Studio 17 2022" -A x64
 
-If using a newer Visual Studio generator, adjust the generator name as needed.
+If using a newer Visual Studio generator, adjust the generator name as needed. With newer Visual Studio/MSVC installations, it is often easiest to let CMake auto-detect the generator.
 
 For example:
 
@@ -211,8 +229,8 @@ Important folders:
 
 Folder	Purpose
 workspace/docs	User guide and setup/build guide
-workspace/vst3	VST-related runtime files and notes
-workspace/vst3/test	VST test WAV used by Test Effect
+workspace/vst3	VST-related runtime files, notes, and shared plugin test sample
+workspace/vst3/test	Shared plugin test WAV used by VST3/CLAP Test Effect and related plugin test workflows
 workspace/vst3/snapshots	VST effect snapshot files
 workspace/temp	Temporary runtime work
 workspace/projects	Saved projects
@@ -220,25 +238,56 @@ workspace/settings	Local runtime settings
 
 Do not commit local runtime junk unless intentionally part of the source package.
 
-13. VST3 Plugin Setup for Testing
+13. Runtime Tool Setup: FluidSynth and FFmpeg
 
-Poor Man’s Studio can scan VST3 instruments and effects.
+Poor Man's Studio uses local runtime tools for several render/import/export workflows. Shawn's current local versions are:
+
+Tool	Current local version / note
+FluidSynth	2.5.6
+FFmpeg	Latest available Windows build in the workspace
+
+Recommended workspace locations:
+
+workspace\fluidsynth
+workspace\ffmpeg
+
+When diagnosing render, import, export, or audio-conversion problems, first confirm that the app is resolving the expected FluidSynth and FFmpeg executables from the workspace.
+
+14. VST3 and CLAP Plugin Setup for Testing
+
+Poor Man’s Studio can scan VST3 and CLAP instruments and effects.
 
 Common Windows VST3 locations:
 
 C:\Program Files\Common Files\VST3
 C:\Program Files\VST3
 
-Typical workflow:
+Common Windows CLAP locations:
+
+C:\Program Files\Common Files\CLAP
+
+Typical VST3 workflow:
 
 Install one or more VST3 plugins.
 Open Poor Man’s Studio.
-Use the VST Plugin Manager or VST scan controls.
+Use the VST3 Plugin Manager or VST3 scan controls.
 Scan the folder containing .vst3 plugins.
 Confirm plugins appear as instruments or effects.
-Assign an instrument to a MIDI track or assign effects to VST Effect Slot 1/2.
+Assign an instrument to a MIDI track or assign effects to Effect Slot 1/2.
 Use preview/export to test offline processing.
-14. Testing VST Instruments
+
+Typical CLAP workflow:
+
+Install one or more CLAP plugins.
+Open Poor Man’s Studio.
+Use the CLAP Plugin Manager or CLAP scan controls.
+Scan the folder containing .clap plugins.
+Confirm plugins appear as instruments or effects.
+Assign a CLAP Instrument to a MIDI track or assign CLAP Effect entries to Effect Slot 1/2.
+Use Preview Track or Preview Project to test direct CLAP preview when safe; mixed or unsupported projects fall back to the rendered preview path.
+Open CLAP Settings to check Plugin Graphics Adapter, Max Open CLAP Windows, Safe CLAP Plugin UI Mode, and Refresh Adapter List.
+
+15. Testing VST Instruments
 
 Basic instrument test:
 
@@ -251,7 +300,7 @@ Render/export to confirm the instrument is included.
 
 The VST instrument title bar should include track context so it is clear which track owns the editor.
 
-15. Testing VST Effects
+16. Testing VST Effects
 
 Basic effect test:
 
@@ -274,7 +323,7 @@ Preview/export.
 Processing order:
 
 source track → VST Effect 1 → VST Effect 2 → preview/export
-16. AudioClip Import and Recording Test
+17. AudioClip Import and Recording Test
 
 Imported and recorded AudioClip tracks should behave the same for VST effect processing.
 
@@ -287,7 +336,7 @@ Save Project	Staged media is committed into the saved project folder
 Discard changes	Active staged media is cleaned up
 Preview/export	Enabled VST effects are applied to temporary processed files
 Source audio	Remains dry and unchanged
-17. Clean Rebuild
+18. Clean Rebuild
 
 If the build becomes inconsistent, remove the build folder and regenerate.
 
@@ -298,7 +347,7 @@ cmake --build builds --config Release
 
 Do not delete the src or workspace/docs folders.
 
-18. Common Problems
+19. Common Problems
 cmake is not recognized
 
 Cause:
@@ -336,13 +385,13 @@ Open Visual Studio Installer.
 Modify Visual Studio.
 Install a Windows 10 or Windows 11 SDK.
 Reconfigure CMake.
-Build succeeds but app cannot find VST test WAV
+Build succeeds but app cannot find the shared plugin test WAV
 
 Check that this file exists:
 
 workspace\vst3\test\pms_vst_effect_test_sample.wav
 
-This file should remain a normal runtime file. It should not be embedded into BinaryData.
+This file should remain a normal runtime file. It should not be embedded into BinaryData. VST3 and CLAP effect test workflows use this sample as the shared audio source; instrument test workflows render through the current plugin state when they need to reflect instrument tweaks.
 
 VST plugins do not appear
 
@@ -365,7 +414,7 @@ workspace\projects\<project name>\input\audio\imported
 
 If imported audio creates a project folder before saving, that is not expected.
 
-19. Packaging Rules
+20. Packaging Rules
 
 When creating a source bundle, exclude:
 
@@ -390,23 +439,26 @@ workspace\vst3\test\pms_vst_effect_test_sample.wav
 
 The continuation handoff file should be provided separately, not inside the source ZIP.
 
-20. Quick Build Checklist
+21. Quick Build Checklist
 
 Use this checklist for a fresh machine:
 
 [ ] Install Visual Studio with Desktop development with C++
-[ ] Install CMake and add it to PATH
+[ ] Install CMake 4.4.0-rc3 or compatible and add it to PATH
 [ ] Install Git for Windows
-[ ] Download or clone JUCE
+[ ] Download or clone JUCE 8.0.14
 [ ] Download or clone Poor Man’s Studio
 [ ] Confirm CMakeLists.txt exists at the project root
 [ ] Configure with CMake
 [ ] Build Debug or Release
-[ ] Launch the app
+[ ] Confirm FluidSynth 2.5.6 and latest FFmpeg are available in the workspace, then launch the app
 [ ] Scan VST3 plugins
-[ ] Test VST instrument
-[ ] Test VST Effect Slot 1
-[ ] Test VST Effect Slot 2
+[ ] Scan CLAP plugins
+[ ] Test VST3 instrument
+[ ] Test VST3 Effect Slot 1
+[ ] Test VST3 Effect Slot 2
+[ ] Test CLAP Instrument
+[ ] Test CLAP Effect Slot 1 / Slot 2
 [ ] Test imported AudioClip preview/export
 [ ] Test recorded AudioClip preview/export
 [ ] Save, reopen, and verify project media paths
