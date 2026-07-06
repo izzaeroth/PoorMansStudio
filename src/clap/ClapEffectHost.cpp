@@ -892,7 +892,7 @@ namespace mw::clap
             host.name = "Poor Man's Studio CLAP Effect Host";
             host.vendor = "Poor Man's Studio";
             host.url = "";
-            host.version = "0.66.0";
+            host.version = "0.66.1";
             host.get_extension = hostGetExtension;
             host.request_restart = hostRequestRestart;
             host.request_process = hostRequestProcess;

@@ -599,6 +599,14 @@ namespace mw::clap
         if (impl == nullptr || impl->plugin == nullptr || impl->gui == nullptr || !impl->guiCreated)
             return true;
 
+        // Some CLAP plugins advertise fixed-size GUIs. Treat that flag as
+        // authoritative and do not send set_size() during host-window resize;
+        // several plugins become visually detached or unstable if a fixed-size
+        // editor is forced to resize. The JUCE host window can still be resized
+        // around the fixed native viewport, matching the VST3 editor behavior.
+        if (!impl->canResizeEditor)
+            return true;
+
         std::uint32_t adjustedWidth = std::max<std::uint32_t>(120, widthIn);
         std::uint32_t adjustedHeight = std::max<std::uint32_t>(90, heightIn);
 
@@ -747,7 +755,7 @@ namespace mw::clap
             impl->host.name = "Poor Man's Studio CLAP Editor Host";
             impl->host.vendor = "Poor Man's Studio";
             impl->host.url = "";
-            impl->host.version = "0.66.0";
+            impl->host.version = "0.66.1";
             impl->host.get_extension = hostGetExtension;
             impl->host.request_restart = hostRequestRestart;
             impl->host.request_process = hostRequestProcess;

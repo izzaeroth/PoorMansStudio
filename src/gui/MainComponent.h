@@ -778,8 +778,10 @@ namespace mw::gui
         void saveUserSettingsNow();
         void configureHelperBubbles();
         void setHelperBubblesEnabled(bool enabled);
-        void setVstCompatibilityWarningsEnabled(bool enabled);
+        void setPluginCompatibilityWarningsEnabled(bool enabled);
+        bool pluginCompatibilityWarningsEnabled() const;
         void showVstExperimentalWarningIfNeeded();
+        void showClapExperimentalWarningIfNeeded();
         bool selectedTrackHasAppliedVstPlugin() const;
         bool selectedTrackHasAppliedClapInstrument() const;
         bool selectedTrackHasOpenableVstEffect(int effectSlotIndex) const;
@@ -1304,6 +1306,7 @@ namespace mw::gui
         int vstMaxOpenPluginWindows = 4;
         bool vstExperimentalWarningAcknowledged = false;
         bool clapCompatibilityWarningsEnabled = true;
+        bool clapExperimentalWarningAcknowledged = false;
         bool clapSafePluginUiMode = false;
         int clapMaxOpenPluginWindows = 4;
         mw::vst::GraphicsProfile vstGraphicsProfile;

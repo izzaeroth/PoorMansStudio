@@ -41,6 +41,7 @@ namespace mw::app
         bool vstExperimentalWarningAcknowledged = false;
 
         bool clapCompatibilityWarningsEnabled = true;
+        bool clapExperimentalWarningAcknowledged = false;
         bool clapSafePluginUiMode = false;
         int clapMaxOpenPluginWindows = 4;
     };

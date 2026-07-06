@@ -1819,7 +1819,7 @@ namespace
                            juce::String safeModeTextIn = "Safe Plugin UI Mode",
                            juce::String safeModeTooltipIn = "Safe Plugin UI Mode opens VST plugin editors in a more cautious way to reduce crashes or unstable behavior. Plugin windows may open a little slower or with reduced UI behavior. Recommended if a plugin editor is having display issues.",
                            juce::String helpTextIn = "System Default / Auto lets Windows and the plugin decide. Adapter choices are a preference for plugin editor windows, not a guarantee. VST3 uses this now; future CLAP editor hosting can use the same preference.",
-                           juce::String detailsFooterTextIn = "Use Help > VST Plugin Compatibility Warnings to toggle warning popups.\nCompatibility warnings are non-blocking. The selected adapter is the preferred graphics adapter for plugin editor windows. VST3 uses this now; future CLAP editor hosting can use the same preference. Some plugins, drivers, or Windows graphics settings may still choose a different rendering path. This does not affect audio render quality.",
+                           juce::String detailsFooterTextIn = "Use Help > Plugin Compatibility Warnings to toggle VST3 and CLAP warning popups.\nCompatibility warnings are non-blocking. The selected adapter is the preferred graphics adapter for plugin editor windows. VST3 uses this now; future CLAP editor hosting can use the same preference. Some plugins, drivers, or Windows graphics settings may still choose a different rendering path. This does not affect audio render quality.",
                            juce::String extraToggleTextIn = {},
                            bool extraToggleInitialStateIn = false,
                            juce::String extraToggleTooltipIn = {})
@@ -5176,9 +5176,9 @@ namespace
                     redoButton.setTooltip("Redo the most recently undone Track Manager edit.");
                     openPianoRollButton.setTooltip("Open the selected MIDI track in the editable Piano Roll. AudioClip tracks use AudioClip Editor instead.");
                     audioClipEditorButton.setTooltip("Open the selected AudioClip track in the AudioClip Editor for non-destructive source trim metadata.");
-                    previewTrackButton.setTooltip("Preview the selected track. CLAP instrument tracks may play directly when safe; otherwise the app uses the rendered preview fallback.");
+                    previewTrackButton.setTooltip("Render and play a temporary preview of the selected track.");
                     previewSequenceButton.setTooltip("Render and play a temporary preview of the selected sequence.");
-                    previewProjectButton.setTooltip("Preview the full project from Track Manager using current applied track settings. Compatible CLAP-only projects may play directly; mixed or unsupported projects use the rendered preview fallback.");
+                    previewProjectButton.setTooltip("Render and play a temporary preview of the full project from Track Manager using current applied track settings.");
                     startFromFileButton.setTooltip("Import a file as the start of a new project.");
                     importSequenceButton.setTooltip("Add another imported file as a new sequence.");
                     applySectionStartButton.setTooltip("Apply the typed Sequence Start beat to the selected sequence.");
@@ -7774,8 +7774,7 @@ namespace mw::gui
         {
             for (const auto& track : project.getTracks())
             {
-                if (track.getInstrument().backendType == mw::core::SampleBackendType::VST3
-                    || track.getInstrument().backendType == mw::core::SampleBackendType::CLAP)
+                if (track.getInstrument().backendType == mw::core::SampleBackendType::VST3)
                     return true;
 
                 const auto& effects = track.getVstEffects();
@@ -7784,6 +7783,29 @@ namespace mw::gui
                     const auto* slot = effects.slot(slotIndex);
                     if (slot != nullptr
                         && effects.slotEnabled(slotIndex)
+                        && slot->backendType == mw::core::EffectSlotBackendType::VST3
+                        && slot->plugin.hasPluginIdentity())
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        bool projectContainsClapPlugin(const mw::core::Project& project)
+        {
+            for (const auto& track : project.getTracks())
+            {
+                if (track.getInstrument().backendType == mw::core::SampleBackendType::CLAP)
+                    return true;
+
+                const auto& effects = track.getVstEffects();
+                for (std::size_t slotIndex = 0; slotIndex < mw::core::maxVstEffectSlots; ++slotIndex)
+                {
+                    const auto* slot = effects.slot(slotIndex);
+                    if (slot != nullptr
+                        && effects.slotEnabled(slotIndex)
+                        && slot->backendType == mw::core::EffectSlotBackendType::CLAP
                         && slot->plugin.hasPluginIdentity())
                         return true;
                 }
@@ -8541,7 +8563,7 @@ namespace mw::gui
             menuVstCloseAllWindows,
             menuVstRefreshGraphics,
             menuVstHostHelperStatus,
-            menuToggleVstCompatibilityWarnings,
+            menuTogglePluginCompatibilityWarnings,
 
             menuClapScan = 1581,
             menuClapPluginManager,
@@ -8944,7 +8966,7 @@ namespace mw::gui
                 menu.addItem(menuSetupGuide, "Show Setup / Build Guide File");
                 menu.addSeparator();
                 menu.addItem(menuToggleHelperBubbles, "Helper Bubbles", true, helperBubblesEnabled);
-                menu.addItem(menuToggleVstCompatibilityWarnings, "VST Plugin Compatibility Warnings", true, vstCompatibilityWarningsEnabled);
+                menu.addItem(menuTogglePluginCompatibilityWarnings, "Plugin Compatibility Warnings", true, pluginCompatibilityWarningsEnabled());
                 menu.addSeparator();
                 menu.addItem(menuAbout, "About Poor Man's Studio");
                 break;
@@ -9120,7 +9142,7 @@ namespace mw::gui
             case menuVstOpenSelectedTrackUi: openSelectedTrackVstPluginUi(); break;
             case menuVstOpenSelectedTrackEffectUi: openSelectedTrackVstEffectUi(0); break;
             case menuVstCloseAllWindows: closeAllVstPluginWindows(); break;
-            case menuToggleVstCompatibilityWarnings: setVstCompatibilityWarningsEnabled(!vstCompatibilityWarningsEnabled); break;
+            case menuTogglePluginCompatibilityWarnings: setPluginCompatibilityWarningsEnabled(!pluginCompatibilityWarningsEnabled()); break;
 
             case menuClapScan: scanClapPlugins(true); break;
             case menuClapPluginManager: openClapPluginManagerWindow(); break;
@@ -9200,6 +9222,7 @@ namespace mw::gui
         vstMaxOpenPluginWindows = sanitizeMaxOpenVstPluginWindows(startupPreferences.vstMaxOpenPluginWindows);
         vstExperimentalWarningAcknowledged = startupPreferences.vstExperimentalWarningAcknowledged;
         clapCompatibilityWarningsEnabled = startupPreferences.clapCompatibilityWarningsEnabled;
+        clapExperimentalWarningAcknowledged = startupPreferences.clapExperimentalWarningAcknowledged;
         clapSafePluginUiMode = startupPreferences.clapSafePluginUiMode;
         clapMaxOpenPluginWindows = sanitizeMaxOpenVstPluginWindows(startupPreferences.clapMaxOpenPluginWindows);
         vstGraphicsProfile.detected = startupPreferences.vstGraphicsProfileDetected;
@@ -10107,8 +10130,8 @@ namespace mw::gui
         redoPianoRollButton.setTooltip("Redo the most recently undone Piano Roll note edit.");
         clearPianoRollSelectionButton.setTooltip("Clear the current Piano Roll note selection.");
         openPianoRollPreviewPlayerButton.setTooltip("Open the Piano Roll Preview Player window.");
-        playProjectPreviewButton.setTooltip("Preview the current project. Compatible CLAP-only projects may play directly; mixed or unsupported projects use the rendered preview fallback.");
-        stopProjectPreviewButton.setTooltip("Stop the current project preview playback, including direct CLAP preview when active.");
+        playProjectPreviewButton.setTooltip("Render and play a temporary preview of the current project.");
+        stopProjectPreviewButton.setTooltip("Stop the current project preview playback.");
         renderButton.setTooltip("Render the full project to the selected output format.");
         renderSettingsButton.setTooltip("Open render settings for stem-file retention and render-output cleanup behavior.");
         renderSelectedTrackButton.setTooltip("Render only the selected track.");
@@ -10151,8 +10174,8 @@ namespace mw::gui
         labelAndControl(vstEffectLabel, vstEffectCombo, "Choose the selected track's Effect Slot 1 from supported VST3 effects or supported CLAP effects. Assigned effects process during preview/export when enabled; compatible CLAP effects can also run in the live preview path. Use Apply Track Settings for assignment/Enable/Bypass.");
         labelAndControl(vstEffect2Label, vstEffect2Combo, "Choose the selected track's Effect Slot 2. VST3 and CLAP slot 2 run after slot 1 when assigned, enabled, and not bypassed.");
         vstEffectStatusLabel.setTooltip("Detailed Effect Slot chain status is written to the main log.");
-        labelAndControl(trackVolumeLabel, trackVolumeSlider, "Set the selected track volume from 0.00 to 3.00. Values above 1.00 boost gain and may clip.");
-        labelAndControl(masterVolumeLabel, masterVolumeSlider, "Set the master output volume from 0.00 to 3.00. Values above 1.00 boost gain and may clip.");
+        labelAndControl(trackVolumeLabel, trackVolumeSlider, "Set the volume for the selected track. Values above 1.00 boost gain and may clip.");
+        labelAndControl(masterVolumeLabel, masterVolumeSlider, "Set the master output volume for the project. Values above 1.00 boost gain and may clip.");
         muteToggle.setTooltip("Mute the selected track when previewing or rendering.");
         soloToggle.setTooltip("Solo the selected track when previewing or rendering.");
         labelAndControl(tempoLabel, tempoBox, "Project tempo in beats per minute.");
@@ -10182,14 +10205,24 @@ namespace mw::gui
     }
 
 
-    void MainComponent::setVstCompatibilityWarningsEnabled(bool enabled)
+    bool MainComponent::pluginCompatibilityWarningsEnabled() const
+    {
+        return vstCompatibilityWarningsEnabled && clapCompatibilityWarningsEnabled;
+    }
+
+
+    void MainComponent::setPluginCompatibilityWarningsEnabled(bool enabled)
     {
         vstCompatibilityWarningsEnabled = enabled;
+        clapCompatibilityWarningsEnabled = enabled;
 
-        if (!mw::app::UserPreferencesStore::saveBoolValue("vstCompatibilityWarningsEnabled", enabled))
-            logMessage("ERROR: Failed to save VST compatibility warning preference.");
+        if (!mw::app::UserPreferencesStore::saveValues({
+                { "vstCompatibilityWarningsEnabled", enabled ? "1" : "0" },
+                { "clapCompatibilityWarningsEnabled", enabled ? "1" : "0" }
+            }))
+            logMessage("ERROR: Failed to save plugin compatibility warning preferences.");
 
-        logMessage(enabled ? "VST compatibility warnings enabled." : "VST compatibility warnings disabled.");
+        logMessage(enabled ? "Plugin compatibility warnings enabled for VST3 and CLAP." : "Plugin compatibility warnings disabled for VST3 and CLAP.");
         menuBar.repaint();
     }
 
@@ -10197,6 +10230,9 @@ namespace mw::gui
 
     void MainComponent::showVstExperimentalWarningIfNeeded()
     {
+        if (!vstCompatibilityWarningsEnabled)
+            return;
+
         if (vstExperimentalWarningAcknowledged)
             return;
 
@@ -10215,6 +10251,36 @@ namespace mw::gui
                 logMessage("ERROR: Failed to save plugin experimental warning acknowledgement.");
             else
                 logMessage("Plugin experimental warning acknowledged.");
+        });
+
+        applyPoorMansStudioWindowIcon(*warningWindow, PoorMansStudioWindowIcon::Caution);
+    }
+
+
+
+    void MainComponent::showClapExperimentalWarningIfNeeded()
+    {
+        if (!clapCompatibilityWarningsEnabled)
+            return;
+
+        if (clapExperimentalWarningAcknowledged)
+            return;
+
+        auto preferences = mw::app::UserPreferencesStore::load();
+        if (preferences.clapExperimentalWarningAcknowledged)
+        {
+            clapExperimentalWarningAcknowledged = true;
+            return;
+        }
+
+        auto* warningWindow = new VstProjectDefaultDragonWarningWindow(this, [this]
+        {
+            clapExperimentalWarningAcknowledged = true;
+
+            if (!mw::app::UserPreferencesStore::saveValue("clapExperimentalWarningAcknowledged", "1"))
+                logMessage("ERROR: Failed to save CLAP plugin experimental warning acknowledgement.");
+            else
+                logMessage("CLAP plugin experimental warning acknowledged.");
         });
 
         applyPoorMansStudioWindowIcon(*warningWindow, PoorMansStudioWindowIcon::Caution);
@@ -11593,7 +11659,7 @@ namespace mw::gui
     void MainComponent::scanClapPlugins(bool showSummary)
     {
         if (showSummary)
-            showVstExperimentalWarningIfNeeded();
+            showClapExperimentalWarningIfNeeded();
 
         mw::clap::ClapScanOptions options;
         options.includeWorkspaceFolder = true;
@@ -11694,7 +11760,7 @@ namespace mw::gui
 
     void MainComponent::openClapPluginManagerWindow()
     {
-        showVstExperimentalWarningIfNeeded();
+        showClapExperimentalWarningIfNeeded();
 
         if (detectedClapPlugins.empty())
             scanClapPlugins(false);
@@ -12615,8 +12681,6 @@ namespace mw::gui
 
     void MainComponent::showClapHostHelperStatusWindow()
     {
-        showVstExperimentalWarningIfNeeded();
-
         if (clapHostHelperStatusWindow != nullptr)
         {
             clapHostHelperStatusWindow->toFront(true);
@@ -12641,8 +12705,6 @@ namespace mw::gui
 
     void MainComponent::closeAllClapPluginWindows()
     {
-        showVstExperimentalWarningIfNeeded();
-
         const int closedCount = closePluginEditorWindowGroups(false, true);
 
         if (closedCount > 0)
@@ -12719,8 +12781,6 @@ namespace mw::gui
 
     void MainComponent::openClapSettingsWindow()
     {
-        showVstExperimentalWarningIfNeeded();
-
         if (clapSettingsWindow != nullptr)
         {
             clapSettingsWindow->toFront(true);
@@ -12875,7 +12935,7 @@ namespace mw::gui
         if (!samePluginIdentity)
             closeVstPluginWindowForTrack(index, "Closed open VST plugin window before replacing the track plugin assignment.");
 
-        showVstExperimentalWarningIfNeeded();
+        showClapExperimentalWarningIfNeeded();
 
         auto assignment = currentAssignment;
         applyClapPluginDescriptorToAssignment(assignment, descriptor);
@@ -13008,7 +13068,7 @@ namespace mw::gui
                 return;
             }
 
-            showVstExperimentalWarningIfNeeded();
+            showClapExperimentalWarningIfNeeded();
 
             if (auto found = clapInstrumentEditorWindows.find(index); found != clapInstrumentEditorWindows.end() && found->second != nullptr)
             {
@@ -13060,13 +13120,18 @@ namespace mw::gui
                     if (instance != nullptr && instance->hasGui())
                     {
                         infoLabel.setText("Opening CLAP instrument GUI...", juce::dontSendNotification);
-                        setSize(juce::jlimit(420, 1800, static_cast<int>(instance->width())),
-                                juce::jlimit(300, 1200, static_cast<int>(instance->height())));
+                        nativeEditorSize = juce::Rectangle<int>(
+                            juce::jlimit(420, 1800, static_cast<int>(instance->width())),
+                            juce::jlimit(300, 1200, static_cast<int>(instance->height())));
+                        editorCanResize = !instance->isFloating() && instance->canResize();
+                        setSize(nativeEditorSize.getWidth(), nativeEditorSize.getHeight());
                     }
                     else
                     {
                         infoLabel.setText("This CLAP instrument did not expose an embeddable GUI. Apply Changes can still capture state if the plugin exposes clap.state.", juce::dontSendNotification);
-                        setSize(620, 260);
+                        editorCanResize = true;
+                        nativeEditorSize = juce::Rectangle<int>(620, 260);
+                        setSize(nativeEditorSize.getWidth(), nativeEditorSize.getHeight());
                     }
                 }
 
@@ -13137,17 +13202,20 @@ namespace mw::gui
 
                 void resized() override
                 {
-                    infoLabel.setBounds(getLocalBounds().reduced(18));
+                    if (instance != nullptr && instance->hasGui() && !instance->isFloating() && editorCanResize)
+                    {
+                        std::string error;
+                        const bool resizedOk = instance->resize(static_cast<std::uint32_t>(juce::jmax(1, getWidth())),
+                                                                static_cast<std::uint32_t>(juce::jmax(1, getHeight())),
+                                                                &error);
+                        if (!resizedOk && !error.empty())
+                            setStatus("CLAP instrument editor resize failed: " + juce::String(error));
+                    }
+
+                    infoLabel.setBounds(editorViewportLocalBounds().reduced(18));
 #if JUCE_WINDOWS
                     updateNativeViewportBounds();
 #endif
-                    if (instance != nullptr && instance->hasGui())
-                    {
-                        std::string error;
-                        instance->resize(static_cast<std::uint32_t>(juce::jmax(1, getWidth())),
-                                         static_cast<std::uint32_t>(juce::jmax(1, getHeight())),
-                                         &error);
-                    }
                 }
 
             private:
@@ -13155,6 +13223,23 @@ namespace mw::gui
                 {
                     if (onStatusChanged)
                         onStatusChanged(text);
+                }
+
+                juce::Rectangle<int> editorViewportLocalBounds() const
+                {
+                    if (instance != nullptr && instance->hasGui() && !instance->isFloating())
+                    {
+                        if (editorCanResize)
+                        {
+                            const int width = juce::jlimit(1, juce::jmax(1, getWidth()), static_cast<int>(instance->width()));
+                            const int height = juce::jlimit(1, juce::jmax(1, getHeight()), static_cast<int>(instance->height()));
+                            return juce::Rectangle<int>(0, 0, width, height);
+                        }
+
+                        return nativeEditorSize.withPosition(0, 0);
+                    }
+
+                    return getLocalBounds();
                 }
 
                 void attachAndShowIfNeeded()
@@ -13232,14 +13317,15 @@ namespace mw::gui
                         if (!ensureClapGuiViewportWindowClassRegistered())
                             return false;
 
+                        const auto viewportBounds = editorViewportLocalBounds();
                         nativeViewport = ::CreateWindowExW(WS_EX_NOPARENTNOTIFY,
                                                            clapGuiViewportWindowClassName(),
                                                            L"",
                                                            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
                                                            0,
                                                            0,
-                                                           juce::jmax(1, getWidth()),
-                                                           juce::jmax(1, getHeight()),
+                                                           juce::jmax(1, viewportBounds.getWidth()),
+                                                           juce::jmax(1, viewportBounds.getHeight()),
                                                            parentHwnd,
                                                            nullptr,
                                                            ::GetModuleHandleW(nullptr),
@@ -13273,12 +13359,13 @@ namespace mw::gui
                         return;
                     }
 
-                    const auto screenBounds = getScreenBounds();
-                    POINT topLeft { screenBounds.getX(), screenBounds.getY() };
+                    const auto viewportBounds = editorViewportLocalBounds();
+                    const auto topLeftGlobal = localPointToGlobal(viewportBounds.getTopLeft());
+                    POINT topLeft { topLeftGlobal.x, topLeftGlobal.y };
                     ::ScreenToClient(parentHwnd, &topLeft);
 
-                    const int width = juce::jmax(1, screenBounds.getWidth());
-                    const int height = juce::jmax(1, screenBounds.getHeight());
+                    const int width = juce::jmax(1, viewportBounds.getWidth());
+                    const int height = juce::jmax(1, viewportBounds.getHeight());
                     ::SetWindowPos(nativeViewport,
                                    nullptr,
                                    topLeft.x,
@@ -13306,6 +13393,8 @@ namespace mw::gui
                 std::function<bool(const juce::String&)> onApplyState;
                 std::function<void(const juce::String&)> onStatusChanged;
                 bool attached = false;
+                bool editorCanResize = false;
+                juce::Rectangle<int> nativeEditorSize { 420, 300 };
 #if JUCE_WINDOWS
                 HWND nativeViewport = nullptr;
                 HWND nativeViewportParent = nullptr;
@@ -13512,7 +13601,7 @@ namespace mw::gui
                     logMessage(status + " Track: " + getTrackDisplayName(index));
                 },
                 "Test Instrument",
-                "Render and play a short CLAP instrument test note using the current open editor state without applying it to the project.");
+                "Render and play a short CLAP instrument test note using the current editor state without applying it to the project.");
             *safeHostContentRef = juce::Component::SafePointer<VstPluginEditorHostContent>(hostContent);
             window->setContentOwned(hostContent, true);
             window->centreWithSize(juce::jmax(kMinimumVstEditorHostWidth, hostContent->getWidth() + 30),
@@ -14526,7 +14615,7 @@ namespace mw::gui
                 logMessage(status + " Track: " + getTrackDisplayName(index));
             },
             "Test Instrument",
-            "Render and play a short VST3 instrument test note using the current open editor state without applying it to the project.");
+            "Render and play a short VST3 instrument test note using the current editor state without applying it to the project.");
         *safeHostContentRef = juce::Component::SafePointer<VstPluginEditorHostContent>(hostContent);
         window->setContentOwned(hostContent, true);
         window->centreWithSize(juce::jmax(kMinimumVstEditorHostWidth, hostContent->getWidth() + 30),
@@ -14559,8 +14648,6 @@ namespace mw::gui
         const int slotNumber = safeEffectSlotIndex + 1;
         const int effectWindowKey = index * 10 + safeEffectSlotIndex;
 
-        showVstExperimentalWarningIfNeeded();
-
         // The effect dropdown is an assignment control, not only an enable control.
         // Make sure a newly selected effect is written to this track before opening.
         applySelectedTrackVstEffectSlots();
@@ -14580,6 +14667,11 @@ namespace mw::gui
             updateOpenVstPluginButtonState();
             return;
         }
+
+        if (firstSlot->backendType == mw::core::EffectSlotBackendType::CLAP)
+            showClapExperimentalWarningIfNeeded();
+        else
+            showVstExperimentalWarningIfNeeded();
 
         if (firstSlot->backendType == mw::core::EffectSlotBackendType::CLAP)
         {
@@ -14639,13 +14731,18 @@ namespace mw::gui
                     if (instance != nullptr && instance->hasGui())
                     {
                         infoLabel.setText("Opening CLAP editor GUI...", juce::dontSendNotification);
-                        setSize(juce::jlimit(420, 1800, static_cast<int>(instance->width())),
-                                juce::jlimit(300, 1200, static_cast<int>(instance->height())));
+                        nativeEditorSize = juce::Rectangle<int>(
+                            juce::jlimit(420, 1800, static_cast<int>(instance->width())),
+                            juce::jlimit(300, 1200, static_cast<int>(instance->height())));
+                        editorCanResize = !instance->isFloating() && instance->canResize();
+                        setSize(nativeEditorSize.getWidth(), nativeEditorSize.getHeight());
                     }
                     else
                     {
                         infoLabel.setText("This CLAP effect did not expose an embeddable GUI. Apply Changes can still capture state if the plugin exposes clap.state.", juce::dontSendNotification);
-                        setSize(620, 260);
+                        editorCanResize = true;
+                        nativeEditorSize = juce::Rectangle<int>(620, 260);
+                        setSize(nativeEditorSize.getWidth(), nativeEditorSize.getHeight());
                     }
                 }
 
@@ -14720,17 +14817,20 @@ namespace mw::gui
 
                 void resized() override
                 {
-                    infoLabel.setBounds(getLocalBounds().reduced(18));
+                    if (instance != nullptr && instance->hasGui() && !instance->isFloating() && editorCanResize)
+                    {
+                        std::string error;
+                        const bool resizedOk = instance->resize(static_cast<std::uint32_t>(juce::jmax(1, getWidth())),
+                                                                static_cast<std::uint32_t>(juce::jmax(1, getHeight())),
+                                                                &error);
+                        if (!resizedOk && !error.empty())
+                            setStatus("CLAP editor resize failed: " + juce::String(error));
+                    }
+
+                    infoLabel.setBounds(editorViewportLocalBounds().reduced(18));
 #if JUCE_WINDOWS
                     updateNativeViewportBounds();
 #endif
-                    if (instance != nullptr && instance->hasGui())
-                    {
-                        std::string error;
-                        instance->resize(static_cast<std::uint32_t>(juce::jmax(1, getWidth())),
-                                         static_cast<std::uint32_t>(juce::jmax(1, getHeight())),
-                                         &error);
-                    }
                 }
 
             private:
@@ -14738,6 +14838,23 @@ namespace mw::gui
                 {
                     if (onStatusChanged)
                         onStatusChanged(text);
+                }
+
+                juce::Rectangle<int> editorViewportLocalBounds() const
+                {
+                    if (instance != nullptr && instance->hasGui() && !instance->isFloating())
+                    {
+                        if (editorCanResize)
+                        {
+                            const int width = juce::jlimit(1, juce::jmax(1, getWidth()), static_cast<int>(instance->width()));
+                            const int height = juce::jlimit(1, juce::jmax(1, getHeight()), static_cast<int>(instance->height()));
+                            return juce::Rectangle<int>(0, 0, width, height);
+                        }
+
+                        return nativeEditorSize.withPosition(0, 0);
+                    }
+
+                    return getLocalBounds();
                 }
 
                 void attachAndShowIfNeeded()
@@ -14815,14 +14932,15 @@ namespace mw::gui
                         if (!ensureClapGuiViewportWindowClassRegistered())
                             return false;
 
+                        const auto viewportBounds = editorViewportLocalBounds();
                         nativeViewport = ::CreateWindowExW(WS_EX_NOPARENTNOTIFY,
                                                            clapGuiViewportWindowClassName(),
                                                            L"",
                                                            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
                                                            0,
                                                            0,
-                                                           juce::jmax(1, getWidth()),
-                                                           juce::jmax(1, getHeight()),
+                                                           juce::jmax(1, viewportBounds.getWidth()),
+                                                           juce::jmax(1, viewportBounds.getHeight()),
                                                            parentHwnd,
                                                            nullptr,
                                                            ::GetModuleHandleW(nullptr),
@@ -14856,12 +14974,13 @@ namespace mw::gui
                         return;
                     }
 
-                    const auto screenBounds = getScreenBounds();
-                    POINT topLeft { screenBounds.getX(), screenBounds.getY() };
+                    const auto viewportBounds = editorViewportLocalBounds();
+                    const auto topLeftGlobal = localPointToGlobal(viewportBounds.getTopLeft());
+                    POINT topLeft { topLeftGlobal.x, topLeftGlobal.y };
                     ::ScreenToClient(parentHwnd, &topLeft);
 
-                    const int width = juce::jmax(1, screenBounds.getWidth());
-                    const int height = juce::jmax(1, screenBounds.getHeight());
+                    const int width = juce::jmax(1, viewportBounds.getWidth());
+                    const int height = juce::jmax(1, viewportBounds.getHeight());
                     ::SetWindowPos(nativeViewport,
                                    nullptr,
                                    topLeft.x,
@@ -14890,6 +15009,8 @@ namespace mw::gui
                 std::function<bool(const juce::String&)> onApplyState;
                 std::function<void(const juce::String&)> onStatusChanged;
                 bool attached = false;
+                bool editorCanResize = false;
+                juce::Rectangle<int> nativeEditorSize { 420, 300 };
 #if JUCE_WINDOWS
                 HWND nativeViewport = nullptr;
                 HWND nativeViewportParent = nullptr;
@@ -15843,7 +15964,7 @@ namespace mw::gui
 
     void MainComponent::armSelectedTrackClapLiveEngineSession()
     {
-        showVstExperimentalWarningIfNeeded();
+        showClapExperimentalWarningIfNeeded();
 
         if (!currentProject)
         {
@@ -16073,7 +16194,7 @@ namespace mw::gui
 
     void MainComponent::preflightSelectedTrackClapInstrumentLiveReadiness()
     {
-        showVstExperimentalWarningIfNeeded();
+        showClapExperimentalWarningIfNeeded();
 
         if (!currentProject)
         {
@@ -16559,7 +16680,7 @@ namespace mw::gui
             return false;
         }
 
-        showVstExperimentalWarningIfNeeded();
+        showClapExperimentalWarningIfNeeded();
 
         if (!(clapLiveInstrumentSession != nullptr
               && clapLiveInstrumentSession->isOpen()
@@ -16638,7 +16759,7 @@ namespace mw::gui
         if (clapCandidateCount < 2 || nonClapMidiContentCount > 0 || unsupportedLiveEffectCount > 0)
             return false;
 
-        showVstExperimentalWarningIfNeeded();
+        showClapExperimentalWarningIfNeeded();
         stopClapInstrumentLiveAudition(true);
         closeClapProjectPreviewTrackSessions();
 
@@ -16941,7 +17062,7 @@ namespace mw::gui
 
     void MainComponent::startSelectedTrackClapInstrumentLiveAudition()
     {
-        showVstExperimentalWarningIfNeeded();
+        showClapExperimentalWarningIfNeeded();
 
         if (!currentProject)
         {
@@ -22425,6 +22546,8 @@ void MainComponent::openAudioRecorderWindow()
 
         if (projectContainsVst3Track(job.project))
             showVstExperimentalWarningIfNeeded();
+        if (projectContainsClapPlugin(job.project))
+            showClapExperimentalWarningIfNeeded();
 
         cancelRenderRequested = false;
         setRenderingState(true);
@@ -24108,8 +24231,10 @@ void MainComponent::refreshSoundFontList()
         }
 
         juce::ignoreUnused(selectedProjectDefaultVstPlugin, selectedProjectDefaultClapPlugin);
-        if (appliedProjectBackendId == 3 || appliedProjectBackendId == 4)
+        if (appliedProjectBackendId == 3)
             showVstExperimentalWarningIfNeeded();
+        else if (appliedProjectBackendId == 4)
+            showClapExperimentalWarningIfNeeded();
 
         populateInstrumentCombo();
         populateVstEffectCombo();
@@ -24341,7 +24466,7 @@ void MainComponent::refreshSoundFontList()
         if (auto* combo = alert->getComboBoxComponent("clapInstrument"))
         {
             combo->setSelectedId(1, juce::dontSendNotification);
-            combo->setTooltip("Choose one of the supported CLAP instrument plugins found by the scanner.");
+            combo->setTooltip("Choose one of the supported CLAP Instrument plugins found by the scanner.");
         }
 
         alert->setSize(700, 280);
@@ -24438,7 +24563,7 @@ void MainComponent::refreshSoundFontList()
                 {
                     showScannedClapInstrumentChooserDialog(
                         "Choose Scanned CLAP Instrument",
-                        "Choose one of the supported CLAP instrument plugins found by the scanner for the selected track.",
+                        "Choose one of the supported CLAP Instrument plugins found by the scanner for the selected track.",
                         [this](const mw::clap::ClapPluginDescriptor& plugin)
                         {
                             assignSelectedTrackClapPlugin(plugin);
@@ -25014,9 +25139,10 @@ void MainComponent::refreshSoundFontList()
             return;
         }
 
-        if (assignment.backendType == mw::core::SampleBackendType::VST3
-            || assignment.backendType == mw::core::SampleBackendType::CLAP)
+        if (assignment.backendType == mw::core::SampleBackendType::VST3)
             showVstExperimentalWarningIfNeeded();
+        else if (assignment.backendType == mw::core::SampleBackendType::CLAP)
+            showClapExperimentalWarningIfNeeded();
 
         state.pendingInstrumentAssignment = assignment;
         state.hasPendingInstrumentAssignment = true;
@@ -25073,9 +25199,10 @@ void MainComponent::refreshSoundFontList()
             return false;
         }
 
-        if (assignment.backendType == mw::core::SampleBackendType::VST3
-            || assignment.backendType == mw::core::SampleBackendType::CLAP)
+        if (assignment.backendType == mw::core::SampleBackendType::VST3)
             showVstExperimentalWarningIfNeeded();
+        else if (assignment.backendType == mw::core::SampleBackendType::CLAP)
+            showClapExperimentalWarningIfNeeded();
 
         capturePianoRollInstrumentUndoState(state, "Apply Piano Roll Track Settings");
         track.setInstrumentAssignment(assignment);
@@ -34759,6 +34886,7 @@ void MainComponent::renderPianoRollPreview()
         saveGraphicsAdaptersToCacheFile(vstGraphicsProfile.adapters);
         preferences.vstExperimentalWarningAcknowledged = vstExperimentalWarningAcknowledged;
         preferences.clapCompatibilityWarningsEnabled = clapCompatibilityWarningsEnabled;
+        preferences.clapExperimentalWarningAcknowledged = clapExperimentalWarningAcknowledged;
         preferences.clapSafePluginUiMode = clapSafePluginUiMode;
         preferences.clapMaxOpenPluginWindows = sanitizeMaxOpenVstPluginWindows(clapMaxOpenPluginWindows);
 
