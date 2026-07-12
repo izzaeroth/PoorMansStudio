@@ -35,7 +35,9 @@ namespace mw::audio
 
         std::string metadataTitle;
         std::string metadataArtist;
+        std::string metadataAlbumArtist;
         std::string metadataAlbum;
+        std::string metadataGenre;
         std::string metadataTrackNumber;
         std::string metadataYear;
         std::filesystem::path albumArtPath;

@@ -71,8 +71,10 @@ namespace mw::core
         std::string baseFileName = "rendered_score";
 
         std::string metadataTitle;
-        std::string metadataArtist;
+        std::string metadataArtist; // contributing artist/performer tag
+        std::string metadataAlbumArtist;
         std::string metadataAlbum;
+        std::string metadataGenre;
         std::string metadataTrackNumber;
         std::string metadataYear;
 

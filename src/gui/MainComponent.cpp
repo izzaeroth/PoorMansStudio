@@ -76,12 +76,40 @@ namespace
 
     using mw::gui::WindowPendingCloseHandler;
 
-    void setSinglePluginInstrumentTestNote(mw::core::Track& track, int midiChannel)
+    void setSharedPluginInstrumentTestCueNotes(mw::core::Track& track, int midiChannel)
     {
         track.getNotes().clear();
+
         const auto quarter = mw::core::Project::ticksPerQuarterNote;
         const int safeMidiChannel = juce::jlimit(1, 16, midiChannel <= 0 ? 1 : midiChannel);
-        track.addNote(mw::core::NoteEvent(60, 104, 0, quarter, safeMidiChannel));
+
+        const auto secondsToTicksAtTestTempo = [quarter](double seconds) -> std::int64_t
+        {
+            // The bundled effect test WAV is a fixed five-second test cue.
+            // Instrument plugins cannot consume that WAV directly, so Test Instrument
+            // renders the same musical cue as MIDI notes through the current instrument state.
+            // Use 120 BPM for this cue so its note timing lines up with the bundled sample.
+            return static_cast<std::int64_t>(std::llround(seconds * 2.0 * static_cast<double>(quarter)));
+        };
+
+        const auto addCueNote = [&track, safeMidiChannel, secondsToTicksAtTestTempo](int pitch, int velocity, double startSeconds, double durationSeconds)
+        {
+            track.addNote(mw::core::NoteEvent(
+                pitch,
+                juce::jlimit(1, 127, velocity),
+                secondsToTicksAtTestTempo(startSeconds),
+                std::max<std::int64_t>(1, secondsToTicksAtTestTempo(durationSeconds)),
+                safeMidiChannel));
+        };
+
+        // Match the musical content of workspace/vst3/test/pms_vst_effect_test_sample.wav:
+        // a C-major chord, followed by C/E/G upper notes.
+        addCueNote(60, 104, 0.35, 1.35); // C4
+        addCueNote(64, 104, 0.35, 1.35); // E4
+        addCueNote(67, 104, 0.35, 1.35); // G4
+        addCueNote(72, 104, 1.95, 0.30); // C5
+        addCueNote(76, 104, 2.30, 0.30); // E5
+        addCueNote(79, 104, 2.65, 0.30); // G5
     }
 
     std::filesystem::path sharedPluginTestSamplePath()
@@ -3892,7 +3920,9 @@ namespace
                 ProjectInfoWindowContent(
                     juce::TextEditor& titleEditor,
                     juce::TextEditor& artistEditor,
+                    juce::TextEditor& albumArtistEditor,
                     juce::TextEditor& albumEditor,
+                    juce::TextEditor& genreEditor,
                     juce::TextEditor& trackNumberEditor,
                     juce::TextEditor& yearEditor,
                     std::function<void()> applyCallback,
@@ -3900,15 +3930,19 @@ namespace
                 )
                     : titleBox(titleEditor),
                       artistBox(artistEditor),
+                      albumArtistBox(albumArtistEditor),
                       albumBox(albumEditor),
+                      genreBox(genreEditor),
                       trackNumberBox(trackNumberEditor),
                       yearBox(yearEditor),
                       onApply(std::move(applyCallback)),
                       onClose(std::move(closeCallback))
                 {
                     titleLabel.setText("Title", juce::dontSendNotification);
-                    artistLabel.setText("Artist", juce::dontSendNotification);
+                    artistLabel.setText("Contributing Artist", juce::dontSendNotification);
+                    albumArtistLabel.setText("Album Artist", juce::dontSendNotification);
                     albumLabel.setText("Album", juce::dontSendNotification);
+                    genreLabel.setText("Genre", juce::dontSendNotification);
                     trackNumberLabel.setText("Track #", juce::dontSendNotification);
                     yearLabel.setText("Year", juce::dontSendNotification);
 
@@ -3920,7 +3954,7 @@ namespace
                     applyButton.setButtonText("Apply Info");
                     closeButton.setButtonText("Cancel");
 
-                    for (auto* label : { &helpLabel, &titleLabel, &artistLabel, &albumLabel, &trackNumberLabel, &yearLabel })
+                    for (auto* label : { &helpLabel, &titleLabel, &artistLabel, &albumArtistLabel, &albumLabel, &genreLabel, &trackNumberLabel, &yearLabel })
                     {
                         label->setJustificationType(juce::Justification::centredLeft);
                         addAndMakeVisible(*label);
@@ -3928,7 +3962,9 @@ namespace
 
                     addAndMakeVisible(titleBox);
                     addAndMakeVisible(artistBox);
+                    addAndMakeVisible(albumArtistBox);
                     addAndMakeVisible(albumBox);
+                    addAndMakeVisible(genreBox);
                     addAndMakeVisible(trackNumberBox);
                     addAndMakeVisible(yearBox);
                     addAndMakeVisible(applyButton);
@@ -3961,14 +3997,16 @@ namespace
                     auto layoutRow = [&area](juce::Label& label, juce::TextEditor& editor)
                     {
                         auto row = area.removeFromTop(34);
-                        label.setBounds(row.removeFromLeft(100).reduced(4, 2));
+                        label.setBounds(row.removeFromLeft(140).reduced(4, 2));
                         editor.setBounds(row.reduced(4, 2));
                         area.removeFromTop(4);
                     };
 
                     layoutRow(titleLabel, titleBox);
                     layoutRow(artistLabel, artistBox);
+                    layoutRow(albumArtistLabel, albumArtistBox);
                     layoutRow(albumLabel, albumBox);
+                    layoutRow(genreLabel, genreBox);
                     layoutRow(trackNumberLabel, trackNumberBox);
                     layoutRow(yearLabel, yearBox);
                 }
@@ -3976,14 +4014,18 @@ namespace
             private:
                 juce::TextEditor& titleBox;
                 juce::TextEditor& artistBox;
+                juce::TextEditor& albumArtistBox;
                 juce::TextEditor& albumBox;
+                juce::TextEditor& genreBox;
                 juce::TextEditor& trackNumberBox;
                 juce::TextEditor& yearBox;
 
                 juce::Label helpLabel;
                 juce::Label titleLabel;
                 juce::Label artistLabel;
+                juce::Label albumArtistLabel;
                 juce::Label albumLabel;
+                juce::Label genreLabel;
                 juce::Label trackNumberLabel;
                 juce::Label yearLabel;
                 juce::TextButton applyButton;
@@ -10089,7 +10131,7 @@ namespace mw::gui
         saveProjectButton.setTooltip("Save the current project as a .mwproj file.");
         cleanTempButton.setTooltip("Clean old temporary render and preview files created by the app.");
         saveSettingsButton.setTooltip("Save your current paths, render choices, and app preferences.");
-        editInfoButton.setTooltip("Edit project metadata such as title, artist, album, track number, and year.");
+        editInfoButton.setTooltip("Edit project metadata such as title, contributing artist, album artist, album, track number, and year.");
         attachAlbumArtToggle.setTooltip("MP3-only render option. When Output Format is MP3, checking this opens an image picker for PNG/JPG album art to embed in the rendered MP3.");
         albumArtStatusLabel.setTooltip("Shows the selected MP3 album art image. Album art is unavailable for WAV, FLAC, OGG, M4A, and MIDI export in this build.");
         exportFolderButton.setTooltip("Choose the folder where rendered audio and MIDI files will be written.");
@@ -13461,9 +13503,16 @@ namespace mw::gui
                     if (safeHolder != nullptr)
                         safeHolder->requestApplyCurrentChanges();
                 },
-                [this, index]
+                [this, index, safeHolder, safeHostContentRef]
                 {
-                    renderClapInstrumentTestNoteForTrack(index);
+                    juce::String liveEditorState;
+                    if (safeHolder != nullptr)
+                        liveEditorState = safeHolder->captureCurrentVstStateBase64();
+
+                    if (liveEditorState.isEmpty() && safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                        (*safeHostContentRef)->setToolbarStatus("Test Instrument: could not capture current CLAP editor state; using last applied track state.");
+
+                    renderClapInstrumentTestNoteForTrack(index, true, false, false, liveEditorState);
                 },
                 [this, index, safeHolder, safeHostContentRef](int slot)
                 {
@@ -14475,9 +14524,16 @@ namespace mw::gui
                 if (safeHolder != nullptr)
                     safeHolder->requestApplyCurrentChanges();
             },
-            [this, index]
+            [this, index, safeHolder, safeHostContentRef]
             {
-                renderVstInstrumentTestNoteForTrack(index);
+                juce::String liveEditorState;
+                if (safeHolder != nullptr)
+                    liveEditorState = safeHolder->captureCurrentVstStateBase64();
+
+                if (liveEditorState.isEmpty() && safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                    (*safeHostContentRef)->setToolbarStatus("Test Instrument: could not capture current VST3 editor state; using last applied track state.");
+
+                renderVstInstrumentTestNoteForTrack(index, liveEditorState);
             },
             [this, index, safeHolder, safeHostContentRef](int slot)
             {
@@ -15742,14 +15798,24 @@ namespace mw::gui
         juce::DocumentWindow* editorWindow = nullptr;
         bool isClapInstrumentEditor = false;
 
-        if (const auto found = vstPluginEditorWindows.find(trackIndex); found != vstPluginEditorWindows.end() && found->second != nullptr)
+        if (!currentProject || trackIndex >= static_cast<int>(currentProject->getTracks().size()))
+            return {};
+
+        const auto& selectedTrack = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)];
+        const auto selectedAssignment = selectedTrack.getInstrument();
+
+        if (selectedAssignment.backendType == mw::core::SampleBackendType::CLAP)
         {
-            editorWindow = found->second.get();
+            if (const auto foundClap = clapInstrumentEditorWindows.find(trackIndex); foundClap != clapInstrumentEditorWindows.end() && foundClap->second != nullptr)
+            {
+                editorWindow = foundClap->second.get();
+                isClapInstrumentEditor = true;
+            }
         }
-        else if (const auto foundClap = clapInstrumentEditorWindows.find(trackIndex); foundClap != clapInstrumentEditorWindows.end() && foundClap->second != nullptr)
+        else if (selectedAssignment.backendType == mw::core::SampleBackendType::VST3)
         {
-            editorWindow = foundClap->second.get();
-            isClapInstrumentEditor = true;
+            if (const auto found = vstPluginEditorWindows.find(trackIndex); found != vstPluginEditorWindows.end() && found->second != nullptr)
+                editorWindow = found->second.get();
         }
 
         if (editorWindow == nullptr)
@@ -15795,7 +15861,7 @@ namespace mw::gui
     }
 
 
-    void MainComponent::renderVstInstrumentTestNoteForTrack(int index)
+    void MainComponent::renderVstInstrumentTestNoteForTrack(int index, juce::String liveEditorStateOverride)
     {
         const juce::String actionLabel("Test Instrument");
 
@@ -15832,7 +15898,9 @@ namespace mw::gui
             return;
         }
 
-        const auto liveEditorState = captureOpenVstPluginStateForTrack(index, false, false);
+        const auto liveEditorState = liveEditorStateOverride.isNotEmpty()
+            ? liveEditorStateOverride
+            : captureOpenVstPluginStateForTrack(index, false, false);
         if (liveEditorState.isNotEmpty())
         {
             assignment.vst3.stateBase64 = liveEditorState.toStdString();
@@ -15856,22 +15924,22 @@ namespace mw::gui
         const auto stamp = juce::Time::currentTimeMillis();
         const auto outputPath = previewFolder / ("vst3_instrument_test_track_" + std::to_string(index + 1) + "_" + std::to_string(stamp) + ".wav");
 
-        setSinglePluginInstrumentTestNote(testTrack, assignment.midiChannel);
+        setSharedPluginInstrumentTestCueNotes(testTrack, assignment.midiChannel);
 
         auto previewProject = mw::core::Project("VST3 Instrument Test");
-        previewProject.setTempoBpm(currentProject->getTempoBpm());
+        previewProject.setTempoBpm(120);
         previewProject.setTimeSignature(currentProject->getTimeSignature());
         previewProject.getTracks().push_back(testTrack);
         setPianoRollPreviewNoteMapFromTracks(previewProject.getTracks());
         setPianoRollPreviewAudioClipMapFromClips({});
 
-        const int previewTempoBpm = currentProject->getTempoBpm();
+        const int previewTempoBpm = 120;
         const int previewSampleRate = sampleRateCombo.getText().getIntValue() > 0 ? sampleRateCombo.getText().getIntValue() : 48000;
         const int previewChannelCount = channelsCombo.getSelectedId() > 0 ? channelsCombo.getSelectedId() : 2;
 
         cancelRenderRequested = false;
         setRenderingState(true);
-        logMessage(actionLabel + ": rendering single-note VST3 instrument test sound for " + getTrackDisplayName(index) + ".");
+        logMessage(actionLabel + ": rendering shared-note VST3 instrument test cue for " + getTrackDisplayName(index) + ".");
         logMessage(actionLabel + " temp WAV: " + outputPath.string());
 
         if (renderThread.joinable())
@@ -15914,10 +15982,8 @@ namespace mw::gui
 
                         generatedPreviewFiles.push_back(result.wavPath);
                         lastPianoRollPreviewWavPath = result.wavPath;
-                        lastPianoRollPreviewDurationBeats = 1.0;
-                        lastPianoRollPreviewTempoBpm = currentProject.has_value()
-                            ? currentProject->getTempoBpm()
-                            : 120.0;
+                        lastPianoRollPreviewDurationBeats = 10.0;
+                        lastPianoRollPreviewTempoBpm = 120.0;
                         pianoRollPreviewPaused = false;
                         pendingPianoRollPreviewStartSeconds = 0.0;
 
@@ -17212,7 +17278,7 @@ namespace mw::gui
         }
     }
 
-    void MainComponent::renderClapInstrumentTestNoteForTrack(int index, bool playAudition, bool useLiveAuditionTransport, bool useSelectedTrackNotes)
+    void MainComponent::renderClapInstrumentTestNoteForTrack(int index, bool playAudition, bool useLiveAuditionTransport, bool useSelectedTrackNotes, juce::String liveEditorStateOverride)
     {
         const auto actionLabel = useLiveAuditionTransport
             ? juce::String("CLAP Live Audition")
@@ -17244,7 +17310,9 @@ namespace mw::gui
             return;
         }
 
-        const auto liveEditorState = captureOpenVstPluginStateForTrack(index, false, false);
+        const auto liveEditorState = liveEditorStateOverride.isNotEmpty()
+            ? liveEditorStateOverride
+            : captureOpenVstPluginStateForTrack(index, false, false);
         if (liveEditorState.isNotEmpty())
         {
             assignment.vst3.stateBase64 = liveEditorState.toStdString();
@@ -17279,22 +17347,22 @@ namespace mw::gui
         else
         {
             if (useSelectedTrackNotes)
-                logMessage(actionLabel + ": selected track has no MIDI notes, using the single-note instrument test sound instead.");
+                logMessage(actionLabel + ": selected track has no MIDI notes, using the shared instrument test cue instead.");
 
-            setSinglePluginInstrumentTestNote(testTrack, assignment.midiChannel);
+            setSharedPluginInstrumentTestCueNotes(testTrack, assignment.midiChannel);
         }
 
         if (playAudition && !useLiveAuditionTransport)
         {
             auto previewProject = mw::core::Project("CLAP Instrument Test");
-            previewProject.setTempoBpm(currentProject->getTempoBpm());
+            previewProject.setTempoBpm(120);
             previewProject.setTimeSignature(currentProject->getTimeSignature());
             previewProject.getTracks().push_back(testTrack);
             setPianoRollPreviewNoteMapFromTracks(previewProject.getTracks());
             setPianoRollPreviewAudioClipMapFromClips({});
         }
 
-        const int previewTempoBpm = currentProject->getTempoBpm();
+        const int previewTempoBpm = usingSelectedTrackNotes ? currentProject->getTempoBpm() : 120;
         const int previewSampleRate = sampleRateCombo.getText().getIntValue() > 0 ? sampleRateCombo.getText().getIntValue() : 48000;
         const int previewChannelCount = channelsCombo.getSelectedId() > 0 ? channelsCombo.getSelectedId() : 2;
 
@@ -17302,7 +17370,7 @@ namespace mw::gui
         setRenderingState(true);
         logMessage(actionLabel + (usingSelectedTrackNotes
             ? ": rendering selected-track CLAP instrument notes for "
-            : ": rendering single-note CLAP instrument test sound for ") + getTrackDisplayName(index) + ".");
+            : ": rendering shared-note CLAP instrument test cue for ") + getTrackDisplayName(index) + ".");
         logMessage(actionLabel + " temp WAV: " + outputPath.string());
 
         if (renderThread.joinable())
@@ -17355,8 +17423,8 @@ namespace mw::gui
                         {
                             generatedPreviewFiles.push_back(result.wavPath);
                             lastPianoRollPreviewWavPath = result.wavPath;
-                            lastPianoRollPreviewDurationBeats = 1.0;
-                            lastPianoRollPreviewTempoBpm = currentProject.has_value()
+                            lastPianoRollPreviewDurationBeats = 10.0;
+                            lastPianoRollPreviewTempoBpm = usingSelectedTrackNotes && currentProject.has_value()
                                 ? currentProject->getTempoBpm()
                                 : 120.0;
                             pianoRollPreviewPaused = false;
@@ -17571,7 +17639,7 @@ namespace mw::gui
                         generatedPreviewFiles.push_back(inputPath);
                         generatedPreviewFiles.push_back(effectResult.wavPath);
                         lastPianoRollPreviewWavPath = effectResult.wavPath;
-                        lastPianoRollPreviewDurationBeats = 8.0;
+                        lastPianoRollPreviewDurationBeats = 10.0;
                         lastPianoRollPreviewTempoBpm = pianoRollBpmBox.getText().getDoubleValue() > 0.0
                             ? pianoRollBpmBox.getText().getDoubleValue()
                             : 120.0;
@@ -18513,7 +18581,9 @@ namespace mw::gui
 
         settings.metadataTitle = metadataTitleBox.getText().trim().toStdString();
         settings.metadataArtist = metadataArtistBox.getText().trim().toStdString();
+        settings.metadataAlbumArtist = metadataAlbumArtistBox.getText().trim().toStdString();
         settings.metadataAlbum = metadataAlbumBox.getText().trim().toStdString();
+        settings.metadataGenre = metadataGenreBox.getText().trim().toStdString();
         settings.metadataTrackNumber = metadataTrackNumberBox.getText().trim().toStdString();
         settings.metadataYear = metadataYearBox.getText().trim().toStdString();
         settings.albumArtEnabled = attachAlbumArtToggle.getToggleState() && isMp3OutputFormatSelected() && !selectedAlbumArtPath.empty();
@@ -18570,7 +18640,9 @@ namespace mw::gui
 
         metadataTitleBox.setText(settings.metadataTitle, juce::dontSendNotification);
         metadataArtistBox.setText(settings.metadataArtist, juce::dontSendNotification);
+        metadataAlbumArtistBox.setText(settings.metadataAlbumArtist, juce::dontSendNotification);
         metadataAlbumBox.setText(settings.metadataAlbum, juce::dontSendNotification);
+        metadataGenreBox.setText(settings.metadataGenre, juce::dontSendNotification);
         metadataTrackNumberBox.setText(settings.metadataTrackNumber, juce::dontSendNotification);
         metadataYearBox.setText(settings.metadataYear, juce::dontSendNotification);
         selectedAlbumArtPath = settings.albumArtPath;
@@ -20246,7 +20318,9 @@ namespace mw::gui
                 baseNameBox.setText(file.getFileNameWithoutExtension());
                 metadataTitleBox.setText(file.getFileNameWithoutExtension(), juce::dontSendNotification);
                 metadataArtistBox.clear();
+                metadataAlbumArtistBox.clear();
                 metadataAlbumBox.clear();
+                metadataGenreBox.clear();
                 metadataTrackNumberBox.clear();
                 metadataYearBox.clear();
                 selectedAlbumArtPath.clear();
@@ -23216,7 +23290,9 @@ mw::audio::RenderJob MainComponent::createRenderJobSnapshot() const
 
         job.metadataTitle = metadataTitleBox.getText().trim().toStdString();
         job.metadataArtist = metadataArtistBox.getText().trim().toStdString();
+        job.metadataAlbumArtist = metadataAlbumArtistBox.getText().trim().toStdString();
         job.metadataAlbum = metadataAlbumBox.getText().trim().toStdString();
+        job.metadataGenre = metadataGenreBox.getText().trim().toStdString();
         job.metadataTrackNumber = metadataTrackNumberBox.getText().trim().toStdString();
         job.metadataYear = metadataYearBox.getText().trim().toStdString();
 
@@ -31765,7 +31841,9 @@ void MainComponent::selectTrackFromManagerPage()
             auto& settings = currentProject->getUserSettings();
             settings.metadataTitle = metadataTitleBox.getText().trim().toStdString();
             settings.metadataArtist = metadataArtistBox.getText().trim().toStdString();
+            settings.metadataAlbumArtist = metadataAlbumArtistBox.getText().trim().toStdString();
             settings.metadataAlbum = metadataAlbumBox.getText().trim().toStdString();
+            settings.metadataGenre = metadataGenreBox.getText().trim().toStdString();
             settings.metadataTrackNumber = metadataTrackNumberBox.getText().trim().toStdString();
             settings.metadataYear = metadataYearBox.getText().trim().toStdString();
 
@@ -31799,8 +31877,14 @@ void MainComponent::selectTrackFromManagerPage()
             if (metadataArtistBox.getText().isEmpty())
                 metadataArtistBox.setText(settings.metadataArtist, juce::dontSendNotification);
 
+            if (metadataAlbumArtistBox.getText().isEmpty())
+                metadataAlbumArtistBox.setText(settings.metadataAlbumArtist, juce::dontSendNotification);
+
             if (metadataAlbumBox.getText().isEmpty())
                 metadataAlbumBox.setText(settings.metadataAlbum, juce::dontSendNotification);
+
+            if (metadataGenreBox.getText().isEmpty())
+                metadataGenreBox.setText(settings.metadataGenre, juce::dontSendNotification);
 
             if (metadataTrackNumberBox.getText().isEmpty())
                 metadataTrackNumberBox.setText(settings.metadataTrackNumber, juce::dontSendNotification);
@@ -31843,7 +31927,9 @@ void MainComponent::selectTrackFromManagerPage()
         projectInfoContent = std::make_unique<ProjectInfoWindowContent>(
             metadataTitleBox,
             metadataArtistBox,
+            metadataAlbumArtistBox,
             metadataAlbumBox,
+            metadataGenreBox,
             metadataTrackNumberBox,
             metadataYearBox,
             applyInfo,
@@ -31853,9 +31939,9 @@ void MainComponent::selectTrackFromManagerPage()
         auto* window = new PianoRollDocumentWindow("Edit Info", closeWindow);
         applyPoorMansStudioCustomTitleBar(*window);
         window->setResizable(true, true);
-        window->setResizeLimits(480, 300, 1200, 800);
+        window->setResizeLimits(540, 380, 1200, 800);
         window->setContentNonOwned(projectInfoContent.get(), true);
-        window->centreWithSize(620, 360);
+        window->centreWithSize(680, 440);
         window->setVisible(true);
         applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::EditInfo);
 

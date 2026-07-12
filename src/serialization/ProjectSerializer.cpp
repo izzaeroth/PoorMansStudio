@@ -479,7 +479,9 @@ namespace mw::serialization
         writeStringField(file, "baseFileName", settings.baseFileName);
         writeStringField(file, "metadataTitle", settings.metadataTitle);
         writeStringField(file, "metadataArtist", settings.metadataArtist);
+        writeStringField(file, "metadataAlbumArtist", settings.metadataAlbumArtist);
         writeStringField(file, "metadataAlbum", settings.metadataAlbum);
+        writeStringField(file, "metadataGenre", settings.metadataGenre);
         writeStringField(file, "metadataTrackNumber", settings.metadataTrackNumber);
         writeStringField(file, "metadataYear", settings.metadataYear);
         file << "    \"albumArtEnabled\": " << (settings.albumArtEnabled ? "true" : "false") << ",\n";
@@ -721,7 +723,9 @@ namespace mw::serialization
             settings.baseFileName = getString(settingsObject, "baseFileName", project.getName());
             settings.metadataTitle = getString(settingsObject, "metadataTitle");
             settings.metadataArtist = getString(settingsObject, "metadataArtist");
+            settings.metadataAlbumArtist = getString(settingsObject, "metadataAlbumArtist");
             settings.metadataAlbum = getString(settingsObject, "metadataAlbum");
+            settings.metadataGenre = getString(settingsObject, "metadataGenre");
             settings.metadataTrackNumber = getString(settingsObject, "metadataTrackNumber");
             settings.metadataYear = getString(settingsObject, "metadataYear");
             settings.albumArtEnabled = getBool(settingsObject, "albumArtEnabled", false);

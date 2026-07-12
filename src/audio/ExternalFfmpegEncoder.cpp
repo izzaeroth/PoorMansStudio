@@ -109,7 +109,9 @@ namespace
 
         appendMetadataW(command, "title", request.metadataTitle);
         appendMetadataW(command, "artist", request.metadataArtist);
+        appendMetadataW(command, "album_artist", request.metadataAlbumArtist);
         appendMetadataW(command, "album", request.metadataAlbum);
+        appendMetadataW(command, "genre", request.metadataGenre);
         appendMetadataW(command, "track", request.metadataTrackNumber);
         appendMetadataW(command, "date", request.metadataYear);
 
@@ -460,7 +462,9 @@ namespace mw::audio
 
         appendMetadata(command, "title", request.metadataTitle);
         appendMetadata(command, "artist", request.metadataArtist);
+        appendMetadata(command, "album_artist", request.metadataAlbumArtist);
         appendMetadata(command, "album", request.metadataAlbum);
+        appendMetadata(command, "genre", request.metadataGenre);
         appendMetadata(command, "track", request.metadataTrackNumber);
         appendMetadata(command, "date", request.metadataYear);
 

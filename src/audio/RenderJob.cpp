@@ -487,7 +487,9 @@ namespace
             encodeRequest.outputChannels = job.channelCount;
             encodeRequest.metadataTitle = job.metadataTitle;
             encodeRequest.metadataArtist = job.metadataArtist;
+            encodeRequest.metadataAlbumArtist = job.metadataAlbumArtist;
             encodeRequest.metadataAlbum = job.metadataAlbum;
+            encodeRequest.metadataGenre = job.metadataGenre;
             encodeRequest.metadataTrackNumber = job.metadataTrackNumber;
             encodeRequest.metadataYear = job.metadataYear;
             encodeRequest.albumArtPath = job.albumArtPath;
@@ -1383,7 +1385,9 @@ namespace mw::audio
             encodeRequest.outputChannels = job.channelCount;
             encodeRequest.metadataTitle = job.metadataTitle;
             encodeRequest.metadataArtist = job.metadataArtist;
+            encodeRequest.metadataAlbumArtist = job.metadataAlbumArtist;
             encodeRequest.metadataAlbum = job.metadataAlbum;
+            encodeRequest.metadataGenre = job.metadataGenre;
             encodeRequest.metadataTrackNumber = job.metadataTrackNumber;
             encodeRequest.metadataYear = job.metadataYear;
             encodeRequest.albumArtPath = job.albumArtPath;
@@ -1509,7 +1513,9 @@ namespace mw::audio
             encodeRequest.outputChannels = job.channelCount;
             encodeRequest.metadataTitle = job.metadataTitle;
             encodeRequest.metadataArtist = job.metadataArtist;
+            encodeRequest.metadataAlbumArtist = job.metadataAlbumArtist;
             encodeRequest.metadataAlbum = job.metadataAlbum;
+            encodeRequest.metadataGenre = job.metadataGenre;
             encodeRequest.metadataTrackNumber = job.metadataTrackNumber;
             encodeRequest.metadataYear = job.metadataYear;
             encodeRequest.albumArtPath = job.albumArtPath;
@@ -1655,7 +1661,9 @@ namespace mw::audio
         encodeRequest.outputChannels = job.channelCount;
         encodeRequest.metadataTitle = job.metadataTitle;
         encodeRequest.metadataArtist = job.metadataArtist;
+        encodeRequest.metadataAlbumArtist = job.metadataAlbumArtist;
         encodeRequest.metadataAlbum = job.metadataAlbum;
+        encodeRequest.metadataGenre = job.metadataGenre;
         encodeRequest.metadataTrackNumber = job.metadataTrackNumber;
         encodeRequest.metadataYear = job.metadataYear;
         encodeRequest.albumArtPath = job.albumArtPath;

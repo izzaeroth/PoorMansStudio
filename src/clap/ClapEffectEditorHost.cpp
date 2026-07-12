@@ -635,6 +635,9 @@ namespace mw::clap
             return {};
         }
 
+        if (impl->plugin->on_main_thread != nullptr)
+            impl->plugin->on_main_thread(impl->plugin);
+
         if (!savePluginState(impl->plugin, state, error))
             return {};
         return state;

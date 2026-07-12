@@ -625,9 +625,9 @@ namespace mw::gui
         void openSelectedTrackVstPluginUi();
         void openSelectedTrackVstEffectUi(int effectSlotIndex = 0);
         void renderSelectedTrackVstEffectTestSample(int effectSlotIndex = 0);
-        void renderVstInstrumentTestNoteForTrack(int trackIndex);
+        void renderVstInstrumentTestNoteForTrack(int trackIndex, juce::String liveEditorStateOverride = {});
         void renderVstEffectTestSampleForTrack(int trackIndex, int effectSlotIndex);
-        void renderClapInstrumentTestNoteForTrack(int trackIndex, bool playAudition = true, bool useLiveAuditionTransport = false, bool useSelectedTrackNotes = false);
+        void renderClapInstrumentTestNoteForTrack(int trackIndex, bool playAudition = true, bool useLiveAuditionTransport = false, bool useSelectedTrackNotes = false, juce::String liveEditorStateOverride = {});
         void preflightSelectedTrackClapInstrumentLiveReadiness();
         void armSelectedTrackClapLiveEngineSession();
         void disarmClapLiveEngineSession(bool logIfInactive = true);
@@ -987,7 +987,9 @@ namespace mw::gui
         juce::TextEditor baseNameBox;
         juce::TextEditor metadataTitleBox;
         juce::TextEditor metadataArtistBox;
+        juce::TextEditor metadataAlbumArtistBox;
         juce::TextEditor metadataAlbumBox;
+        juce::TextEditor metadataGenreBox;
         juce::TextEditor metadataTrackNumberBox;
         juce::TextEditor metadataYearBox;
         juce::TextEditor tempoBox;
