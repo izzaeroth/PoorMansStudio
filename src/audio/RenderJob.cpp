@@ -38,19 +38,6 @@ namespace
             callbacks.status(message);
     }
 
-    mw::exporting::AudioFormat toExportingFormat(mw::audio::RenderOutputFormat format)
-    {
-        switch (format)
-        {
-            case mw::audio::RenderOutputFormat::Flac: return mw::exporting::AudioFormat::Flac;
-            case mw::audio::RenderOutputFormat::Mp3: return mw::exporting::AudioFormat::Mp3;
-            case mw::audio::RenderOutputFormat::Ogg: return mw::exporting::AudioFormat::Ogg;
-            case mw::audio::RenderOutputFormat::M4a: return mw::exporting::AudioFormat::M4a;
-            case mw::audio::RenderOutputFormat::Wav:
-            default: return mw::exporting::AudioFormat::Wav;
-        }
-    }
-
     mw::audio::EncodedAudioFormat toEncodedFormat(mw::audio::RenderOutputFormat format)
     {
         switch (format)

@@ -97,20 +97,10 @@ namespace mw::gui
             repaint();
         }
 
-        void moveCaretToEnd()
-        {
-            scrollToBottom();
-        }
-
         void setTooltip(const juce::String&)
         {
             // Console panes intentionally do not show helper bubbles.
             juce::SettableTooltipClient::setTooltip({});
-        }
-
-        void insertTextAtCaret(const juce::String& text)
-        {
-            appendMessage(text.trimCharactersAtEnd("\r\n"), juce::Colours::transparentBlack, false);
         }
 
         void appendMessage(const juce::String& text, juce::Colour sequenceColour, bool hasSequenceColour)
@@ -140,23 +130,6 @@ namespace mw::gui
         void setSequenceColours(const std::vector<juce::Colour>& colours)
         {
             sequenceColours = colours;
-        }
-
-        void scrollToFirstMatchingText(const juce::String& needle)
-        {
-            if (needle.isEmpty())
-                return;
-
-            const auto lowerNeedle = needle.toLowerCase();
-
-            for (int i = 0; i < static_cast<int>(entries.size()); ++i)
-            {
-                if (entries[static_cast<std::size_t>(i)].message.toLowerCase().contains(lowerNeedle))
-                {
-                    scrollToEntry(i);
-                    return;
-                }
-            }
         }
 
         void scrollToFirstSequenceNumber(int sequenceNumber)
@@ -191,11 +164,6 @@ namespace mw::gui
                     return;
                 }
             }
-        }
-
-        int getScrollStart() const
-        {
-            return firstVisiblePixel;
         }
 
         void setScrollStart(int pixel)
@@ -607,7 +575,6 @@ namespace mw::gui
         void openClapPluginManagerWindow();
         void refreshClapHostHelperStatusCache();
         void showClapHostHelperStatusWindow();
-        void closeAllClapPluginWindows();
         void refreshVstGraphicsProfile(bool firstLaunchAutoDetect);
         juce::String runVstHostHelperCommandForStatus(const juce::File& helperFile, const juce::String& argument, int timeoutMs, int& exitCode);
         void refreshVstHostHelperStatusCache();
@@ -627,19 +594,13 @@ namespace mw::gui
         void renderSelectedTrackVstEffectTestSample(int effectSlotIndex = 0);
         void renderVstInstrumentTestNoteForTrack(int trackIndex, juce::String liveEditorStateOverride = {});
         void renderVstEffectTestSampleForTrack(int trackIndex, int effectSlotIndex);
-        void renderClapInstrumentTestNoteForTrack(int trackIndex, bool playAudition = true, bool useLiveAuditionTransport = false, bool useSelectedTrackNotes = false, juce::String liveEditorStateOverride = {});
-        void preflightSelectedTrackClapInstrumentLiveReadiness();
+        void renderClapInstrumentTestNoteForTrack(int trackIndex, juce::String liveEditorStateOverride = {});
         void armSelectedTrackClapLiveEngineSession();
         void disarmClapLiveEngineSession(bool logIfInactive = true);
-        void showClapLiveEngineSessionStatus();
-        void probeArmedClapLiveProcessBridge();
-        void renderSelectedTrackWithArmedClapLiveBridgeForAudition(int trackIndex);
         bool startSelectedTrackClapDirectAudition(int trackIndex);
         bool tryStartSelectedTrackClapMainTransportPreview(int trackIndex);
         bool tryStartMultiTrackClapProjectPreview();
         void closeClapProjectPreviewTrackSessions();
-        void startSelectedTrackClapInstrumentLiveAudition();
-        void startClapInstrumentLiveAuditionPlayback(const std::filesystem::path& wavPath, int trackIndex);
         void stopClapInstrumentLiveAudition(bool deleteTempFile = true);
         void beginClapDirectPreviewCompletionPolling();
         void cancelClapDirectPreviewCompletionPolling();
@@ -786,7 +747,6 @@ namespace mw::gui
         bool selectedTrackHasAppliedClapInstrument() const;
         bool selectedTrackHasOpenableVstEffect(int effectSlotIndex) const;
         void updateOpenVstPluginButtonState();
-        bool areHelperBubblesEnabled() const { return helperBubblesEnabled; }
         bool ensureSelectedTrackHasSequenceForPianoRoll();
 
         void startTrackManagerEditSession();
@@ -1206,14 +1166,6 @@ namespace mw::gui
         std::vector<std::unique_ptr<ClapLiveProjectPreviewEffectSession>> clapLiveSelectedTrackPreviewEffectSessions;
         std::vector<std::unique_ptr<ClapLiveProjectPreviewTrackSession>> clapLiveProjectPreviewTrackSessions;
 
-        juce::AudioFormatManager clapLiveAuditionFormatManager;
-        juce::AudioDeviceManager clapLiveAuditionDeviceManager;
-        juce::AudioSourcePlayer clapLiveAuditionSourcePlayer;
-        juce::AudioTransportSource clapLiveAuditionTransport;
-        std::unique_ptr<juce::AudioFormatReaderSource> clapLiveAuditionReaderSource;
-        std::filesystem::path clapLiveAuditionTempWavPath;
-        int clapLiveAuditionTrackIndex = -1;
-        bool clapLiveAuditionPlaybackActive = false;
         mw::clap::ClapLiveDirectPreviewEngine clapLiveDirectPreviewEngine;
         bool clapLiveDirectPreviewProjectMode = false;
         bool clapLiveDirectPreviewCompletionPollActive = false;

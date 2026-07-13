@@ -113,34 +113,6 @@ namespace
         int midiProgram = -1;
     };
 
-    std::map<std::string, std::string> parsePartNames(const std::string& xml)
-    {
-        std::map<std::string, std::string> partNames;
-        std::size_t pos = 0;
-
-        // Use "<score-part " so we do not match "<score-partwise>".
-        while ((pos = xml.find("<score-part ", pos)) != std::string::npos)
-        {
-            const auto tagEnd = xml.find('>', pos);
-            if (tagEnd == std::string::npos) break;
-
-            const auto close = xml.find("</score-part>", tagEnd);
-            if (close == std::string::npos) break;
-
-            const auto tag = xml.substr(pos, tagEnd - pos + 1);
-            const auto id = attributeValue(tag, "id");
-            const auto block = xml.substr(tagEnd + 1, close - tagEnd - 1);
-
-            if (!id.empty())
-                partNames[id] = parsePartNameFromScorePartBlock(block, id);
-
-            pos = close + std::string("</score-part>").size();
-        }
-
-        return partNames;
-    }
-
-
     std::map<std::string, PartInfo> parsePartInfos(const std::string& xml)
     {
         std::map<std::string, PartInfo> partInfos;

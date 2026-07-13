@@ -2216,14 +2216,6 @@ namespace
             return nullptr;
         }
 
-        const mw::core::AudioClip* findProjectAudioClip(int clipId) const
-        {
-            for (const auto& clip : projectSnapshot.getAudioClips())
-                if (clip.id == clipId)
-                    return &clip;
-            return nullptr;
-        }
-
         static juce::String auxDisplayNameForClip(const mw::core::AudioClip& clip)
         {
             juce::String name = clip.name.empty() ? "Aux Source" : juce::String(clip.name);

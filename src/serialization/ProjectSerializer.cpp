@@ -312,57 +312,6 @@ namespace
     }
 
 
-    std::vector<std::string> getStringArray(const std::string& text, const std::string& key)
-    {
-        std::vector<std::string> values;
-        const auto array = extractArray(text, key);
-
-        if (array.empty())
-            return values;
-
-        std::size_t pos = 0;
-        while ((pos = array.find('"', pos)) != std::string::npos)
-        {
-            std::string value;
-            bool escaping = false;
-            bool foundEnd = false;
-
-            for (std::size_t i = pos + 1; i < array.size(); ++i)
-            {
-                const char c = array[i];
-
-                if (escaping)
-                {
-                    value += '\\';
-                    value += c;
-                    escaping = false;
-                    continue;
-                }
-
-                if (c == '\\')
-                {
-                    escaping = true;
-                    continue;
-                }
-
-                if (c == '"')
-                {
-                    values.push_back(unescapeJsonString(value));
-                    pos = i + 1;
-                    foundEnd = true;
-                    break;
-                }
-
-                value += c;
-            }
-
-            if (!foundEnd)
-                break;
-        }
-
-        return values;
-    }
-
     bool getBool(const std::string& text, const std::string& key, bool fallback = false)
     {
         const auto pattern = "\"" + key + "\":";
