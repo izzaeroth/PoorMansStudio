@@ -25,6 +25,8 @@
 #include "clap/ClapLiveInstrumentSession.h"
 #include "clap/ClapLiveEffectSession.h"
 #include "clap/ClapLiveDirectPreviewEngine.h"
+#include "clap/ClapLiveTrackSessionManager.h"
+#include "playback/PlaybackTransportCoordinator.h"
 #include "gui/AudioClipEditorComponent.h"
 #include "gui/PianoRollComponent.h"
 
@@ -600,6 +602,18 @@ namespace mw::gui
         bool startSelectedTrackClapDirectAudition(int trackIndex);
         bool tryStartSelectedTrackClapMainTransportPreview(int trackIndex);
         bool tryStartMultiTrackClapProjectPreview();
+        bool startPreparedClapProjectPreview(const std::vector<int>& liveTrackIndices,
+                                             std::vector<mw::clap::ClapLiveDirectPreviewAudioSourceRequest> audioSources,
+                                             std::uint64_t transportGeneration,
+                                             bool hybridMode);
+        std::optional<mw::clap::ClapLiveDirectPreviewAudioSourceRequest> loadClapPreviewAudioSource(
+            const std::filesystem::path& wavPath,
+            const juce::String& displayName,
+            double sourceStartSeconds) const;
+        void startRenderedFallbackForHybridClapPreview(std::vector<int> liveTrackIndices,
+                                                       mw::audio::RenderJob fallbackJob,
+                                                       std::uint64_t transportGeneration,
+                                                       mw::core::StableId projectId);
         void closeClapProjectPreviewTrackSessions();
         void stopClapInstrumentLiveAudition(bool deleteTempFile = true);
         void beginClapDirectPreviewCompletionPolling();
@@ -1154,19 +1168,13 @@ namespace mw::gui
             std::mutex processMutex;
         };
 
-        struct ClapLiveProjectPreviewTrackSession
-        {
-            int trackIndex = -1;
-            juce::String trackName;
-            std::unique_ptr<mw::clap::ClapLiveInstrumentSession> session;
-            std::mutex processMutex;
-            std::vector<std::unique_ptr<ClapLiveProjectPreviewEffectSession>> effectSessions;
-        };
-
         std::vector<std::unique_ptr<ClapLiveProjectPreviewEffectSession>> clapLiveSelectedTrackPreviewEffectSessions;
-        std::vector<std::unique_ptr<ClapLiveProjectPreviewTrackSession>> clapLiveProjectPreviewTrackSessions;
+        mw::clap::ClapLiveTrackSessionManager clapLiveProjectTrackSessionManager;
 
         mw::clap::ClapLiveDirectPreviewEngine clapLiveDirectPreviewEngine;
+        mw::playback::PlaybackTransportCoordinator playbackTransportCoordinator;
+        std::uint64_t clapLiveTransportGeneration = 0;
+        std::int64_t clapLiveTransportStartSample = 0;
         bool clapLiveDirectPreviewProjectMode = false;
         bool clapLiveDirectPreviewCompletionPollActive = false;
         int clapLiveDirectPreviewCompletionPollGeneration = 0;

@@ -395,6 +395,7 @@ namespace mw::serialization
         file << "{\n";
         file << "  \"format\": \"" << p.getMetadata().projectFormatName << "\",\n";
         file << "  \"version\": " << p.getMetadata().projectFormatVersion << ",\n";
+        file << "  \"projectId\": " << static_cast<unsigned long long>(p.getStableId()) << ",\n";
         file << "  \"name\": \"" << escapeJsonString(p.getName()) << "\",\n";
         file << "  \"tempoBpm\": " << p.getTempoBpm() << ",\n";
         file << "  \"ticksPerQuarterNote\": " << mw::core::Project::ticksPerQuarterNote << ",\n";
@@ -531,6 +532,7 @@ namespace mw::serialization
                 && instrument.backendType != mw::core::SampleBackendType::CLAP)
                 serializedVst3 = {};
             file << "    {\n";
+            file << "      \"trackId\": " << static_cast<unsigned long long>(t.getStableId()) << ",\n";
             file << "      \"name\": \"" << escapeJsonString(t.getName()) << "\",\n";
             file << "      \"trackType\": \"" << escapeJsonString(mw::core::trackTypeToString(t.getTrackType())) << "\",\n";
             file << "      \"muted\": " << (t.getMuted() ? "true" : "false") << ",\n";
@@ -631,6 +633,7 @@ namespace mw::serialization
             return std::nullopt;
 
         mw::core::Project project(getString(text, "name", filePath.stem().string()));
+        project.setStableId(static_cast<mw::core::StableId>(std::max<long long>(1, getLongLong(text, "projectId", static_cast<long long>(project.getStableId())))));
         project.setTempoBpm(getInt(text, "tempoBpm", 120));
 
         const auto timeSignatureObject = extractObject(text, "timeSignature");
@@ -769,6 +772,7 @@ namespace mw::serialization
         for (const auto& trackObject : trackObjects)
         {
             auto& track = project.addTrack(getString(trackObject, "name", "Loaded Track"));
+            track.setStableId(static_cast<mw::core::StableId>(std::max<long long>(1, getLongLong(trackObject, "trackId", static_cast<long long>(track.getStableId())))));
             track.setTrackType(mw::core::trackTypeFromString(getString(trackObject, "trackType", "MIDI")));
 
             track.setMuted(getBool(trackObject, "muted", false));
@@ -864,6 +868,7 @@ namespace mw::serialization
             }
         }
 
+        project.ensureUniqueStableIds();
         return project;
     }
 }

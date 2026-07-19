@@ -12,6 +12,11 @@
 
 #include "core/InstrumentAssignment.h"
 
+namespace mw::clap
+{
+    class ClapLiveEffectSession;
+}
+
 namespace mw::audio
 {
     struct AudioClipRecorderStartResult
@@ -34,6 +39,7 @@ namespace mw::audio
         bool enabled = false;
         // monitorEnabled only controls whether that same wet signal is sent to the output while recording.
         bool monitorEnabled = false;
+        mw::core::EffectSlotBackendType backendType = mw::core::EffectSlotBackendType::None;
         mw::core::VstPluginAssignment effect;
         std::string trackName;
         std::string unavailableMessage;
@@ -97,6 +103,7 @@ namespace mw::audio
         std::unique_ptr<juce::AudioBuffer<float>> scratchBuffer;
         std::unique_ptr<juce::AudioBuffer<float>> effectBuffer;
         std::unique_ptr<juce::AudioPluginInstance> liveEffectInstance;
+        std::unique_ptr<mw::clap::ClapLiveEffectSession> liveClapEffectSession;
         std::atomic<juce::AudioFormatWriter::ThreadedWriter*> activeWriter { nullptr };
         std::atomic<bool> recording { false };
         std::atomic<bool> paused { false };
@@ -112,6 +119,7 @@ namespace mw::audio
         int bitDepth = 24;
         int liveEffectMonitorChannels = 0;
         int recordEffectProcessChannels = 0;
+        mw::core::EffectSlotBackendType liveEffectBackend = mw::core::EffectSlotBackendType::None;
         juce::String liveEffectMonitorSummary;
         juce::String recordEffectSummary;
     };

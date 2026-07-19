@@ -19,6 +19,26 @@ namespace mw::clap
         constexpr int kMinimumOutputChannels = 1;
         constexpr int kMaximumOutputChannels = 32;
         constexpr int kMaximumConsecutiveBusyBlocks = 200;
+        constexpr int kMaximumPluginOutputChannels = 64;
+
+        bool hasValidPluginOutputBuffer(int expectedFrames,
+                                        int outputFrames,
+                                        int outputChannels,
+                                        std::size_t interleavedSampleCount) noexcept
+        {
+            if (expectedFrames <= 0
+                || outputFrames != expectedFrames
+                || outputChannels < kMinimumOutputChannels
+                || outputChannels > kMaximumPluginOutputChannels)
+            {
+                return false;
+            }
+
+            const auto requiredSamples = static_cast<std::size_t>(expectedFrames)
+                * static_cast<std::size_t>(outputChannels);
+            return interleavedSampleCount >= requiredSamples;
+        }
+
         int sanitizeOutputChannelCount(int value)
         {
             return std::clamp(value > 0 ? value : 2, kMinimumOutputChannels, kMaximumOutputChannels);
@@ -29,6 +49,7 @@ namespace mw::clap
     {
     public:
         DirectPreviewAudioCallback(std::vector<ClapLiveDirectPreviewTrackRequest> requestsIn,
+                                   std::vector<ClapLiveDirectPreviewAudioSourceRequest> audioSourcesIn,
                                    int requestedOutputChannelCount)
             : requestedOutputChannels(sanitizeOutputChannelCount(requestedOutputChannelCount))
         {
@@ -66,6 +87,34 @@ namespace mw::clap
                 }
 
                 tracks.push_back(std::move(track));
+            }
+
+            audioSources.reserve(audioSourcesIn.size());
+            for (auto& request : audioSourcesIn)
+            {
+                const auto channelCount = request.sourceChannelCount;
+                const bool hasExactFrameLayout = channelCount > 0
+                    && (request.interleavedAudio.size() % static_cast<std::size_t>(channelCount)) == 0;
+                if (request.sourceSampleRate < kMinimumDeviceSampleRate
+                    || request.sourceSampleRate > kMaximumDeviceSampleRate
+                    || channelCount <= 0
+                    || channelCount > kMaximumPluginOutputChannels
+                    || !hasExactFrameLayout
+                    || request.sourceFrameCount() <= 0)
+                {
+                    continue;
+                }
+
+                AudioSourceState source;
+                source.displayName = std::move(request.displayName);
+                source.sourceSampleRate = request.sourceSampleRate;
+                source.sourceChannelCount = request.sourceChannelCount;
+                source.startSample = std::max<std::int64_t>(0, request.startSample);
+                source.interleavedAudio = std::move(request.interleavedAudio);
+                source.outputGain = mw::audio::sanitizeMainUiGain(request.outputGain);
+                source.sourceFrames = static_cast<std::int64_t>(source.interleavedAudio.size()
+                    / static_cast<std::size_t>(source.sourceChannelCount));
+                audioSources.push_back(std::move(source));
             }
 
             prepareTracks(kFallbackSampleRate, 512);
@@ -133,6 +182,7 @@ namespace mw::clap
         int getSampleRate() const noexcept { return sampleRate.load(); }
         int getTrackIndex() const noexcept { return primaryTrackIndex.load(); }
         int getTrackCount() const noexcept { return trackCount.load(); }
+        int getAudioSourceCount() const noexcept { return audioSourceCount.load(); }
         int getProcessedBlocks() const noexcept { return processedBlocks.load(); }
         int getSubmittedEvents() const noexcept { return submittedEvents.load(); }
         int getSkippedBlocks() const noexcept { return skippedBlocks.load(); }
@@ -147,6 +197,7 @@ namespace mw::clap
         int getStopFlushSucceeded() const noexcept { return stopFlushSucceeded.load(); }
         int getStopFlushSkippedBusy() const noexcept { return stopFlushSkippedBusy.load(); }
         int getClippedSamples() const noexcept { return clippedSamples.load(); }
+        std::int64_t getCurrentSample() const noexcept { return currentSample.load(); }
         std::int64_t getTotalSamples() const noexcept { return totalSamples.load(); }
         float getPeak() const noexcept { return outputPeak.load(); }
         juce::String getLastMessage() const
@@ -187,6 +238,18 @@ namespace mw::clap
             bool prepared = false;
             bool finished = false;
             bool failed = false;
+        };
+
+        struct AudioSourceState
+        {
+            std::string displayName;
+            int sourceSampleRate = kFallbackSampleRate;
+            int sourceChannelCount = 2;
+            std::int64_t startSample = 0;
+            std::int64_t sourceFrames = 0;
+            std::vector<float> interleavedAudio;
+            float outputGain = 1.0f;
+            bool finished = false;
         };
 
         static int noteChannelIndex(int midiChannel) noexcept
@@ -309,10 +372,27 @@ namespace mw::clap
                 }
             }
 
-            prepared = preparedTrackCount > 0;
+            int preparedAudioSourceCount = 0;
+            for (auto& source : audioSources)
+            {
+                source.finished = source.sourceFrames <= 0;
+                if (source.finished)
+                    continue;
+
+                ++preparedAudioSourceCount;
+                const auto durationAtDeviceRate = static_cast<std::int64_t>(std::ceil(
+                    static_cast<double>(source.sourceFrames)
+                    * static_cast<double>(deviceSampleRate)
+                    / static_cast<double>(std::max(1, source.sourceSampleRate))));
+                aggregateTotalSamples = std::max(aggregateTotalSamples, source.startSample + durationAtDeviceRate);
+            }
+
+            prepared = preparedTrackCount > 0 || preparedAudioSourceCount > 0;
             sampleRate.store(deviceSampleRate);
+            currentSample.store(0);
             primaryTrackIndex.store(firstTrackIndex);
             trackCount.store(preparedTrackCount);
+            audioSourceCount.store(preparedAudioSourceCount);
             scheduledEvents.store(aggregateScheduledEvents);
             maxEventsPerBlock.store(aggregateMaxEventsPerBlock);
             liveEffectSlotCount.store(aggregateLiveEffectSlots);
@@ -367,8 +447,17 @@ namespace mw::clap
                     return false;
                 }
 
-                if (effectResult.outputFrameCount <= 0 || effectResult.outputChannelCount <= 0)
-                    continue;
+                if (!hasValidPluginOutputBuffer(frames,
+                                                effectResult.outputFrameCount,
+                                                effectResult.outputChannelCount,
+                                                effectResult.interleavedAudio.size()))
+                {
+                    failed.store(true);
+                    finished.store(true);
+                    const juce::ScopedLock lock(messageLock);
+                    lastMessage = "CLAP live effect returned an invalid audio buffer.";
+                    return false;
+                }
 
                 interleavedAudio = std::move(effectResult.interleavedAudio);
                 audioChannels = effectResult.outputChannelCount;
@@ -376,6 +465,92 @@ namespace mw::clap
             }
 
             return true;
+        }
+
+        void mixOutputSample(float* const* outputChannelData,
+                             int channel,
+                             int frame,
+                             float sample,
+                             float& localPeak)
+        {
+            if (outputChannelData[channel] == nullptr)
+                return;
+
+            if (!std::isfinite(sample))
+                sample = 0.0f;
+
+            auto mixed = outputChannelData[channel][frame] + sample;
+            if (mixed > 1.0f)
+            {
+                mixed = 1.0f;
+                clippedSamples.fetch_add(1);
+            }
+            else if (mixed < -1.0f)
+            {
+                mixed = -1.0f;
+                clippedSamples.fetch_add(1);
+            }
+
+            outputChannelData[channel][frame] = mixed;
+            localPeak = std::max(localPeak, std::abs(mixed));
+        }
+
+        bool mixAudioSources(float* const* outputChannelData,
+                             int numOutputChannels,
+                             int numSamples,
+                             std::int64_t blockStartSample,
+                             float& localPeak)
+        {
+            bool processed = false;
+            const auto deviceRate = std::max(1, sampleRate.load());
+
+            for (auto& source : audioSources)
+            {
+                if (source.finished || source.sourceFrames <= 0)
+                    continue;
+
+                for (int frame = 0; frame < numSamples; ++frame)
+                {
+                    const auto timelineSample = blockStartSample + frame;
+                    if (timelineSample < source.startSample)
+                        continue;
+
+                    const double sourcePosition = static_cast<double>(timelineSample - source.startSample)
+                        * static_cast<double>(source.sourceSampleRate)
+                        / static_cast<double>(deviceRate);
+                    const auto sourceFrame0 = static_cast<std::int64_t>(std::floor(sourcePosition));
+                    if (sourceFrame0 >= source.sourceFrames)
+                    {
+                        source.finished = true;
+                        break;
+                    }
+
+                    const auto sourceFrame1 = std::min(source.sourceFrames - 1, sourceFrame0 + 1);
+                    const auto fraction = static_cast<float>(sourcePosition - static_cast<double>(sourceFrame0));
+                    for (int channel = 0; channel < numOutputChannels; ++channel)
+                    {
+                        const auto sourceChannel = std::min(channel, source.sourceChannelCount - 1);
+                        const auto index0 = static_cast<std::size_t>(sourceFrame0 * source.sourceChannelCount + sourceChannel);
+                        const auto index1 = static_cast<std::size_t>(sourceFrame1 * source.sourceChannelCount + sourceChannel);
+                        if (index0 >= source.interleavedAudio.size() || index1 >= source.interleavedAudio.size())
+                        {
+                            failed.store(true);
+                            finished.store(true);
+                            const juce::ScopedLock lock(messageLock);
+                            lastMessage = "Rendered fallback audio source had invalid buffer dimensions.";
+                            return false;
+                        }
+
+                        const auto sample0 = source.interleavedAudio[index0];
+                        const auto sample1 = source.interleavedAudio[index1];
+                        const auto sampleValue = (sample0 + ((sample1 - sample0) * fraction)) * source.outputGain;
+                        mixOutputSample(outputChannelData, channel, frame, sampleValue, localPeak);
+                    }
+                    processed = true;
+                }
+            }
+
+            return processed;
         }
 
         void processAudio(const float* const*,
@@ -447,8 +622,21 @@ namespace mw::clap
                 updateActiveNotesFromRequest(track, request);
 
                 auto blockAudio = std::move(result.interleavedAudio);
-                auto outputChannels = std::max(0, result.outputChannelCount);
-                const auto outputFrames = std::max(0, result.outputFrameCount);
+                auto outputChannels = result.outputChannelCount;
+                const auto outputFrames = result.outputFrameCount;
+                if (!hasValidPluginOutputBuffer(request.frameCount,
+                                                outputFrames,
+                                                outputChannels,
+                                                blockAudio.size()))
+                {
+                    track.failed = true;
+                    failed.store(true);
+                    finished.store(true);
+                    const juce::ScopedLock lock(messageLock);
+                    lastMessage = "CLAP live instrument returned an invalid audio buffer.";
+                    return;
+                }
+
                 const auto framesToCopy = std::min({ numSamples, request.frameCount, outputFrames });
 
                 if (!processLiveEffectsForTrack(track, blockAudio, outputChannels, framesToCopy))
@@ -466,23 +654,7 @@ namespace mw::clap
                                 sample = blockAudio[idx] * track.outputGain;
                         }
 
-                        if (outputChannelData[ch] != nullptr)
-                        {
-                            auto mixed = outputChannelData[ch][frame] + sample;
-                            if (mixed > 1.0f)
-                            {
-                                mixed = 1.0f;
-                                clippedSamples.fetch_add(1);
-                            }
-                            else if (mixed < -1.0f)
-                            {
-                                mixed = -1.0f;
-                                clippedSamples.fetch_add(1);
-                            }
-
-                            outputChannelData[ch][frame] = mixed;
-                            localPeak = std::max(localPeak, std::abs(mixed));
-                        }
+                        mixOutputSample(outputChannelData, ch, frame, sample, localPeak);
                     }
                 }
 
@@ -492,8 +664,15 @@ namespace mw::clap
                     track.finished = true;
             }
 
+            const auto blockStartSample = currentSample.load();
+            const bool anyAudioSourceProcessed = mixAudioSources(
+                outputChannelData, numOutputChannels, numSamples, blockStartSample, localPeak);
+            if (failed.load())
+                return;
+
+            currentSample.store(blockStartSample + numSamples);
             outputPeak.store(localPeak);
-            if (anyTrackProcessedThisBlock)
+            if (anyTrackProcessedThisBlock || anyAudioSourceProcessed)
             {
                 processedBlocks.fetch_add(1);
                 submittedEvents.fetch_add(eventsThisCallback);
@@ -509,11 +688,23 @@ namespace mw::clap
                 }
             }
 
-            if (!anyTrackStillActive || allPreparedTracksFinished)
+            bool allAudioSourcesFinished = true;
+            for (const auto& source : audioSources)
+            {
+                if (!source.finished)
+                {
+                    allAudioSourcesFinished = false;
+                    break;
+                }
+            }
+
+            const bool tracksFinished = tracks.empty() || !anyTrackStillActive || allPreparedTracksFinished;
+            if (tracksFinished && allAudioSourcesFinished)
                 finished.store(true);
         }
 
         std::vector<TrackState> tracks;
+        std::vector<AudioSourceState> audioSources;
         int requestedOutputChannels = 2;
         bool prepared = false;
         std::atomic<bool> finished { false };
@@ -521,6 +712,7 @@ namespace mw::clap
         std::atomic<int> sampleRate { kFallbackSampleRate };
         std::atomic<int> primaryTrackIndex { -1 };
         std::atomic<int> trackCount { 0 };
+        std::atomic<int> audioSourceCount { 0 };
         std::atomic<int> processedBlocks { 0 };
         std::atomic<int> submittedEvents { 0 };
         std::atomic<int> skippedBlocks { 0 };
@@ -535,6 +727,7 @@ namespace mw::clap
         std::atomic<int> stopFlushSucceeded { 0 };
         std::atomic<int> stopFlushSkippedBusy { 0 };
         std::atomic<int> clippedSamples { 0 };
+        std::atomic<std::int64_t> currentSample { 0 };
         std::atomic<std::int64_t> totalSamples { 0 };
         std::atomic<float> outputPeak { 0.0f };
         mutable juce::CriticalSection messageLock;
@@ -560,8 +753,11 @@ namespace mw::clap
 
         if (trackCount > 1)
             text << " Tracks " << trackCount << ".";
+        if (audioSourceCount > 0)
+            text << " Prepared audio sources " << audioSourceCount << ".";
 
-        text << " Blocks " << processedBlocks
+        text << " Position samples " << currentSample << "/" << totalSamples
+             << ", blocks " << processedBlocks
              << ", scheduled events " << scheduledEvents
              << ", submitted events " << submittedEvents
              << ", skipped busy blocks " << skippedBusyBlocks;
@@ -598,11 +794,11 @@ namespace mw::clap
 
         juce::String text = hadFailure ? "CLAP Preview stopped after callback failure. " : "CLAP Preview stopped. ";
         if (trackCount > 1)
-            text << "Tracks " << trackCount << ", blocks ";
-        else
-            text << "Blocks ";
-
-        text << processedBlocks
+            text << "Tracks " << trackCount << ", ";
+        if (audioSourceCount > 0)
+            text << "prepared audio sources " << audioSourceCount << ", ";
+        text << "position samples " << currentSample << "/" << totalSamples << ", blocks "
+             << processedBlocks
              << ", scheduled events " << scheduledEvents
              << ", submitted events " << submittedEvents
              << ", skipped busy blocks " << skippedBusyBlocks;
@@ -659,15 +855,24 @@ namespace mw::clap
     ClapLiveDirectPreviewStartResult ClapLiveDirectPreviewEngine::start(std::vector<ClapLiveDirectPreviewTrackRequest> tracks,
                                                                         int outputChannelCount)
     {
+        return start(std::move(tracks), {}, outputChannelCount);
+    }
+
+    ClapLiveDirectPreviewStartResult ClapLiveDirectPreviewEngine::start(
+        std::vector<ClapLiveDirectPreviewTrackRequest> tracks,
+        std::vector<ClapLiveDirectPreviewAudioSourceRequest> audioSources,
+        int outputChannelCount)
+    {
         stop();
 
         ClapLiveDirectPreviewStartResult result;
         result.outputChannelCount = sanitizeOutputChannelCount(outputChannelCount);
 
-        auto callback = std::make_unique<DirectPreviewAudioCallback>(std::move(tracks), result.outputChannelCount);
+        auto callback = std::make_unique<DirectPreviewAudioCallback>(std::move(tracks), std::move(audioSources), result.outputChannelCount);
 
         result.trackIndex = callback->getTrackIndex();
         result.trackCount = callback->getTrackCount();
+        result.audioSourceCount = callback->getAudioSourceCount();
         result.sampleRate = callback->getSampleRate();
         result.scheduledEvents = callback->getScheduledEvents();
         result.maxEventsPerBlock = callback->getMaxEventsPerBlock();
@@ -680,11 +885,14 @@ namespace mw::clap
         result.stopFlushSucceeded = callback->getStopFlushSucceeded();
         result.stopFlushSkippedBusy = callback->getStopFlushSkippedBusy();
         result.clippedSamples = callback->getClippedSamples();
+        result.currentSample = callback->getCurrentSample();
         result.totalSamples = callback->getTotalSamples();
 
-        if (result.trackCount <= 0 || result.scheduledEvents <= 0 || result.totalSamples <= 0)
+        if ((result.trackCount <= 0 && result.audioSourceCount <= 0)
+            || (result.trackCount > 0 && result.scheduledEvents <= 0)
+            || result.totalSamples <= 0)
         {
-            result.errorMessage = "No CLAP tracks produced schedulable note events.";
+            result.errorMessage = "No live CLAP tracks or rendered audio sources produced playable content.";
             return result;
         }
 
@@ -701,6 +909,7 @@ namespace mw::clap
         // The audio callback may have re-prepared against the actual device rate/block size.
         result.trackIndex = callback->getTrackIndex();
         result.trackCount = callback->getTrackCount();
+        result.audioSourceCount = callback->getAudioSourceCount();
         result.sampleRate = callback->getSampleRate();
         result.scheduledEvents = callback->getScheduledEvents();
         result.maxEventsPerBlock = callback->getMaxEventsPerBlock();
@@ -713,11 +922,19 @@ namespace mw::clap
         result.stopFlushSucceeded = callback->getStopFlushSucceeded();
         result.stopFlushSkippedBusy = callback->getStopFlushSkippedBusy();
         result.clippedSamples = callback->getClippedSamples();
+        result.currentSample = callback->getCurrentSample();
         result.totalSamples = callback->getTotalSamples();
         result.started = true;
-        result.message = result.trackCount > 1
-            ? "Direct multi-track CLAP project preview is using the audio callback path. Rendered preview remains available as fallback."
-            : "Direct selected-track CLAP preview is using the audio callback path. Temp-WAV preview remains available as fallback.";
+        if (result.audioSourceCount > 0 && result.trackCount > 0)
+            result.message = "Hybrid project preview is mixing live CLAP tracks with prepared rendered sources through one audio callback.";
+        else if (result.trackCount > 1)
+            result.message = "Direct multi-track CLAP project preview is using the audio callback path. Rendered preview remains available as fallback.";
+        else if (result.trackCount == 1)
+            result.message = "Direct selected-track CLAP preview is using the audio callback path. Temp-WAV preview remains available as fallback.";
+        else
+            result.message = "Prepared rendered preview audio is using the direct audio callback path.";
+        if (result.audioSourceCount > 0)
+            result.message << " Prepared audio sources active: " << result.audioSourceCount << ".";
         if (result.liveEffectSlotCount > 0)
             result.message << " Live CLAP effect slots active: " << result.liveEffectSlotCount << ".";
         result.message << " Busy-block watchdog and stop note-off flush are enabled.";
@@ -742,6 +959,7 @@ namespace mw::clap
             summary.hadFailure = callback_->hasFailed();
             summary.trackIndex = callback_->getTrackIndex();
             summary.trackCount = callback_->getTrackCount();
+            summary.audioSourceCount = callback_->getAudioSourceCount();
             summary.processedBlocks = callback_->getProcessedBlocks();
             summary.submittedEvents = callback_->getSubmittedEvents();
             summary.skippedBusyBlocks = callback_->getSkippedBlocks();
@@ -756,6 +974,7 @@ namespace mw::clap
             summary.stopFlushSucceeded = callback_->getStopFlushSucceeded();
             summary.stopFlushSkippedBusy = callback_->getStopFlushSkippedBusy();
             summary.clippedSamples = callback_->getClippedSamples();
+            summary.currentSample = callback_->getCurrentSample();
             summary.totalSamples = callback_->getTotalSamples();
             summary.peak = callback_->getPeak();
             summary.lastMessage = callback_->getLastMessage();
@@ -785,6 +1004,7 @@ namespace mw::clap
             snapshot.hadFailure = callback_->hasFailed();
             snapshot.trackIndex = callback_->getTrackIndex();
             snapshot.trackCount = callback_->getTrackCount();
+            snapshot.audioSourceCount = callback_->getAudioSourceCount();
             snapshot.processedBlocks = callback_->getProcessedBlocks();
             snapshot.submittedEvents = callback_->getSubmittedEvents();
             snapshot.skippedBusyBlocks = callback_->getSkippedBlocks();
@@ -799,6 +1019,7 @@ namespace mw::clap
             snapshot.stopFlushSucceeded = callback_->getStopFlushSucceeded();
             snapshot.stopFlushSkippedBusy = callback_->getStopFlushSkippedBusy();
             snapshot.clippedSamples = callback_->getClippedSamples();
+            snapshot.currentSample = callback_->getCurrentSample();
             snapshot.totalSamples = callback_->getTotalSamples();
             snapshot.peak = callback_->getPeak();
             snapshot.lastMessage = callback_->getLastMessage();

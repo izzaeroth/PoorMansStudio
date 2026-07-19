@@ -3,6 +3,7 @@
 #include "clap/ClapLiveCallbackBridge.h"
 #include "clap/ClapLiveEffectSession.h"
 #include "clap/ClapLiveInstrumentSession.h"
+#include "core/StableId.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
@@ -24,6 +25,7 @@ namespace mw::clap
 
     struct ClapLiveDirectPreviewTrackRequest
     {
+        mw::core::StableId stableTrackId = 0;
         int trackIndex = -1;
         std::string trackName;
         ClapLiveInstrumentSession* session = nullptr;
@@ -34,11 +36,30 @@ namespace mw::clap
         float outputGain = 1.0f;
     };
 
+
+    struct ClapLiveDirectPreviewAudioSourceRequest
+    {
+        std::string displayName;
+        int sourceSampleRate = 48000;
+        int sourceChannelCount = 2;
+        std::int64_t startSample = 0;
+        std::vector<float> interleavedAudio;
+        float outputGain = 1.0f;
+
+        std::int64_t sourceFrameCount() const noexcept
+        {
+            return sourceChannelCount > 0
+                ? static_cast<std::int64_t>(interleavedAudio.size() / static_cast<std::size_t>(sourceChannelCount))
+                : 0;
+        }
+    };
+
     struct ClapLiveDirectPreviewStartResult
     {
         bool started = false;
         int trackIndex = -1;
         int trackCount = 0;
+        int audioSourceCount = 0;
         int sampleRate = 48000;
         int outputChannelCount = 2;
         int scheduledEvents = 0;
@@ -53,6 +74,7 @@ namespace mw::clap
         int stopFlushSucceeded = 0;
         int stopFlushSkippedBusy = 0;
         int clippedSamples = 0;
+        std::int64_t currentSample = 0;
         std::int64_t totalSamples = 0;
         juce::String message;
         juce::String errorMessage;
@@ -68,6 +90,7 @@ namespace mw::clap
         bool hadFailure = false;
         int trackIndex = -1;
         int trackCount = 0;
+        int audioSourceCount = 0;
         int processedBlocks = 0;
         int submittedEvents = 0;
         int skippedBusyBlocks = 0;
@@ -82,6 +105,7 @@ namespace mw::clap
         int stopFlushSucceeded = 0;
         int stopFlushSkippedBusy = 0;
         int clippedSamples = 0;
+        std::int64_t currentSample = 0;
         std::int64_t totalSamples = 0;
         float peak = 0.0f;
         juce::String lastMessage;
@@ -96,6 +120,7 @@ namespace mw::clap
         bool hadFailure = false;
         int trackIndex = -1;
         int trackCount = 0;
+        int audioSourceCount = 0;
         int processedBlocks = 0;
         int submittedEvents = 0;
         int skippedBusyBlocks = 0;
@@ -110,6 +135,7 @@ namespace mw::clap
         int stopFlushSucceeded = 0;
         int stopFlushSkippedBusy = 0;
         int clippedSamples = 0;
+        std::int64_t currentSample = 0;
         std::int64_t totalSamples = 0;
         float peak = 0.0f;
         juce::String lastMessage;
@@ -132,6 +158,10 @@ namespace mw::clap
                                                ClapLiveCallbackBridgeConfig config);
 
         ClapLiveDirectPreviewStartResult start(std::vector<ClapLiveDirectPreviewTrackRequest> tracks,
+                                               int outputChannelCount = 2);
+
+        ClapLiveDirectPreviewStartResult start(std::vector<ClapLiveDirectPreviewTrackRequest> tracks,
+                                               std::vector<ClapLiveDirectPreviewAudioSourceRequest> audioSources,
                                                int outputChannelCount = 2);
 
         ClapLiveDirectPreviewStopSummary stop();

@@ -45,6 +45,14 @@ namespace mw::clap
         std::vector<float> interleavedInputAudio;
     };
 
+
+    struct ClapLiveEffectRealtimeProcessResult
+    {
+        bool success = false;
+        int processStatus = -1;
+        int outputChannelCount = 0;
+    };
+
     struct ClapLiveEffectProcessResult
     {
         bool success = false;
@@ -71,6 +79,11 @@ namespace mw::clap
         bool isOpen() const;
         ClapLiveEffectSessionInfo info() const;
         ClapLiveEffectProcessResult processBlock(const ClapLiveEffectProcessRequest& request);
+        ClapLiveEffectRealtimeProcessResult processPlanarBlock(const float* const* inputChannelData,
+                                                               int inputChannelCount,
+                                                               float* const* outputChannelData,
+                                                               int outputChannelCount,
+                                                               int frameCount) noexcept;
 
     private:
         struct Impl;

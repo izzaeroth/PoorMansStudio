@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "core/InstrumentAssignment.h"
+#include "core/StableId.h"
 #include "core/NoteEvent.h"
 
 namespace mw::core
@@ -43,7 +44,7 @@ namespace mw::core
     class Track
     {
     public:
-        explicit Track(std::string n = "Untitled Track") : name(std::move(n))
+        explicit Track(std::string n = "Untitled Track") : stableId(allocateStableId()), name(std::move(n))
         {
             instrument.displayName = name;
             instrument.originalImportedName = name;
@@ -51,6 +52,9 @@ namespace mw::core
         }
 
         void addNote(const NoteEvent& note) { notes.push_back(note); }
+
+        StableId getStableId() const noexcept { return stableId; }
+        void setStableId(StableId id) noexcept { stableId = id > 0 ? id : allocateStableId(); }
 
         const std::string& getName() const { return name; }
         void setName(std::string n) { name = std::move(n); }
@@ -93,6 +97,7 @@ namespace mw::core
         bool isAudioClipTrack() const { return trackType == TrackType::AudioClip; }
 
     private:
+        StableId stableId = 0;
         std::string name;
         InstrumentAssignment instrument;
         bool muted = false;

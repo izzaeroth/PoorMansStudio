@@ -3,9 +3,11 @@
 #include <filesystem>
 #include <string>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 #include "core/Track.h"
+#include "core/StableId.h"
 #include "core/AudioClip.h"
 
 namespace mw::core
@@ -20,7 +22,7 @@ namespace mw::core
     {
         std::string projectFileExtension = ".mwproj";
         std::string projectFormatName = "MusicWorkstationProject";
-        int projectFormatVersion = 8;
+        int projectFormatVersion = 9;
     };
 
     struct ProjectSequenceMetadata
@@ -104,13 +106,16 @@ namespace mw::core
         static constexpr int maxTrackCount = 300;
         static constexpr int maxSequenceCount = 300;
 
-        explicit Project(std::string n = "Untitled Project") : name(std::move(n)) {}
+        explicit Project(std::string n = "Untitled Project") : stableId(allocateStableId()), name(std::move(n)) {}
 
         Track& addTrack(std::string n)
         {
             tracks.emplace_back(std::move(n));
             return tracks.back();
         }
+
+        StableId getStableId() const noexcept { return stableId; }
+        void setStableId(StableId id) noexcept { stableId = id > 0 ? id : allocateStableId(); }
 
         const std::string& getName() const { return name; }
         void setName(std::string n) { name = std::move(n); }
@@ -138,6 +143,28 @@ namespace mw::core
         std::vector<AudioClip>& getAudioClips() { return audioClips; }
         void setAudioClips(std::vector<AudioClip> newAudioClips) { audioClips = std::move(newAudioClips); }
 
+
+        void ensureUniqueStableIds()
+        {
+            if (stableId == 0)
+                stableId = allocateStableId();
+
+            std::unordered_set<StableId> seen;
+            for (auto& track : tracks)
+            {
+                auto id = track.getStableId();
+                if (id == 0 || !seen.insert(id).second)
+                {
+                    do
+                    {
+                        id = allocateStableId();
+                    }
+                    while (!seen.insert(id).second);
+                    track.setStableId(id);
+                }
+            }
+        }
+
         int allocateNextAudioClipId() const
         {
             int maxId = 0;
@@ -147,6 +174,7 @@ namespace mw::core
         }
 
     private:
+        StableId stableId = 0;
         std::string name;
         int tempoBpm = 120;
         TimeSignature timeSignature {};

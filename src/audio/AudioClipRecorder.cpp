@@ -1,5 +1,6 @@
 #include "audio/AudioClipRecorder.h"
 
+#include "clap/ClapLiveEffectSession.h"
 #include "vst/VstInstrumentHost.h"
 
 #include <algorithm>
@@ -63,12 +64,14 @@ namespace mw::audio
         }
 
         int availableOutputChannels = 0;
+        int currentDeviceBlockSize = 512;
         if (auto* device = deviceManager.getCurrentAudioDevice())
         {
             currentSampleRate = device->getCurrentSampleRate();
             if (currentSampleRate <= 0.0)
                 currentSampleRate = 48000.0;
             availableOutputChannels = device->getActiveOutputChannels().countNumberOfSetBits();
+            currentDeviceBlockSize = juce::jlimit(16, 8192, device->getCurrentBufferSizeSamples());
         }
 
         if (liveEffectOptions.enabled)
@@ -89,13 +92,16 @@ namespace mw::audio
                     liveEffectMonitorSummary = result.liveEffectMessage;
                 }
             }
-            else if (!liveEffectOptions.effect.hasPluginIdentity() || liveEffectOptions.effect.bundlePath.empty())
+            else if ((liveEffectOptions.backendType != mw::core::EffectSlotBackendType::VST3
+                      && liveEffectOptions.backendType != mw::core::EffectSlotBackendType::CLAP)
+                     || !liveEffectOptions.effect.hasPluginIdentity()
+                     || liveEffectOptions.effect.bundlePath.empty())
             {
-                result.recordEffectMessage = "Track effect recording requested, but the target track does not have an Effect Slot assignment.";
+                result.recordEffectMessage = "Track effect recording requested, but the target track does not have a supported VST3 or CLAP Effect Slot assignment.";
                 recordEffectSummary = result.recordEffectMessage;
                 if (liveEffectOptions.monitorEnabled)
                 {
-                    result.liveEffectMessage = "Track Live Effect requested, but the target track does not have an Effect Slot assignment.";
+                    result.liveEffectMessage = "Track Live Effect requested, but the target track does not have a supported VST3 or CLAP Effect Slot assignment.";
                     liveEffectMonitorSummary = result.liveEffectMessage;
                 }
             }
@@ -115,14 +121,62 @@ namespace mw::audio
                     ? juce::jlimit(1, 2, std::max(channelCount, std::min(2, availableOutputChannels)))
                     : juce::jlimit(1, 2, channelCount);
 
-                auto load = mw::vst::VstInstrumentHost::loadPluginAssignment(liveEffectOptions.effect, currentSampleRate, 512, requestedProcessChannels, requestedProcessChannels);
-                if (load.success && load.instance != nullptr)
+                bool effectLoaded = false;
+                std::string loadMessage;
+                if (liveEffectOptions.backendType == mw::core::EffectSlotBackendType::VST3)
                 {
-                    liveEffectInstance = std::move(load.instance);
+                    auto load = mw::vst::VstInstrumentHost::loadPluginAssignment(liveEffectOptions.effect,
+                                                                                currentSampleRate,
+                                                                                currentDeviceBlockSize,
+                                                                                requestedProcessChannels,
+                                                                                requestedProcessChannels);
+                    if (load.success && load.instance != nullptr)
+                    {
+                        liveEffectInstance = std::move(load.instance);
+                        liveEffectBackend = mw::core::EffectSlotBackendType::VST3;
+                        effectLoaded = true;
+                    }
+                    else
+                    {
+                        loadMessage = load.message;
+                    }
+                }
+                else
+                {
+                    auto session = std::make_unique<mw::clap::ClapLiveEffectSession>();
+                    mw::clap::ClapLiveEffectSessionConfig config;
+                    config.pluginPath = liveEffectOptions.effect.bundlePath;
+                    config.pluginUid = liveEffectOptions.effect.uid;
+                    config.pluginName = liveEffectOptions.effect.name;
+                    config.stateBase64 = liveEffectOptions.effect.stateBase64;
+                    config.sampleRate = static_cast<int>(std::lround(currentSampleRate));
+                    config.channelCount = requestedProcessChannels;
+                    config.blockSize = currentDeviceBlockSize;
+
+                    if (session->open(config, loadMessage))
+                    {
+                        const auto sessionInfo = session->info();
+                        if (sessionInfo.inputChannelCount <= 0)
+                        {
+                            session->close();
+                            loadMessage = "CLAP effect does not expose an audio input port for microphone recording.";
+                        }
+                        else
+                        {
+                            liveClapEffectSession = std::move(session);
+                            liveEffectBackend = mw::core::EffectSlotBackendType::CLAP;
+                            effectLoaded = true;
+                        }
+                    }
+                }
+
+                if (effectLoaded)
+                {
                     recordEffectProcessChannels = requestedProcessChannels;
                     recordEffectActive = true;
                     result.recordEffectActive = true;
-                    result.recordEffectMessage = "Track Effect Slot will be printed into the recorded take: " + effectName
+                    const auto backendName = liveEffectBackend == mw::core::EffectSlotBackendType::CLAP ? "CLAP" : "VST3";
+                    result.recordEffectMessage = std::string("Track Effect Slot will be printed into the recorded take using ") + backendName + ": " + effectName
                         + (liveEffectOptions.trackName.empty() ? std::string() : (" on " + liveEffectOptions.trackName));
                     recordEffectSummary = result.recordEffectMessage;
 
@@ -133,7 +187,7 @@ namespace mw::audio
                             liveEffectMonitorChannels = requestedProcessChannels;
                             liveEffectMonitorActive = true;
                             result.liveEffectMonitorActive = true;
-                            result.liveEffectMessage = "Track Live Effect monitor active: " + effectName
+                            result.liveEffectMessage = std::string("Track Live Effect monitor active using ") + backendName + ": " + effectName
                                 + (liveEffectOptions.trackName.empty() ? std::string() : (" on " + liveEffectOptions.trackName));
                             liveEffectMonitorSummary = result.liveEffectMessage;
                         }
@@ -146,12 +200,13 @@ namespace mw::audio
                 }
                 else
                 {
-                    result.recordEffectMessage = "Track Effect Slot could not load for wet recording; dry recording continues: " + load.message;
+                    result.recordEffectMessage = "Track Effect Slot could not load for wet recording; dry recording continues: " + loadMessage;
                     recordEffectSummary = result.recordEffectMessage;
                     recordEffectProcessChannels = 0;
+                    liveEffectBackend = mw::core::EffectSlotBackendType::None;
                     if (liveEffectOptions.monitorEnabled)
                     {
-                        result.liveEffectMessage = "Track Live Effect could not load the assigned Effect Slot for live monitoring: " + load.message;
+                        result.liveEffectMessage = "Track Live Effect could not load the assigned Effect Slot for live monitoring: " + loadMessage;
                         liveEffectMonitorSummary = result.liveEffectMessage;
                         liveEffectMonitorChannels = 0;
                     }
@@ -181,9 +236,9 @@ namespace mw::audio
 
         stream.release();
         threadedWriter = std::make_unique<juce::AudioFormatWriter::ThreadedWriter>(writer.release(), backgroundThread, 32768);
-        scratchBuffer = std::make_unique<juce::AudioBuffer<float>>(channelCount, 4096);
+        scratchBuffer = std::make_unique<juce::AudioBuffer<float>>(channelCount, juce::jmax(4096, currentDeviceBlockSize));
         if (recordEffectActive.load())
-            effectBuffer = std::make_unique<juce::AudioBuffer<float>>(juce::jmax(1, recordEffectProcessChannels), 4096);
+            effectBuffer = std::make_unique<juce::AudioBuffer<float>>(juce::jmax(1, recordEffectProcessChannels), juce::jmax(4096, currentDeviceBlockSize));
         activeWriter = threadedWriter.get();
         paused = false;
         recording = true;
@@ -275,6 +330,12 @@ namespace mw::audio
             liveEffectInstance->releaseResources();
             liveEffectInstance.reset();
         }
+        if (liveClapEffectSession)
+        {
+            liveClapEffectSession->close();
+            liveClapEffectSession.reset();
+        }
+        liveEffectBackend = mw::core::EffectSlotBackendType::None;
         liveEffectMonitorSummary.clear();
         recordEffectSummary.clear();
     }
@@ -359,7 +420,7 @@ namespace mw::audio
                 juce::FloatVectorOperations::multiply(dest, gain, numSamples);
         }
 
-        if (recordEffectActive.load() && liveEffectInstance && effectBuffer
+        if (recordEffectActive.load() && effectBuffer
             && effectBuffer->getNumSamples() >= numSamples)
         {
             const int processChannels = juce::jlimit(1, effectBuffer->getNumChannels(), juce::jmax(1, recordEffectProcessChannels));
@@ -376,11 +437,32 @@ namespace mw::audio
                     juce::FloatVectorOperations::clear(dest, numSamples);
             }
 
-            juce::MidiBuffer emptyMidi;
+            bool processingSucceeded = false;
             try
             {
-                liveEffectInstance->processBlock(*effectBuffer, emptyMidi);
+                if (liveEffectBackend == mw::core::EffectSlotBackendType::VST3 && liveEffectInstance)
+                {
+                    juce::MidiBuffer emptyMidi;
+                    liveEffectInstance->processBlock(*effectBuffer, emptyMidi);
+                    processingSucceeded = true;
+                }
+                else if (liveEffectBackend == mw::core::EffectSlotBackendType::CLAP && liveClapEffectSession)
+                {
+                    const auto clapResult = liveClapEffectSession->processPlanarBlock(effectBuffer->getArrayOfReadPointers(),
+                                                                                     processChannels,
+                                                                                     effectBuffer->getArrayOfWritePointers(),
+                                                                                     processChannels,
+                                                                                     numSamples);
+                    processingSucceeded = clapResult.success;
+                }
+            }
+            catch (...)
+            {
+                processingSucceeded = false;
+            }
 
+            if (processingSucceeded)
+            {
                 for (int ch = 0; ch < channelCount; ++ch)
                 {
                     if (ch < processChannels)
@@ -404,7 +486,7 @@ namespace mw::audio
                     }
                 }
             }
-            catch (...)
+            else
             {
                 recordEffectActive = false;
                 liveEffectMonitorActive = false;

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <sstream>
@@ -630,6 +631,11 @@ namespace mw::clap
             infoState.startedProcessing = true;
             infoState.open = true;
 
+            if (inputChannelCount > 0)
+                realtimeInputStorage.build(inputChannelCount, infoState.blockSize);
+            realtimeOutputStorage.build(std::max(1, outputChannelCount), infoState.blockSize);
+            realtimeStorageReady = true;
+
             std::ostringstream message;
             message << "CLAP live effect instance opened and started for "
                     << (config.pluginName.empty() ? safeString(selectedDesc->name) : config.pluginName)
@@ -642,6 +648,105 @@ namespace mw::clap
                     << ".";
             infoState.message = message.str();
             return true;
+        }
+
+        ClapLiveEffectRealtimeProcessResult processPlanarBlock(const float* const* inputChannelData,
+                                                                     int suppliedInputChannelCount,
+                                                                     float* const* outputChannelData,
+                                                                     int suppliedOutputChannelCount,
+                                                                     int frameCount) noexcept
+        {
+            ClapLiveEffectRealtimeProcessResult result;
+            if (!isOpen() || plugin == nullptr || plugin->process == nullptr || !realtimeStorageReady)
+                return result;
+            if (frameCount <= 0 || frameCount > infoState.blockSize || suppliedOutputChannelCount <= 0 || outputChannelData == nullptr)
+                return result;
+
+            const auto frames = frameCount;
+            const auto pluginInputChannels = std::max(0, inputChannelCount);
+            const auto pluginOutputChannels = std::max(1, outputChannelCount);
+
+            if (pluginInputChannels > 0)
+            {
+                if (static_cast<int>(realtimeInputStorage.samples.size()) < pluginInputChannels)
+                    return result;
+
+                for (int channel = 0; channel < pluginInputChannels; ++channel)
+                {
+                    auto& destination = realtimeInputStorage.samples[static_cast<std::size_t>(channel)];
+                    const float* source = nullptr;
+                    if (inputChannelData != nullptr && suppliedInputChannelCount > 0)
+                        source = inputChannelData[std::min(channel, suppliedInputChannelCount - 1)];
+
+                    if (source != nullptr)
+                        std::copy_n(source, frames, destination.begin());
+                    else
+                        std::fill_n(destination.begin(), frames, 0.0f);
+                }
+            }
+
+            if (static_cast<int>(realtimeOutputStorage.samples.size()) < pluginOutputChannels)
+                return result;
+
+            for (int channel = 0; channel < pluginOutputChannels; ++channel)
+                std::fill_n(realtimeOutputStorage.samples[static_cast<std::size_t>(channel)].begin(), frames, 0.0f);
+
+            if (pluginInputChannels > 0)
+                primeOutputsFromInputs(realtimeInputStorage, realtimeOutputStorage, frames);
+
+            clap_input_events_t inputEvents {};
+            inputEvents.ctx = nullptr;
+            inputEvents.size = emptyInputEventsSize;
+            inputEvents.get = emptyInputEventsGet;
+
+            clap_output_events_t outputEvents {};
+            outputEvents.ctx = nullptr;
+            outputEvents.try_push = outputEventsTryPush;
+
+            clap_process_t process {};
+            process.frames_count = static_cast<std::uint32_t>(frames);
+            process.audio_inputs = pluginInputChannels > 0 ? &realtimeInputStorage.buffer : nullptr;
+            process.audio_inputs_count = pluginInputChannels > 0 ? 1u : 0u;
+            process.audio_outputs = &realtimeOutputStorage.buffer;
+            process.audio_outputs_count = 1;
+            process.in_events = &inputEvents;
+            process.out_events = &outputEvents;
+
+            int status = clapProcessError;
+            try
+            {
+                status = plugin->process(plugin, &process);
+            }
+            catch (...)
+            {
+                status = clapProcessError;
+            }
+
+            result.processStatus = status;
+            result.outputChannelCount = pluginOutputChannels;
+            result.success = status != clapProcessError;
+            ++infoState.processedBlocks;
+            infoState.lastProcessStatus = status;
+
+            if (!result.success)
+                return result;
+
+            for (int channel = 0; channel < suppliedOutputChannelCount; ++channel)
+            {
+                auto* destination = outputChannelData[channel];
+                if (destination == nullptr)
+                    continue;
+
+                const auto sourceChannel = std::min(channel, pluginOutputChannels - 1);
+                const auto& source = realtimeOutputStorage.samples[static_cast<std::size_t>(sourceChannel)];
+                for (int frame = 0; frame < frames; ++frame)
+                {
+                    const auto sample = source[static_cast<std::size_t>(frame)];
+                    destination[frame] = std::isfinite(sample) ? sample : 0.0f;
+                }
+            }
+
+            return result;
         }
 
         ClapLiveEffectProcessResult processBlock(const ClapLiveEffectProcessRequest& request)
@@ -736,6 +841,9 @@ namespace mw::clap
                 entry = nullptr;
             }
             library.reset();
+            realtimeInputStorage = {};
+            realtimeOutputStorage = {};
+            realtimeStorageReady = false;
             pluginInitialized = false;
             infoState.open = false;
             infoState.startedProcessing = false;
@@ -770,6 +878,9 @@ namespace mw::clap
         ClapHostRequestState hostState;
         int inputChannelCount = 2;
         int outputChannelCount = 2;
+        LiveAudioStorage realtimeInputStorage;
+        LiveAudioStorage realtimeOutputStorage;
+        bool realtimeStorageReady = false;
         bool entryInitialized = false;
         bool pluginInitialized = false;
         bool activated = false;
@@ -806,5 +917,14 @@ namespace mw::clap
     ClapLiveEffectProcessResult ClapLiveEffectSession::processBlock(const ClapLiveEffectProcessRequest& request)
     {
         return impl->processBlock(request);
+    }
+
+    ClapLiveEffectRealtimeProcessResult ClapLiveEffectSession::processPlanarBlock(const float* const* inputChannelData,
+                                                                                  int inputChannelCount,
+                                                                                  float* const* outputChannelData,
+                                                                                  int outputChannelCount,
+                                                                                  int frameCount) noexcept
+    {
+        return impl->processPlanarBlock(inputChannelData, inputChannelCount, outputChannelData, outputChannelCount, frameCount);
     }
 }
