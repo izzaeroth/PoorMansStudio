@@ -13,31 +13,13 @@ namespace mw::exporting
         return std::filesystem::create_directories(s.outputFolder, e);
     }
 
-    std::filesystem::path ExportPathBuilder::buildProjectPath(const ExportSettings& s)
-    {
-        return s.outputFolder / (s.baseFileName + ".mwproj");
-    }
-
     std::filesystem::path ExportPathBuilder::buildMidiPath(const ExportSettings& s)
     {
         return s.outputFolder / (s.baseFileName + ".mid");
     }
 
-    std::filesystem::path ExportPathBuilder::buildAudioPath(const ExportSettings& s, AudioFormat f)
+    std::filesystem::path ExportPathBuilder::buildWavPath(const ExportSettings& s)
     {
-        return s.outputFolder / (s.baseFileName + audioFormatToExtension(f));
-    }
-
-    std::string ExportPathBuilder::audioFormatToExtension(AudioFormat f)
-    {
-        switch (f)
-        {
-            case AudioFormat::Wav: return ".wav";
-            case AudioFormat::Flac: return ".flac";
-            case AudioFormat::Mp3: return ".mp3";
-            case AudioFormat::Ogg: return ".ogg";
-            case AudioFormat::M4a: return ".m4a";
-            default: return ".audio";
-        }
+        return s.outputFolder / (s.baseFileName + ".wav");
     }
 }

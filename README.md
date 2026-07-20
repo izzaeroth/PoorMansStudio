@@ -209,9 +209,9 @@ Recommended build environment:
 - Windows 10 or Windows 11 SDK.
 - MSBuild.
 - C++ CMake tools for Windows.
-- CMake 3.24 or newer; current local validation uses CMake 4.4.0.
+- CMake 3.24 or newer; current reference validation uses CMake 4.4.0.
 - Git for Windows, recommended for obtaining/updating JUCE.
-- JUCE source tree at `external/JUCE`; current local validation uses JUCE 8.0.14.
+- JUCE source tree at `external/JUCE`; current reference validation uses JUCE 8.0.14.
 - C++20-capable compiler.
 
 The project CMake file currently requires:
@@ -277,9 +277,9 @@ These are needed to build the app from source:
 | MSVC C++ build tools | C++ compiler/linker | Required for compiling the JUCE/C++ app. |
 | Windows SDK | Windows headers/libraries | Installed through the C++ workload/components. |
 | MSBuild | Visual Studio build engine | Used by Visual Studio CMake generators. |
-| CMake 3.24+ | Configures/generates builds | The project uses CMake directly. Current local setup uses CMake 4.4.0. |
+| CMake 3.24+ | Configures/generates builds | The project uses CMake directly. Current reference setup uses CMake 4.4.0. |
 | Git | Cloning/updating source and JUCE | Optional if JUCE is copied manually, recommended otherwise. |
-| JUCE source tree | C++ app framework | Must exist at `external/JUCE`. Current local setup uses JUCE 8.0.14. Build-time source dependency, not a separate runtime install. |
+| JUCE source tree | C++ app framework | Must exist at `external/JUCE`. Current reference setup uses JUCE 8.0.14. Build-time source dependency, not a separate runtime install. |
 
 ## Runtime Dependencies And Resources
 
@@ -287,8 +287,8 @@ These are used when running the built app or rendering projects:
 
 | Runtime item | Purpose | Bundled? |
 | --- | --- | --- |
-| FluidSynth | SF2/SF3 SoundFont rendering | Current local setup uses FluidSynth 2.5.6. May be placed/configured in workspace; not a JUCE dependency. |
-| FFmpeg | Audio conversion, mixing, compressed exports | Current local setup uses a latest Windows FFmpeg build. May be placed/configured in workspace. |
+| FluidSynth | SF2/SF3 SoundFont rendering | Current reference setup uses FluidSynth 2.5.6. May be placed/configured in workspace; not a JUCE dependency. |
+| FFmpeg | Audio conversion, mixing, compressed exports | Current reference setup uses a recent Windows FFmpeg build. May be placed/configured in workspace. |
 | sfizz-render | SFZ rendering | May be placed/configured in workspace. |
 | SoundFonts / SF3 files | User instrument libraries | User supplied. |
 | SFZ sample packs | User instrument libraries | User supplied. |
@@ -369,7 +369,7 @@ Example summary:
 ```text
 Poor Man's Studio Build Summary
 --------------------------------
-Version:        0.66.3
+Version:        0.66.4
 Configuration:  Release
 Generator:      Visual Studio 18 2026
 Platform:       x64
@@ -593,7 +593,7 @@ The helper currently provides conservative command-line groundwork for isolated 
 .\workspace\vst_host\PoorMansStudioVstHost.exe --scan-json "C:\Path\To\Plugin.vst3"
 ```
 
-Normal VST3 instrument hosting and the Track Live Effect recorder monitor path remain in-process. The helper is groundwork for risky scanning, plugin editor isolation, state capture, offline helper rendering, and later shared-memory live processing. The app checks the helper once at startup and exposes the cached result through **VST Plugins > VST Host Helper Status...**.
+Normal VST3 instrument hosting and the Track Live Effects recorder monitor path remain in-process. The helper is groundwork for risky scanning, plugin editor isolation, state capture, offline helper rendering, and later shared-memory live processing. The app checks the helper once at startup and exposes the cached result through **VST Plugins > VST Host Helper Status...**.
 
 ### CLAP Host Helper Foundation
 
@@ -660,7 +660,7 @@ Unassigned, disabled, or bypassed slots are skipped. Open Slot 1/2 is unavailabl
 
 Use **Apply Track Settings** as the clear commit point for track-level effect choices: slot assignments, Enable, Bypass, mute/solo, volume, and other track controls. Use **Apply Changes** inside a VST editor only after changing plugin parameters; that editor button saves the plugin state for the owning track and slot.
 
-Imported AudioClip source media stays dry. Recorded AudioClip media can be dry or wet depending on the selected track's enabled VST effect state at recording time. During offline preview/export, enabled non-bypassed slots are applied to temporary processed WAV files and those temporary files are mixed into the render without rewriting the source media. AudioClip Enhancement / Repair creates temporary previews or generated enhanced copies without overwriting the original source. New AudioClip media and selected MP3 album-art images stage in the active `workspace/temp/recordings/rec_...` session when the project is unsaved; **Save Project** moves only applied/attached staged clips into the saved project folder, while **Discard** removes the current staging session instead of leaving abandoned media for a later project.
+Imported and recorded AudioClip source media stays dry. Track effects are applied non-destructively during preview and export rather than being printed into project recording media. During offline preview/export, enabled non-bypassed slots are applied to temporary processed WAV files and those temporary files are mixed into the render without rewriting the source media. AudioClip Enhancement / Repair creates temporary previews or generated enhanced copies without overwriting the original source. New AudioClip media and selected MP3 album-art images stage in the active `workspace/temp/recordings/rec_...` session when the project is unsaved; **Save Project** moves only applied/attached staged clips into the saved project folder, while **Discard** removes the current staging session instead of leaving abandoned media for a later project.
 
 ### AudioClip Editor Arrangement Workflow
 
@@ -680,11 +680,11 @@ The AudioClip Editor also includes a source-level enhancement section for rough 
 
 Enhanced copies are written as editable generated WAV media. Saved projects store them under `input/audio/imported`; unsaved projects stage them temporarily and migrate them into the saved project folder when the project is saved. Use final render/export settings later when you want a delivery file such as MP3, FLAC, or OGG.
 
-### AudioClip Recorder Wet And Live Effect Behavior
+### AudioClip Recorder Dry Capture And Live Effect Behavior
 
-The AudioClip Recorder can record dry or wet audio. If the selected target track has a VST effect slot assigned, enabled, not bypassed, and applied, that effect is printed into the recorded AudioClip. To record dry audio, leave the VST Effect **Enable** box unchecked before recording.
+The AudioClip Recorder always saves dry project audio. The selected blank target track's assigned, enabled, non-bypassed VST3 and/or CLAP effects remain on the track and are applied non-destructively during Track Manager preview, Project Preview, rendering, and export. This preserves the original microphone take, allows effect settings to be changed later, and prevents accidental double processing.
 
-The **Track Live Effect** checkbox controls monitoring only. When it is checked, the recorder tries to let you hear the enabled track effect while recording. When it is unchecked, you do not hear that monitoring path, but the recording can still be wet if the track effect is enabled and applied. Recording targets the selected existing track instead of auto-creating a new track. Create/select the track first, assign/apply its effects, then decide whether Track Live Effect should monitor the wet signal while recording.
+The **Track Live Effects** checkbox controls monitoring only. When checked, the recorder opens up to two eligible effects and processes them in fixed Slot 1 -> Slot 2 order while the WAV writer continues receiving the dry pre-fader microphone signal. VST3/VST3, CLAP/CLAP, VST3/CLAP, and CLAP/VST3 chains are supported. Monitoring follows the target track and master volume. Current open effect-editor state is used temporarily when available without changing the saved project; otherwise the last applied state or plugin default is used. If either stage cannot load or fails while processing, the complete wet monitor chain stops while dry recording continues. Record Test may create a disposable wet temporary WAV so automatic playback auditions the chain, but it never becomes project media. The monitor choice is tied to the blank target track and resets when that target changes, is removed, becomes nonblank, or loses its eligible chain.
 
 ### VST Editor Host Windows
 

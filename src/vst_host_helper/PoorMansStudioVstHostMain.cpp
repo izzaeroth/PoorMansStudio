@@ -54,7 +54,7 @@ namespace
             << "  --scan-json <plugin.vst3>\n"
             << "                         Inspect one outer VST3 bundle and print JSON.\n\n"
             << "Notes:\n"
-            << "  This helper is Phase 3 groundwork. It is not yet the main app's live\n"
+            << "  This helper provides conservative inspection groundwork. It is not the main app's live\n"
             << "  VST bridge, audio renderer, or plugin editor owner.\n";
     }
 

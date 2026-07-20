@@ -1106,8 +1106,6 @@ namespace mw::audio
         mw::exporting::ExportSettings exportSettings;
         exportSettings.outputFolder = job.exportFolder;
         exportSettings.baseFileName = job.baseFileName;
-        exportSettings.sampleRate = job.sampleRate;
-        exportSettings.bitDepth = job.bitDepth;
 
         if (!mw::exporting::ExportPathBuilder::ensureOutputFolderExists(exportSettings))
         {
@@ -1124,7 +1122,7 @@ namespace mw::audio
         // Render actions create audio/MIDI exports only. .mwproj files are written only by Save Project / Save As.
         result.projectPath.clear();
         result.midiPath = mw::exporting::ExportPathBuilder::buildMidiPath(exportSettings);
-        result.wavPath = mw::exporting::ExportPathBuilder::buildAudioPath(exportSettings, mw::exporting::AudioFormat::Wav);
+        result.wavPath = mw::exporting::ExportPathBuilder::buildWavPath(exportSettings);
 
         if (isCancelled(cancelRequested, callbacks))
         {

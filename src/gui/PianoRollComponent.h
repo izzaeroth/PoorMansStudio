@@ -53,8 +53,6 @@ namespace mw::gui
         bool isPreviewPlayheadPaused() const { return previewPlayheadPaused; }
         double getPreviewPlayheadBeat() const { return previewPlayheadBeat; }
 
-        void setSelectedNoteIndex(int index);
-        int getSelectedNoteIndex() const { return selectedNoteIndex; }
         void clearNoteSelection();
 
         void deleteSelectedNote();
@@ -81,7 +79,6 @@ namespace mw::gui
         static int pitchToOctave(int pitch);
         static bool isAccidentalPitch(int pitch);
         static int noteNameToSemitone(const juce::String& noteName);
-        int xToBeat(float x) const;
         std::int64_t xToSnapTick(float x) const;
         std::int64_t xToPaintSnapTick(float x) const;
         int yToPitch(float y) const;

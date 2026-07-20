@@ -1,7 +1,6 @@
 #pragma once
 
 #include <filesystem>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -18,10 +17,5 @@ namespace mw::audio
     {
     public:
         static std::vector<SoundFontPreset> readPresets(const std::filesystem::path& sf2Path);
-        static std::optional<SoundFontPreset> findPresetByProgram(
-            const std::vector<SoundFontPreset>& presets,
-            int bank,
-            int program
-        );
     };
 }

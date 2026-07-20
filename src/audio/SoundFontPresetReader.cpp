@@ -155,24 +155,4 @@ namespace mw::audio
         return {};
     }
 
-    std::optional<SoundFontPreset> SoundFontPresetReader::findPresetByProgram(
-        const std::vector<SoundFontPreset>& presets,
-        int bank,
-        int program
-    )
-    {
-        for (const auto& preset : presets)
-        {
-            if (preset.bank == bank && preset.program == program)
-                return preset;
-        }
-
-        for (const auto& preset : presets)
-        {
-            if (preset.program == program)
-                return preset;
-        }
-
-        return std::nullopt;
-    }
 }

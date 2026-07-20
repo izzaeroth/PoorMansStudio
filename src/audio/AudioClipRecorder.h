@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <filesystem>
 #include <memory>
@@ -33,19 +34,26 @@ namespace mw::audio
         std::string recordEffectMessage;
     };
 
+    struct AudioClipRecorderEffectStageOptions
+    {
+        mw::core::EffectSlotBackendType backendType = mw::core::EffectSlotBackendType::None;
+        mw::core::VstPluginAssignment effect;
+        int slotIndex = -1;
+    };
+
     struct AudioClipRecorderLiveEffectOptions
     {
-        // enabled means the selected track has an eligible Effect Slot available for non-destructive monitoring.
+        // enabled means the selected track has one or two eligible Effect Slots available for non-destructive monitoring.
         // Saved state is restored when available; an empty state uses the plugin's default state.
         bool enabled = false;
-        // monitorEnabled sends the wet signal to the output while the WAV writer always keeps the normal take dry.
+        // monitorEnabled sends the ordered wet chain to the output while the WAV writer always keeps the normal take dry.
         bool monitorEnabled = false;
         // Record Test may request a temporary wet audition file. This is never used for project recording media.
         bool writeEffectToOutputFile = false;
         // Monitoring and temporary Record Test playback are post track/master fader; normal recorded WAVs remain dry and pre-fader.
         float monitorOutputGain = 1.0f;
-        mw::core::EffectSlotBackendType backendType = mw::core::EffectSlotBackendType::None;
-        mw::core::VstPluginAssignment effect;
+        std::array<AudioClipRecorderEffectStageOptions, mw::core::maxVstEffectSlots> stages {};
+        int stageCount = 0;
         std::string trackName;
         std::string unavailableMessage;
     };
@@ -69,12 +77,9 @@ namespace mw::audio
         bool isRecording() const { return recording.load(); }
         bool isPaused() const { return paused.load(); }
         double getSampleRate() const { return currentSampleRate; }
-        int getChannelCount() const { return channelCount; }
         long long getSamplesWritten() const { return samplesWritten.load(); }
-        std::filesystem::path getOutputPath() const { return outputPath; }
         juce::String getCurrentDeviceSummary() const;
         void setInputGainDb(double gainDb);
-        double getInputGainDb() const { return static_cast<double>(inputGainDb.load()); }
         bool isLiveEffectMonitorActive() const { return liveEffectMonitorActive.load(); }
         juce::String getLiveEffectMonitorSummary() const { return liveEffectMonitorSummary; }
         bool isRecordEffectActive() const { return writeEffectToOutputFile.load() && effectProcessingActive.load(); }
@@ -100,6 +105,7 @@ namespace mw::audio
                                int numOutputChannels,
                                int numSamples);
 
+        void closeLiveEffectStages();
         void clearLiveEffectMonitor();
 
         juce::AudioDeviceManager deviceManager;
@@ -107,8 +113,8 @@ namespace mw::audio
         std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> threadedWriter;
         std::unique_ptr<juce::AudioBuffer<float>> scratchBuffer;
         std::unique_ptr<juce::AudioBuffer<float>> effectBuffer;
-        std::unique_ptr<juce::AudioPluginInstance> liveEffectInstance;
-        std::unique_ptr<mw::clap::ClapLiveEffectSession> liveClapEffectSession;
+        std::array<std::unique_ptr<juce::AudioPluginInstance>, mw::core::maxVstEffectSlots> liveEffectInstances;
+        std::array<std::unique_ptr<mw::clap::ClapLiveEffectSession>, mw::core::maxVstEffectSlots> liveClapEffectSessions;
         std::atomic<juce::AudioFormatWriter::ThreadedWriter*> activeWriter { nullptr };
         std::atomic<bool> recording { false };
         std::atomic<bool> paused { false };
@@ -126,7 +132,8 @@ namespace mw::audio
         int bitDepth = 24;
         int liveEffectMonitorChannels = 0;
         int effectProcessChannels = 0;
-        mw::core::EffectSlotBackendType liveEffectBackend = mw::core::EffectSlotBackendType::None;
+        std::array<mw::core::EffectSlotBackendType, mw::core::maxVstEffectSlots> liveEffectBackends {};
+        int liveEffectStageCount = 0;
         juce::String liveEffectMonitorSummary;
         juce::String recordEffectSummary;
     };

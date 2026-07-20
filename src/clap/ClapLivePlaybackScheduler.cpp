@@ -141,12 +141,6 @@ namespace mw::clap
         }
     }
 
-    void ClapLivePlaybackScheduler::resetToStart()
-    {
-        nextEventIndex_ = 0;
-        currentSample_ = config_.startSample;
-    }
-
     bool ClapLivePlaybackScheduler::isFinished() const
     {
         return currentSample_ >= totalSamples_;
@@ -218,12 +212,4 @@ namespace mw::clap
         currentSample_ = blockEndSample;
     }
 
-    ClapLiveProcessRequest ClapLivePlaybackScheduler::nextBlock()
-    {
-        ClapLiveProcessRequest request;
-        if (maxEventsPerBlock_ > 0)
-            request.noteEvents.reserve(static_cast<std::size_t>(maxEventsPerBlock_));
-        nextBlockInto(request);
-        return request;
-    }
 }

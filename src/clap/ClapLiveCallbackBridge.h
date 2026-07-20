@@ -40,7 +40,6 @@ namespace mw::clap
         ClapLiveCallbackBridge() = default;
 
         void prepare(std::vector<ClapLivePlaybackNote> notes, ClapLiveCallbackBridgeConfig config);
-        void resetPlayback();
         bool isPrepared() const;
         bool isFinished() const;
         const ClapLiveProcessRequest& nextRequest();

@@ -19,9 +19,9 @@ VST3 plugins	Optional for app launch, needed for VST testing	Used to test VST3 i
 CLAP plugins	Optional for app launch, needed for CLAP testing	Used to test CLAP instrument/effect scanning, direct preview, and hosting
 Current tested tool versions
 
-Shawn's current local toolchain snapshot:
+Current reference toolchain:
 
-Tool	Current local version / note
+Tool	Reference version / note
 FluidSynth	2.5.6
 JUCE	8.0.14
 CMake	4.4.0
@@ -71,7 +71,7 @@ Confirm that Desktop development with C++ is checked.
 
 4. Install CMake
 
-Install CMake. Shawn's current local setup uses CMake 4.4.0.
+Install CMake. The current reference setup uses CMake 4.4.0.
 
 During setup, choose one of these PATH options:
 
@@ -89,7 +89,7 @@ Expected result:
 
 cmake version 4.4.0
 
-A newer stable CMake may also work, but when comparing build logs, treat 4.4.0 as the current local reference.
+A newer stable CMake may also work, but when comparing build logs, treat 4.4.0 as the current reference.
 
 If Windows says cmake is not recognized, close and reopen Command Prompt. If it still fails, reinstall CMake and enable the PATH option.
 
@@ -112,7 +112,7 @@ Verify installation:
 git --version
 6. Get JUCE
 
-Poor Man’s Studio uses JUCE as its application/audio framework. Shawn's current local setup uses JUCE 8.0.14.
+Poor Man’s Studio uses JUCE as its application/audio framework. The current reference setup uses JUCE 8.0.14.
 
 Recommended folder:
 
@@ -240,9 +240,9 @@ Do not commit local runtime junk unless intentionally part of the source package
 
 13. Runtime Tool Setup: FluidSynth and FFmpeg
 
-Poor Man's Studio uses local runtime tools for several render/import/export workflows. Shawn's current local versions are:
+Poor Man's Studio uses local runtime tools for several render/import/export workflows. The current reference versions are:
 
-Tool	Current local version / note
+Tool	Reference version / note
 FluidSynth	2.5.6
 FFmpeg	Latest available Windows build in the workspace
 
@@ -274,7 +274,7 @@ Use the VST3 Plugin Manager or VST3 scan controls.
 Scan the folder containing .vst3 plugins.
 Confirm plugins appear as instruments or effects.
 Assign an instrument to a MIDI track or assign effects to Effect Slot 1/2.
-Use preview/export to test offline processing.
+Use Preview Track, Preview Project, and export to test live playback where compatible and rendered fallback where required.
 
 Typical CLAP workflow:
 
@@ -284,7 +284,7 @@ Use the CLAP Plugin Manager or CLAP scan controls.
 Scan the folder containing .clap plugins.
 Confirm plugins appear as instruments or effects.
 Assign a CLAP Instrument to a MIDI track or assign CLAP Effect entries to Effect Slot 1/2.
-Use Preview Track or Preview Project to test direct CLAP preview when safe; mixed or unsupported projects fall back to the rendered preview path.
+Use Preview Track or Preview Project to test guarded live CLAP playback. Compatible CLAP and VST3 tracks can share the live project mixer; unsupported, cross-backend, latency-reporting, or unsafe routes use prepared or rendered fallback.
 Open CLAP Settings to check Plugin Graphics Adapter, Max Open CLAP Windows, Safe CLAP Plugin UI Mode, and Refresh Adapter List.
 
 15. Testing VST Instruments
@@ -325,16 +325,19 @@ Processing order:
 source track → VST Effect 1 → VST Effect 2 → preview/export
 17. AudioClip Import and Recording Test
 
-Imported and recorded AudioClip tracks should behave the same for VST effect processing.
+Imported and recorded AudioClip tracks use the same non-destructive preview/export effect path. Normal recorded project media remains dry.
 
 Important behavior:
 
 Action	Expected Behavior
 Import audio into unsaved project	Audio is staged in the active temp session
-Record audio into unsaved project	Recording is staged in the active temp session
+Record audio into unsaved project	Dry recording is staged in the active temp session
+Track Live Effects checked	Up to two eligible VST3/CLAP effects are monitored in Slot 1 -> Slot 2 order; the saved WAV remains dry
+Track Live Effects unchecked	No wet monitor chain is opened; the saved WAV remains dry
+Record Test	May create a disposable wet temporary WAV for automatic audition; it does not become project media
 Save Project	Staged media is committed into the saved project folder
 Discard changes	Active staged media is cleaned up
-Preview/export	Enabled VST effects are applied to temporary processed files
+Preview/export	Enabled, non-bypassed track effects are applied non-destructively
 Source audio	Remains dry and unchanged
 18. Clean Rebuild
 
@@ -459,6 +462,10 @@ Use this checklist for a fresh machine:
 [ ] Test VST3 Effect Slot 2
 [ ] Test CLAP Instrument
 [ ] Test CLAP Effect Slot 1 / Slot 2
+[ ] Test VST3/VST3 Track Live Effects monitoring
+[ ] Test CLAP/CLAP Track Live Effects monitoring
+[ ] Test mixed VST3/CLAP and CLAP/VST3 monitoring
+[ ] Confirm normal recorded WAVs remain dry
 [ ] Test imported AudioClip preview/export
 [ ] Test recorded AudioClip preview/export
 [ ] Save, reopen, and verify project media paths

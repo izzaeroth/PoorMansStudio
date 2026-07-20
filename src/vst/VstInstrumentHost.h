@@ -74,7 +74,6 @@ namespace mw::vst
         static VstLoadResult loadInstrumentForTrack(const mw::core::Track& track, double sampleRate, int blockSize);
         static VstRenderResult renderTrackToWav(const VstRenderRequest& request);
         static VstEffectProcessResult processWavWithTrackEffectChain(const VstEffectProcessRequest& request);
-        static VstEffectProcessResult processWavWithFirstTrackEffect(const VstEffectProcessRequest& request);
         static bool trackHasVstPlugin(const mw::core::Track& track);
         static bool trackHasEnabledVstEffect(const mw::core::Track& track);
         static juce::MidiBuffer buildMidiForBlock(const mw::core::Track& track, std::int64_t blockStartSample, int blockNumSamples, double samplesPerTick);

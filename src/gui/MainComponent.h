@@ -512,7 +512,6 @@ namespace mw::gui
         void discardAudioRecordingTake();
         void refreshAudioRecorderInputDevices();
         void selectAudioRecorderInputDevice(const juce::String& deviceName);
-        void revealCurrentProjectFolder();
         bool ensureProjectFolderReadyForAudio();
         std::filesystem::path getCurrentProjectFolder() const;
         std::filesystem::path getAudioRecordingSessionFolder();
@@ -593,12 +592,9 @@ namespace mw::gui
         void populateVstEffectCombo();
         void syncVstEffectControlsFromSelection();
         void applySelectedTrackVstEffectSlots();
-        void applySelectedTrackVstEffectSlot() { applySelectedTrackVstEffectSlots(); }
-        void setVstEffectStatusText(int trackIndex, const juce::String& baseStatus);
         void recordVstEffectRenderStatusForTrack(int trackIndex, const juce::String& statusText);
         void openSelectedTrackVstPluginUi();
         void openSelectedTrackVstEffectUi(int effectSlotIndex = 0);
-        void renderSelectedTrackVstEffectTestSample(int effectSlotIndex = 0);
         void renderVstInstrumentTestNoteForTrack(int trackIndex, juce::String liveEditorStateOverride = {});
         void renderVstEffectTestSampleForTrack(int trackIndex, int effectSlotIndex);
         void renderClapInstrumentTestNoteForTrack(int trackIndex, juce::String liveEditorStateOverride = {});
@@ -773,7 +769,6 @@ namespace mw::gui
         void showVstExperimentalWarningIfNeeded();
         void showClapExperimentalWarningIfNeeded();
         bool selectedTrackHasAppliedVstPlugin() const;
-        bool selectedTrackHasAppliedClapInstrument() const;
         bool selectedTrackHasOpenableVstEffect(int effectSlotIndex) const;
         void updateOpenVstPluginButtonState();
         bool ensureSelectedTrackHasSequenceForPianoRoll();

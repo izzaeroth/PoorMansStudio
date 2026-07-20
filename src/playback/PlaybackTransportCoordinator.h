@@ -19,8 +19,6 @@ namespace mw::playback
         Failed
     };
 
-    const char* transportStateName(TransportState state) noexcept;
-
     struct PlaybackTransportSnapshot
     {
         TransportState state = TransportState::Stopped;

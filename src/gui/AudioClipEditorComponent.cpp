@@ -147,7 +147,7 @@ namespace
             titleLabel.setJustificationType(juce::Justification::centredLeft);
             titleLabel.setFont(juce::FontOptions(22.0f, juce::Font::bold));
 
-            statusLabel.setText("Phase 5C: enhancement is available; arrangement placement supports Main clips and editor-only Aux source files.", juce::dontSendNotification);
+            statusLabel.setText("AudioClip Editor: non-destructive trim, arrangement, Aux sources, and full-source enhancement are available.", juce::dontSendNotification);
             statusLabel.setJustificationType(juce::Justification::centredLeft);
             statusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
             statusLabel.setFont(juce::FontOptions(13.0f));
@@ -2120,7 +2120,7 @@ namespace
                 juce::String("Plan: process the full AudioClip source with ")
                 + audioClipEnhancementPresetName(preset)
                 + " at " + audioClipEnhancementAmountName(amount)
-                + " strength, then create preview/generated media in later phases. Original media, trim handles, and arrangement clips are not changed.");
+                + " strength. Preview Enhanced creates temporary preview media; Create Enhanced Copy creates new generated project media. Original media, trim handles, and arrangement clips are not changed.");
         }
 
         void refreshEnhancementControls()
@@ -2892,7 +2892,7 @@ namespace
 
             text << "Attached AudioClip media: " << static_cast<int>(clips.size()) << "\n";
             text << "Editing State: interactive non-destructive trim metadata. Preview/export honors the kept range; original media files are untouched.\n";
-            text << "Enhancement State: Phase 5C is available. Preview Enhanced renders temporary full-source media; Create Enhanced Copy renders a new generated AudioClip track.\n\n";
+            text << "Enhancement State: Full-source enhancement is available. Preview Enhanced renders temporary full-source media; Create Enhanced Copy renders a new generated AudioClip track.\n\n";
 
             for (std::size_t i = 0; i < clips.size(); ++i)
             {

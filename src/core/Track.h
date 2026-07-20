@@ -73,7 +73,6 @@ namespace mw::core
         void setVstEffects(VstEffectsAssignment effects) { vstEffects = std::move(effects); }
 
         const std::string& getInstrumentName() const { return instrument.displayName; }
-        void setInstrumentName(std::string n) { instrument.displayName = std::move(n); }
         void setInstrumentAssignment(InstrumentAssignment a)
         {
             instrument = (trackType == TrackType::AudioClip)

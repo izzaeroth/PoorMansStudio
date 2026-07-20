@@ -5,20 +5,6 @@
 
 namespace mw::playback
 {
-    const char* transportStateName(TransportState state) noexcept
-    {
-        switch (state)
-        {
-            case TransportState::Preparing: return "Preparing";
-            case TransportState::Playing: return "Playing";
-            case TransportState::Stopping: return "Stopping";
-            case TransportState::Seeking: return "Seeking";
-            case TransportState::Failed: return "Failed";
-            case TransportState::Stopped:
-            default: return "Stopped";
-        }
-    }
-
     bool PlaybackTransportSnapshot::isActive() const noexcept
     {
         return state == TransportState::Preparing

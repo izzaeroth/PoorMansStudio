@@ -837,11 +837,4 @@ namespace mw::vst
         return result;
     }
 
-    VstEffectProcessResult VstInstrumentHost::processWavWithFirstTrackEffect(const VstEffectProcessRequest& request)
-    {
-        VstEffectProcessRequest firstSlotRequest = request;
-        firstSlotRequest.effectSlotIndex = 0;
-        return processWavWithTrackEffectChain(firstSlotRequest);
-    }
-
 }

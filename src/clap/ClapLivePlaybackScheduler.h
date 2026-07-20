@@ -17,25 +17,6 @@ namespace mw::clap
         std::int64_t durationTicks = 960;
     };
 
-    enum class ClapLivePlaybackControlEventType
-    {
-        MidiCc,
-        PitchBend,
-        ChannelPressure,
-        ProgramChange,
-        ParameterValue
-    };
-
-    struct ClapLivePlaybackControlEvent
-    {
-        ClapLivePlaybackControlEventType type = ClapLivePlaybackControlEventType::MidiCc;
-        std::int64_t tick = 0;
-        int midiChannel = 1;
-        int controller = 0;
-        double value = 0.0;
-        std::uint32_t clapParamId = 0;
-    };
-
     struct ClapLivePlaybackSchedulerConfig
     {
         int tempoBpm = 120;
@@ -53,7 +34,6 @@ namespace mw::clap
         ClapLivePlaybackScheduler() = default;
 
         void prepare(std::vector<ClapLivePlaybackNote> notes, ClapLivePlaybackSchedulerConfig config);
-        void resetToStart();
         bool isFinished() const;
         std::int64_t currentSample() const;
         std::int64_t totalSamples() const;
@@ -62,7 +42,6 @@ namespace mw::clap
         int maxEventsPerBlock() const;
 
         void nextBlockInto(ClapLiveProcessRequest& request);
-        ClapLiveProcessRequest nextBlock();
 
     private:
         struct ScheduledEvent

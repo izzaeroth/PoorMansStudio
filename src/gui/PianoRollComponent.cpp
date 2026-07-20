@@ -372,16 +372,6 @@ namespace mw::gui
         repaint();
     }
 
-    void PianoRollComponent::setSelectedNoteIndex(int index)
-    {
-        setSingleSelection(index);
-
-        if (onSelectedNoteChanged)
-            onSelectedNoteChanged(selectedNoteIndex);
-
-        repaint();
-    }
-
     void PianoRollComponent::trimUndoHistory()
     {
         while (undoStack.size() > maxUndoSteps)
@@ -533,17 +523,6 @@ namespace mw::gui
             onSelectedNoteChanged(selectedNoteIndex);
 
         repaint();
-    }
-
-    int PianoRollComponent::xToBeat(float x) const
-    {
-        const auto grid = getGridBounds();
-        const float beatWidth = grid.getWidth() / static_cast<float>(beatsVisible);
-
-        if (beatWidth <= 0.0f)
-            return 0;
-
-        return startBeat + std::clamp(static_cast<int>((x - grid.getX()) / beatWidth), 0, beatsVisible - 1);
     }
 
     std::int64_t PianoRollComponent::xToSnapTick(float x) const

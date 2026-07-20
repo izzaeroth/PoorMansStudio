@@ -20,7 +20,6 @@ namespace mw::core
 
     struct ProjectMetadata
     {
-        std::string projectFileExtension = ".mwproj";
         std::string projectFormatName = "MusicWorkstationProject";
         int projectFormatVersion = 9;
     };

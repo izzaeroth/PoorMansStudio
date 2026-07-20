@@ -48,7 +48,6 @@ namespace mw::audio
         static bool hasEnoughFreeSpace(const std::filesystem::path& targetFolder, std::uintmax_t requiredBytes, std::string& message);
         static AudioClipImportResult importToProject(const AudioClipImportRequest& request);
         static std::filesystem::path audioFolderFor(const std::filesystem::path& projectFolder, bool imported);
-        static std::filesystem::path tempAudioFolderFor(const std::filesystem::path& projectFolder);
         static std::filesystem::path makeUniqueMediaPath(const std::filesystem::path& folder, const std::string& baseName, mw::core::AudioClipSavedFormat format);
     };
 }

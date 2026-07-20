@@ -110,11 +110,6 @@ namespace mw::audio
         return projectFolder / "input" / "audio" / (imported ? "imported" : "recorded");
     }
 
-    std::filesystem::path AudioClipImporter::tempAudioFolderFor(const std::filesystem::path& projectFolder)
-    {
-        return projectFolder / "input" / "audio" / "temp";
-    }
-
     std::filesystem::path AudioClipImporter::makeUniqueMediaPath(const std::filesystem::path& folder, const std::string& baseName, mw::core::AudioClipSavedFormat format)
     {
         const auto safeName = safeBaseName(baseName);

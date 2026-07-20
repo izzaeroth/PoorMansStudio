@@ -11,10 +11,8 @@
 #include "audio/ExternalFfmpegEncoder.h"
 #include "audio/ExternalFfmpegMixer.h"
 #include "audio/AudioClipImporter.h"
-#include "audio/RenderPlan.h"
 #include "audio/RenderJob.h"
 #include "audio/GainLimits.h"
-#include "audio/RenderSettings.h"
 #include "audio/SoundFontPresetReader.h"
 #include "audio/SfzValidator.h"
 #include "exporting/ExportSettings.h"
@@ -274,7 +272,7 @@ namespace
 
     std::string compressorFilterForStrength(mw::gui::AudioClipEnhancementAmount amount)
     {
-        // Phase 5B.2 keeps the FFmpeg-only enhancement path, but separates preset
+        // Keep the FFmpeg-only enhancement path, but separate preset
         // character more clearly. This default compressor remains conservative for
         // general cleanup; stronger preset-specific compressors are declared below.
         switch (amount)
@@ -5095,9 +5093,9 @@ namespace
                     redoButton.setTooltip("Redo the most recently undone Track Manager edit.");
                     openPianoRollButton.setTooltip("Open the selected MIDI track in the editable Piano Roll. AudioClip tracks use AudioClip Editor instead.");
                     audioClipEditorButton.setTooltip("Open the selected AudioClip track in the AudioClip Editor for non-destructive source trim metadata.");
-                    previewTrackButton.setTooltip("Render and play a temporary preview of the selected track.");
-                    previewSequenceButton.setTooltip("Render and play a temporary preview of the selected sequence.");
-                    previewProjectButton.setTooltip("Render and play a temporary preview of the full project from Track Manager using current applied track settings.");
+                    previewTrackButton.setTooltip("Preview the selected track and auto-start the Preview Player. Compatible VST3/CLAP instruments and effects run live; unsupported or unsafe combinations use the rendered fallback.");
+                    previewSequenceButton.setTooltip("Preview the selected sequence and auto-start the Preview Player. The shared project mixer combines compatible live VST3/CLAP tracks with prepared AudioClip, SF2/SF3, SFZ, and fallback sources.");
+                    previewProjectButton.setTooltip("Preview the full project using current applied track settings and auto-start the Preview Player. Compatible live VST3/CLAP tracks share one mixer with prepared and rendered fallback sources.");
                     startFromFileButton.setTooltip("Import a file as the start of a new project.");
                     importSequenceButton.setTooltip("Add another imported file as a new sequence.");
                     applySectionStartButton.setTooltip("Apply the typed Sequence Start beat to the selected sequence.");
@@ -7995,8 +7993,8 @@ namespace mw::gui
                 micGainDownButton.setButtonText("-");
                 micGainUpButton.setButtonText("+");
                 micGainResetButton.setButtonText("0 dB");
-                trackLiveEffectToggle.setButtonText("Track Live Effect");
-                trackLiveEffectToggle.setTooltip("Monitor recorder input through the selected blank target track's first enabled, non-bypassed VST3 or CLAP Effect Slot. The current open editor state is used for monitoring when available without applying it to the project; otherwise saved Apply Changes state is restored, or the plugin default state is used. The recorded project WAV always remains dry.");
+                trackLiveEffectToggle.setButtonText("Track Live Effects");
+                trackLiveEffectToggle.setTooltip("Monitor recorder input through the selected blank target track's enabled, non-bypassed VST3 or CLAP Effect Slots in Slot 1 then Slot 2 order. The current open editor state is used for monitoring when available without applying it to the project; otherwise saved Apply Changes state is restored, or the plugin default state is used. The recorded project WAV always remains dry.");
                 pauseButton.setButtonText("Pause");
                 stopButton.setButtonText("Stop");
                 keepButton.setButtonText("Save / Apply");
@@ -8048,7 +8046,7 @@ namespace mw::gui
 
                 startButton.setTooltip("Start recording into the selected blank target track after a short 0.25 second safety delay. If the take is paused, Record prompts to save, discard/start over, or cancel instead of resuming.");
                 delayedStartButton.setTooltip("Start recording into the selected blank target track after the chosen countdown delay. If the take is paused, Record With Delay prompts to save, discard/start over, or cancel instead of resuming.");
-                recordTestButton.setTooltip("Run a quick mic check: 3 second countdown, 5 second recording, automatic playback, then automatic temp cleanup. When the selected track has an eligible VST3 or CLAP effect, only the disposable test WAV uses that effect; Track Live Effect controls monitoring. Project recording media always remains dry.");
+                recordTestButton.setTooltip("Run a quick mic check: 3 second countdown, 5 second recording, automatic playback, then automatic temp cleanup. When the selected track has one or two eligible VST3/CLAP effects, the disposable test WAV uses the complete Slot 1 then Slot 2 chain; Track Live Effects controls monitoring. Project recording media always remains dry.");
                 micGainDownButton.setTooltip("Reduce the recorder's software mic gain by 3 dB.");
                 micGainUpButton.setTooltip("Increase the recorder's software mic gain by 3 dB. Too much boost can add noise or clip.");
                 micGainResetButton.setTooltip("Reset software mic gain to 0.0 dB.");
@@ -9105,7 +9103,7 @@ namespace mw::gui
                     juce::AlertWindow::InfoIcon,
                     "About Poor Man's Studio",
                     mw::app::applicationTitle() + juce::newLine + juce::newLine
-                        + "A lightweight MusicXML/MIDI arranging and rendering workstation."
+                        + "Poor Man's Studio is a lightweight music production workstation for arranging MusicXML and MIDI, recording and editing audio, hosting VST3 and CLAP instruments and effects, and previewing, rendering, and exporting complete projects."
                 );
                 break;
 
@@ -9986,7 +9984,7 @@ namespace mw::gui
 
         chooseMusicXmlButton.setTooltip("Import a MusicXML or MIDI file and start a new project from it.");
         importAudioButton.setTooltip("Import WAV, MP3, FLAC, OGG, or M4A audio onto the selected blank track, or create a new blank AudioClip track when no blank target is selected.");
-        recordAudioButton.setTooltip("Open the AudioClip recorder. Recording requires a selected blank track; kept takes turn that blank track into an AudioClip track in the active sequence.");
+        recordAudioButton.setTooltip("Open the AudioClip recorder for the selected blank track. Saved project audio remains dry; Track Live Effects can monitor the enabled Slot 1 then Slot 2 VST3/CLAP chain without printing it into the take.");
         newProjectButton.setTooltip("Create a fresh empty project. You will be asked before discarding unsaved work.");
         openProjectButton.setTooltip("Open a saved Poor Man's Studio .mwproj project file.");
         saveProjectButton.setTooltip("Save the current project as a .mwproj file.");
@@ -10033,7 +10031,7 @@ namespace mw::gui
         redoPianoRollButton.setTooltip("Redo the most recently undone Piano Roll note edit.");
         clearPianoRollSelectionButton.setTooltip("Clear the current Piano Roll note selection.");
         openPianoRollPreviewPlayerButton.setTooltip("Open the Piano Roll Preview Player window.");
-        playProjectPreviewButton.setTooltip("Render and play a temporary preview of the current project.");
+        playProjectPreviewButton.setTooltip("Start a full-project preview in the Preview Player. Compatible VST3/CLAP tracks run through the shared live mixer with AudioClip, SF2/SF3, SFZ, and rendered fallback sources.");
         stopProjectPreviewButton.setTooltip("Stop the current project preview playback.");
         renderButton.setTooltip("Render the full project to the selected output format.");
         renderSettingsButton.setTooltip("Open render settings for stem-file retention and render-output cleanup behavior.");
@@ -10049,7 +10047,7 @@ namespace mw::gui
         projectDefaultsLabel.setTooltip("Default playback/rendering library settings for the whole project.");
         labelAndControl(soundFontLabel, soundFontCombo, "Choose the SoundFont preset list used for SF2 instruments.");
         soundFontPathBox.setTooltip("Current SoundFont file or folder path.");
-        labelAndControl(backendLabel, backendCombo, "Choose the project default backend before importing or adding tracks. VST3 and CLAP use scanned supported instrument plugins; compatible CLAP instruments can preview live and render/export.");
+        labelAndControl(backendLabel, backendCombo, "Choose the project default backend before importing or adding tracks. Supported VST3 and CLAP instruments can run in native live track/project previews when compatible, with safe rendered fallback; SF2/SF3 and SFZ use their established playback/render paths.");
         labelAndControl(sfzLabel, sfzCombo, "Choose the SFZ instrument used by the project defaults.");
         sfzPathBox.setTooltip("Current SFZ file or folder path.");
         labelAndControl(sfzKeySwitchLabel, sfzKeySwitchBox, "Optional SFZ key switch note value for expression changes.");
@@ -10070,20 +10068,20 @@ namespace mw::gui
         labelAndControl(trackLabel, trackCombo, "Choose the track to edit, render, preview, or open in Piano Roll.");
         labelAndControl(trackSoundLibraryLabel, trackSoundLibraryBox, "Shows the sample library currently assigned to the selected track.");
         labelAndControl(instrumentLabel, instrumentCombo, "Choose the instrument or preset for the selected track, then click Apply Track Settings.");
-        enableVstEffectsToggle.setTooltip("Enable the selected track's Effect Slot 1. VST3 and CLAP effects process in preview/export when assigned, enabled, and not bypassed. Use Apply Track Settings as the commit point.");
-        bypassVstEffectToggle.setTooltip("Temporarily bypass the selected track's Effect Slot 1 while keeping the assignment and saved settings. Use Apply Track Settings as the clear commit point for this track-level bypass flag.");
-        enableVstEffect2Toggle.setTooltip("Enable the selected track's Effect Slot 2. VST3 and CLAP effects process after slot 1 when assigned, enabled, and not bypassed. Use Apply Track Settings as the commit point.");
-        bypassVstEffect2Toggle.setTooltip("Temporarily bypass the selected track's Effect Slot 2 while keeping the assignment and saved settings.");
-        labelAndControl(vstEffectLabel, vstEffectCombo, "Choose the selected track's Effect Slot 1 from supported VST3 effects or supported CLAP effects. Assigned effects process during preview/export when enabled; compatible CLAP effects can also run in the live preview path. Use Apply Track Settings for assignment/Enable/Bypass.");
-        labelAndControl(vstEffect2Label, vstEffect2Combo, "Choose the selected track's Effect Slot 2. VST3 and CLAP slot 2 run after slot 1 when assigned, enabled, and not bypassed.");
+        enableVstEffectsToggle.setTooltip("Enable Effect Slot 1 for the selected track. It processes before Slot 2 during compatible live preview, rendered preview/export, and Track Live Effects monitoring. Use Apply Track Settings to commit Enable/Bypass changes.");
+        bypassVstEffectToggle.setTooltip("Bypass Effect Slot 1 while keeping its plugin assignment and saved state. The bypass applies to preview, render/export, and recorder monitoring after Apply Track Settings.");
+        enableVstEffect2Toggle.setTooltip("Enable Effect Slot 2 for the selected track. It processes after Slot 1 during compatible live preview, rendered preview/export, and Track Live Effects monitoring. Use Apply Track Settings to commit Enable/Bypass changes.");
+        bypassVstEffect2Toggle.setTooltip("Bypass Effect Slot 2 while keeping its plugin assignment and saved state. The bypass applies to preview, render/export, and recorder monitoring after Apply Track Settings.");
+        labelAndControl(vstEffectLabel, vstEffectCombo, "Choose Effect Slot 1 from supported VST3 or CLAP effects. Enabled compatible effects can run live, process before Slot 2 in recorder monitoring, and remain non-destructive for preview/render/export. Use Apply Track Settings for assignment, Enable, and Bypass.");
+        labelAndControl(vstEffect2Label, vstEffect2Combo, "Choose Effect Slot 2 from supported VST3 or CLAP effects. When enabled and not bypassed, it runs after Slot 1 in compatible live preview, recorder monitoring, and non-destructive preview/render/export processing.");
         vstEffectStatusLabel.setTooltip("Detailed Effect Slot chain status is written to the main log.");
         labelAndControl(trackVolumeLabel, trackVolumeSlider, "Set the volume for the selected track. Values above 1.00 boost gain and may clip.");
         labelAndControl(masterVolumeLabel, masterVolumeSlider, "Set the master output volume for the project. Values above 1.00 boost gain and may clip.");
-        muteToggle.setTooltip("Mute the selected track when previewing or rendering.");
-        soloToggle.setTooltip("Solo the selected track when previewing or rendering.");
+        muteToggle.setTooltip("Mute the selected track during live or rendered preview and during render/export.");
+        soloToggle.setTooltip("Solo the selected track during live or rendered preview and during render/export.");
         labelAndControl(tempoLabel, tempoBox, "Project tempo in beats per minute.");
         labelAndControl(timeSignatureLabel, timeSignatureBox, "Project time signature, such as 4/4 or 3/4.");
-        labelAndControl(loopCountLabel, loopCountBox, "Number of times to loop the project for rendering.");
+        labelAndControl(loopCountLabel, loopCountBox, "Number of times to loop the project during project preview and rendering.");
         labelAndControl(pianoRollPageInputLabel, pianoRollPageBox, "Window number to jump to in the Piano Roll.");
         labelAndControl(pianoRollKeyJumpLabel, pianoRollKeyJumpBox, "Pitch name to center in the Piano Roll, such as C4, A5, or B2.");
         pianoRollBeatWindowCombo.setTooltip("Choose how many beats the Piano Roll shows at once.");
@@ -10265,24 +10263,6 @@ namespace mw::gui
         }
 
         return !currentProject->getUserSettings().vst3PluginPath.empty();
-    }
-
-    bool MainComponent::selectedTrackHasAppliedClapInstrument() const
-    {
-        if (!currentProject)
-            return false;
-
-        const auto index = getSelectedTrackIndex();
-        if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
-            return false;
-
-        const auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
-        if (track.isAudioClipTrack())
-            return false;
-
-        const auto& assignment = track.getInstrument();
-        return assignment.backendType == mw::core::SampleBackendType::CLAP
-            && hasResolvableClapPluginPath(assignment);
     }
 
     bool MainComponent::selectedTrackHasOpenableVstEffect(int effectSlotIndex) const
@@ -13594,7 +13574,7 @@ namespace mw::gui
         if (track.getInstrument().backendType != mw::core::SampleBackendType::VST3
             || bundlePath.empty())
         {
-            logMessage("Open Plugin Instrument: selected track does not have a resolvable VST3 instrument. Choose a supported plugin instrument, then click Open Plugin Instrument or Apply Track Settings. Currently VST3 only; CLAP support is planned.");
+            logMessage("Open Plugin Instrument: selected track does not have a resolvable supported plugin instrument. Choose a supported VST3 or CLAP instrument, then click Open Plugin Instrument or Apply Track Settings.");
             updateOpenVstPluginButtonState();
             return;
         }
@@ -15604,25 +15584,6 @@ namespace mw::gui
     }
 
 
-    void MainComponent::renderSelectedTrackVstEffectTestSample(int effectSlotIndex)
-    {
-        if (!currentProject)
-        {
-            logMessage("Test Effect: no project loaded.");
-            return;
-        }
-
-        const auto index = getSelectedTrackIndex();
-        if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
-        {
-            logMessage("Test Effect: select a track first.");
-            return;
-        }
-
-        applySelectedTrackVstEffectSlots();
-        renderVstEffectTestSampleForTrack(index, effectSlotIndex);
-    }
-
 
     bool MainComponent::startSelectedTrackVstDirectAudition(int index)
     {
@@ -15643,7 +15604,7 @@ namespace mw::gui
 
         if (hasEnabledNonVst3EffectSlots(track))
         {
-            logMessage("VST3 Live Preview: selected track has an enabled non-VST3 effect slot, so rendered preview will be used in Phase 1.");
+            logMessage("VST3 Live Preview: selected track has an enabled non-VST3 effect slot, so the rendered fallback will be used.");
             return false;
         }
 
@@ -16543,7 +16504,7 @@ namespace mw::gui
             const auto pluginPath = resolveClapPluginPath(assignment);
             if (pluginPath.empty() || !std::filesystem::exists(pluginPath))
             {
-                logMessage("Phase 2 Transport: CLAP instrument path could not be resolved for " + getTrackDisplayName(index) + ".");
+                logMessage("Project Preview Transport: CLAP instrument path could not be resolved for " + getTrackDisplayName(index) + ".");
                 return false;
             }
 
@@ -16600,7 +16561,7 @@ namespace mw::gui
                 const auto effectPath = resolveClapEffectPluginPath(effectSlot->plugin);
                 if (effectPath.empty() || !std::filesystem::exists(effectPath))
                 {
-                    logMessage("Phase 2 Transport: CLAP effect slot "
+                    logMessage("Project Preview Transport: CLAP effect slot "
                         + juce::String(static_cast<int>(slotIndex) + 1)
                         + " could not be resolved for " + getTrackDisplayName(index) + ".");
                     return false;
@@ -16699,7 +16660,7 @@ namespace mw::gui
             const auto prepareResult = clapLiveProjectTrackSessionManager.prepare(std::move(clapConfigs));
             if (!prepareResult.success)
             {
-                logMessage("Phase 2 Transport: " + juce::String(prepareResult.message));
+                logMessage("Project Preview Transport: " + juce::String(prepareResult.message));
                 closeMixedLiveProjectPreviewTrackSessions();
                 return false;
             }
@@ -16710,7 +16671,7 @@ namespace mw::gui
             const auto prepareResult = vstLiveProjectTrackSessionManager.prepare(std::move(vstConfigs));
             if (!prepareResult.success)
             {
-                logMessage("Phase 2 Transport: " + juce::String(prepareResult.message));
+                logMessage("Project Preview Transport: " + juce::String(prepareResult.message));
                 closeMixedLiveProjectPreviewTrackSessions();
                 return false;
             }
@@ -16726,7 +16687,7 @@ namespace mw::gui
             const auto reason = startResult.errorMessage.isNotEmpty()
                 ? startResult.errorMessage
                 : juce::String("Mixed live project transport did not start.");
-            logMessage("Phase 2 Transport: " + reason);
+            logMessage("Project Preview Transport: " + reason);
             closeMixedLiveProjectPreviewTrackSessions();
             return false;
         }
@@ -16772,14 +16733,14 @@ namespace mw::gui
             juce::dontSendNotification);
         renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
 
-        logMessage("Phase 2 Transport: state Playing, generation "
+        logMessage("Project Preview Transport: state Playing, generation "
             + juce::String(static_cast<juce::int64>(transportGeneration))
             + ", live CLAP tracks " + juce::String(startResult.clapTrackCount)
             + ", live VST3 tracks " + juce::String(startResult.vstTrackCount)
             + ", prepared audio sources " + juce::String(startResult.audioSourceCount)
             + ", total samples " + juce::String(static_cast<juce::int64>(startResult.totalSamples)) + ".");
         if (startResult.message.isNotEmpty())
-            logMessage("Phase 2 Transport: " + startResult.message);
+            logMessage("Project Preview Transport: " + startResult.message);
 
         beginClapDirectPreviewCompletionPolling();
         return true;
@@ -16853,9 +16814,9 @@ namespace mw::gui
     {
         cancelRenderRequested = false;
         setRenderingState(true);
-        renderStatusLabel.setText("Phase 2: preparing mixed-project playback...", juce::dontSendNotification);
+        renderStatusLabel.setText("Preparing mixed-project playback...", juce::dontSendNotification);
         renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
-        logMessage("Phase 2 Transport: rendering non-live project sources before mixed live playback.");
+        logMessage("Project Preview Transport: rendering non-live project sources before mixed live playback.");
 
         if (renderThread.joinable())
             renderThread.join();
@@ -16897,7 +16858,7 @@ namespace mw::gui
                             || currentProject->getStableId() != projectId
                             || !playbackTransportCoordinator.matches(transportGeneration, projectId))
                         {
-                            logMessage("Phase 2 Transport: discarded stale mixed-live preparation result after project/transport change.");
+                            logMessage("Project Preview Transport: discarded stale mixed-live preparation result after project/transport change.");
                             return;
                         }
 
@@ -16918,14 +16879,14 @@ namespace mw::gui
                         if (result.cancelled)
                         {
                             playbackTransportCoordinator.fail(transportGeneration, "Mixed-live preview preparation was cancelled.");
-                            logMessage("Phase 2 Transport: mixed-live preparation cancelled.");
+                            logMessage("Project Preview Transport: mixed-live preparation cancelled.");
                             return;
                         }
 
                         if (!result.success || result.finalAudioPath.extension() != ".wav")
                         {
                             playbackTransportCoordinator.fail(transportGeneration, "Mixed-live rendered-source preparation failed.");
-                            logMessage("Phase 2 Transport: rendered-source preparation failed; using the full rendered preview fallback.");
+                            logMessage("Project Preview Transport: rendered-source preparation failed; using the full rendered preview fallback.");
                             startFullRenderedPreview();
                             return;
                         }
@@ -16937,7 +16898,7 @@ namespace mw::gui
                         if (!audioSource)
                         {
                             playbackTransportCoordinator.fail(transportGeneration, "Prepared fallback WAV could not be loaded.");
-                            logMessage("Phase 2 Transport: prepared fallback WAV could not be loaded; using the full rendered preview fallback.");
+                            logMessage("Project Preview Transport: prepared fallback WAV could not be loaded; using the full rendered preview fallback.");
                             startFullRenderedPreview();
                             return;
                         }
@@ -16960,7 +16921,7 @@ namespace mw::gui
                         {
                             playbackTransportCoordinator.fail(transportGeneration, "Mixed live preparation failed after fallback rendering.");
                             closeMixedLiveProjectPreviewTrackSessions();
-                            logMessage("Phase 2 Transport: mixed live preparation failed; using the full rendered preview fallback.");
+                            logMessage("Project Preview Transport: mixed live preparation failed; using the full rendered preview fallback.");
                             startFullRenderedPreview();
                         }
                     });
@@ -17025,7 +16986,7 @@ namespace mw::gui
             && clapLiveTransportGeneration != 0
             && !playbackTransportCoordinator.matches(clapLiveTransportGeneration, currentProject->getStableId()))
         {
-            logMessage("Phase 2 Transport: stopping stale playback after project identity changed.");
+            logMessage("Project Preview Transport: stopping stale playback after project identity changed.");
             stopClapInstrumentLiveAudition(true);
             stopVstInstrumentLiveAudition(true);
             return;
@@ -18389,7 +18350,7 @@ namespace mw::gui
         mw::exporting::ExportPathBuilder::ensureOutputFolderExists(settings);
 
         const auto midiPath = mw::exporting::ExportPathBuilder::buildMidiPath(settings);
-        const auto wavPath = mw::exporting::ExportPathBuilder::buildAudioPath(settings, mw::exporting::AudioFormat::Wav);
+        const auto wavPath = mw::exporting::ExportPathBuilder::buildWavPath(settings);
 
         if (!mw::midi::MidiExporter::exportToFile(testProject, midiPath))
         {
@@ -21429,7 +21390,7 @@ void MainComponent::openAudioRecorderWindow()
         if (auto* recorderContent = dynamic_cast<AudioRecorderWindowContent*>(audioRecorderContent.get()))
             recorderContent->setTrackLiveEffectEnabled(audioRecorderTrackLiveEffectEnabled);
         refreshAudioRecorderWindowStatus();
-        logMessage("Opened AudioClip Recorder. Record and Record With Delay use the selected blank target track. Record Test is temporary and uses the selected track's first eligible VST3 or CLAP effect when available.");
+        logMessage("Opened AudioClip Recorder. Record and Record With Delay use the selected blank target track. Record Test is temporary and uses the selected track's eligible VST3 and/or CLAP effect chain when available.");
     }
 
     void MainComponent::refreshAudioRecorderInputDevices()
@@ -21503,10 +21464,10 @@ void MainComponent::openAudioRecorderWindow()
             content->setTrackLiveEffectEnabled(audioRecorderTrackLiveEffectEnabled);
 
         logMessage(audioRecorderTrackLiveEffectEnabled
-            ? "AudioClip Recorder Track Live Effect monitor enabled. The project WAV remains dry; previews and exports apply the track effect non-destructively."
+            ? "AudioClip Recorder Track Live Effects monitor enabled. The project WAV remains dry; previews and exports apply the ordered track effect chain non-destructively."
             : (enabled
-                ? "AudioClip Recorder Track Live Effect monitor could not be enabled because the current blank target does not have an eligible effect."
-                : "AudioClip Recorder Track Live Effect monitor disabled. The project WAV records dry and the assigned effect remains available for preview/export."));
+                ? "AudioClip Recorder Track Live Effects monitor could not be enabled because the current blank target does not have an eligible effect chain."
+                : "AudioClip Recorder Track Live Effects monitor disabled. The project WAV records dry and the assigned effect chain remains available for preview/export."));
         refreshAudioRecorderWindowStatus();
     }
 
@@ -21531,6 +21492,8 @@ void MainComponent::openAudioRecorderWindow()
                 : static_cast<double>(track.getMixerSettings().volume);
             options.monitorOutputGain = mw::audio::sanitizeMainUiGain(
                 static_cast<float>(monitorTrackVolume * masterVolumeSlider.getValue()));
+            options.trackName = track.getName();
+
             const auto& effects = track.getVstEffects();
             for (std::size_t slotIndex = 0; slotIndex < mw::core::maxVstEffectSlots; ++slotIndex)
             {
@@ -21544,10 +21507,13 @@ void MainComponent::openAudioRecorderWindow()
                     || slot->plugin.bundlePath.empty())
                     continue;
 
-                options.enabled = true;
-                options.backendType = slot->backendType;
-                options.trackName = track.getName() + " - Effect Slot " + std::to_string(slotIndex + 1);
-                options.effect = slot->plugin;
+                if (options.stageCount >= static_cast<int>(mw::core::maxVstEffectSlots))
+                    break;
+
+                auto& stage = options.stages[static_cast<std::size_t>(options.stageCount)];
+                stage.backendType = slot->backendType;
+                stage.slotIndex = static_cast<int>(slotIndex);
+                stage.effect = slot->plugin;
 
                 // Match Test Effect without silently committing editor changes:
                 // use the currently open editor state for this recording session
@@ -21558,16 +21524,17 @@ void MainComponent::openAudioRecorderWindow()
                                                                                   false);
                 if (currentEditorState.isNotEmpty())
                 {
-                    options.effect.stateBase64 = currentEditorState.toStdString();
+                    stage.effect.stateBase64 = currentEditorState.toStdString();
                     logMessage("AudioClip Recorder: using the current open Effect Slot "
                         + juce::String(static_cast<int>(slotIndex + 1))
-                        + " editor state for this take without applying it to the project.");
+                        + " editor state for this monitoring chain without applying it to the project.");
                 }
 
-                return true;
+                ++options.stageCount;
             }
 
-            return false;
+            options.enabled = options.stageCount > 0;
+            return options.enabled;
         };
 
         if (populateFromTrack(sourceTrackIndex))
@@ -21576,6 +21543,7 @@ void MainComponent::openAudioRecorderWindow()
         populateFromTrack(targetTrackIndex);
         return options;
     }
+
 
 
     void MainComponent::startAudioRecorderTest()
@@ -21853,7 +21821,7 @@ void MainComponent::openAudioRecorderWindow()
         {
             audioRecorderTrackLiveEffectEnabled = false;
             audioRecorderTrackLiveEffectTargetId = 0;
-            logMessage("AudioClip Recorder Track Live Effect monitor reset because the blank recording target changed or its eligible effect was removed.");
+            logMessage("AudioClip Recorder Track Live Effects monitor reset because the blank recording target changed or its eligible effect was removed.");
         }
 
         if (activeRecordingTrackIndex >= 0)
@@ -21873,32 +21841,35 @@ void MainComponent::openAudioRecorderWindow()
             && audioRecorderTrackLiveEffectTargetId == selectedRecordingTargetId
             && hasLiveEffectTarget;
         status << "\nCapture: Dry WAV (effects remain non-destructive)";
-        status << "\nTrack Live Effect Monitor: " << (trackLiveEffectUsable ? "On" : "Off");
+        status << "\nTrack Live Effects Monitor: " << (trackLiveEffectUsable ? "On" : "Off");
 
         if (hasLiveEffectTarget && currentProject)
         {
             const auto& selectedTrack = currentProject->getTracks()[static_cast<std::size_t>(selectedRecordingTargetIndex)];
             const auto& effects = selectedTrack.getVstEffects();
+            bool wroteChainStage = false;
+            status << " | Chain: ";
             for (std::size_t slotIndex = 0; slotIndex < mw::core::maxVstEffectSlots; ++slotIndex)
             {
                 const auto* slot = effects.slot(slotIndex);
-                if (slot != nullptr
-                    && effects.slotEnabled(slotIndex)
-                    && !slot->plugin.bypassed
-                    && (slot->backendType == mw::core::EffectSlotBackendType::VST3
-                        || slot->backendType == mw::core::EffectSlotBackendType::CLAP)
-                    && slot->plugin.hasPluginIdentity()
-                    && !slot->plugin.bundlePath.empty())
-                {
-                    const auto backendName = slot->backendType == mw::core::EffectSlotBackendType::CLAP ? "CLAP" : "VST3";
-                    status << " | Source: " << juce::String(selectedTrack.getName())
-                           << " / Slot " << juce::String(static_cast<int>(slotIndex + 1))
-                           << " / " << backendName
-                           << " / " << juce::String(slot->plugin.name.empty() ? slot->plugin.bundlePath.filename().string() : slot->plugin.name);
-                    if (slot->plugin.stateBase64.empty())
-                        status << " (plugin default state)";
-                    break;
-                }
+                if (slot == nullptr
+                    || !effects.slotEnabled(slotIndex)
+                    || slot->plugin.bypassed
+                    || (slot->backendType != mw::core::EffectSlotBackendType::VST3
+                        && slot->backendType != mw::core::EffectSlotBackendType::CLAP)
+                    || !slot->plugin.hasPluginIdentity()
+                    || slot->plugin.bundlePath.empty())
+                    continue;
+
+                if (wroteChainStage)
+                    status << " -> ";
+                const auto backendName = slot->backendType == mw::core::EffectSlotBackendType::CLAP ? "CLAP" : "VST3";
+                status << "Slot " << juce::String(static_cast<int>(slotIndex + 1))
+                       << " " << backendName
+                       << " " << juce::String(slot->plugin.name.empty() ? slot->plugin.bundlePath.filename().string() : slot->plugin.name);
+                if (slot->plugin.stateBase64.empty())
+                    status << " (default)";
+                wroteChainStage = true;
             }
         }
 
@@ -21994,9 +21965,9 @@ void MainComponent::openAudioRecorderWindow()
 
         const bool trackLiveEffectUsable = trackHasUsableLiveEffectForAudioRecorder(trackIndex);
         if (trackLiveEffectUsable)
-            logMessage("AudioClip Recorder will keep the project WAV dry. The selected track effect remains available for non-destructive preview/export; when live monitoring is enabled, the current open editor state is used transiently when available.");
+            logMessage("AudioClip Recorder will keep the project WAV dry. Up to two selected-track effects remain available in Slot 1 then Slot 2 order for non-destructive preview/export; when live monitoring is enabled, each current open editor state is used transiently when available.");
         if (audioRecorderTrackLiveEffectEnabled && trackLiveEffectUsable)
-            logMessage("AudioClip Recorder Track Live Effect monitor is enabled. Monitoring is wet while the project WAV records dry.");
+            logMessage("AudioClip Recorder Track Live Effects monitor is enabled. The ordered Slot 1 then Slot 2 chain is wet while the project WAV records dry.");
 
         if (activeImportSectionIndex < 0 || activeImportSectionIndex >= static_cast<int>(importSections.size()))
         {
@@ -22401,11 +22372,6 @@ void MainComponent::openAudioRecorderWindow()
                 logMessage("Closed AudioClip Recorder.");
             }
         );
-    }
-
-    void MainComponent::revealCurrentProjectFolder()
-    {
-        juce::File(getCurrentProjectFolder().string()).revealToUser();
     }
 
 
@@ -23635,21 +23601,9 @@ void MainComponent::refreshSoundFontList()
         slot.plugin.uid = descriptor.uid;
         slot.plugin.compatibilitySummary = "CLAP Effect assignment saved. Compatible effects are available for preview/render, live preview where safe, and compatible editor windows when the plugin exposes a supported GUI/state extension.";
 
-        // Reserved for future CLAP state support. Same-plugin re-selection preserves
-        // any state blob that later builds may attach to the slot.
+        // Preserve the saved state when the same CLAP plugin is reselected.
         if (samePluginIdentity)
             slot.plugin.stateBase64 = previousStateBase64;
-    }
-
-    void MainComponent::setVstEffectStatusText(int trackIndex, const juce::String& baseStatus)
-    {
-        juce::String text = baseStatus;
-        if (trackIndex >= 0)
-        {
-            if (auto found = lastVstEffectRenderStatusByTrack.find(trackIndex); found != lastVstEffectRenderStatusByTrack.end() && found->second.isNotEmpty())
-                text << " | Last: " << found->second;
-        }
-        vstEffectStatusLabel.setText(text, juce::dontSendNotification);
     }
 
     void MainComponent::recordVstEffectRenderStatusForTrack(int trackIndex, const juce::String& statusText)
@@ -26150,7 +26104,7 @@ void MainComponent::refreshTrackSelector()
             // workflow commit point for the slot assignment, Enable flag, and
             // Bypass flag; the VST editor toolbar Apply Changes still commits
             // plugin parameter state only.
-            applySelectedTrackVstEffectSlot();
+            applySelectedTrackVstEffectSlots();
 
             const bool trackSettingsChanged = !instrumentAssignmentsEqual(instrumentBeforeApply, track.getInstrument())
                 || !vstEffectsAssignmentsEqual(effectsBeforeApply, track.getVstEffects())
@@ -31271,7 +31225,7 @@ void MainComponent::selectTrackFromManagerPage()
                             importRequest.sourcePath = ffmpegRequest.outputWavPath;
                             importRequest.projectFolder = importProjectFolder;
                             importRequest.ffmpegExePath = ffmpegRequest.ffmpegExePath;
-                            // Phase 5C commits enhanced copies as readable WAV media first.
+                            // Commit enhanced copies as readable WAV media first.
                             // This keeps the new-track workflow safe and predictable; later
                             // phases can add format matching if needed.
                             importRequest.savedFormat = mw::core::AudioClipSavedFormat::Wav;
@@ -33962,15 +33916,15 @@ void MainComponent::openPianoRollWindow()
 
             if (!restarted)
             {
-                logMessage("Phase 2 Transport: live seek restart failed. Use Preview to restart through the normal fallback path.");
+                logMessage("Project Preview Transport: live seek restart failed. Use Preview to restart through the normal fallback path.");
                 return false;
             }
 
             const auto restartedTransport = playbackTransportCoordinator.snapshot();
             if (restartedTransport.state == mw::playback::TransportState::Preparing)
-                logMessage("Phase 2 Transport: live seek is preparing playback at " + formatPreviewClockTime(targetSeconds) + ".");
+                logMessage("Project Preview Transport: live seek is preparing playback at " + formatPreviewClockTime(targetSeconds) + ".");
             else
-                logMessage("Phase 2 Transport: live preview restarted at " + formatPreviewClockTime(targetSeconds) + ".");
+                logMessage("Project Preview Transport: live preview restarted at " + formatPreviewClockTime(targetSeconds) + ".");
             return true;
         }
 

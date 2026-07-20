@@ -52,16 +52,6 @@ namespace mw::clap
         state_.message = message.str();
     }
 
-    void ClapLiveCallbackBridge::resetPlayback()
-    {
-        scheduler_.resetToStart();
-        reusableRequest_.frameCount = 0;
-        reusableRequest_.noteEvents.clear();
-        state_.emittedBlocks = 0;
-        state_.emittedEvents = 0;
-        state_.currentSample = scheduler_.currentSample();
-    }
-
     bool ClapLiveCallbackBridge::isPrepared() const
     {
         return state_.prepared;

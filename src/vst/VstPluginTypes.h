@@ -152,7 +152,6 @@ namespace mw::vst
         bool mixedDpi = false;
         std::string preferredPluginGpuId = "auto";
 
-        bool hasMultipleGpus() const { return adapters.size() > 1; }
         std::string summary() const;
     };
 
