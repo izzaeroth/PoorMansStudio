@@ -902,6 +902,35 @@ namespace
         return {};
     }
 
+    bool hasEnabledNonVst3EffectSlots(const mw::core::Track& track)
+    {
+        const auto& effects = track.getVstEffects();
+        for (std::size_t slotIndex = 0; slotIndex < mw::core::maxEffectSlots; ++slotIndex)
+        {
+            if (!effects.slotEnabled(slotIndex))
+                continue;
+
+            const auto* slot = effects.slot(slotIndex);
+            if (slot == nullptr || !slot->plugin.hasPluginIdentity() || slot->plugin.bypassed)
+                continue;
+
+            if (!slot->isVst3Plugin())
+                return true;
+        }
+
+        return false;
+    }
+
+    juce::String vstEffectSlotDisplayName(const mw::core::VstEffectSlotAssignment& slot, std::size_t slotIndex)
+    {
+        auto name = juce::String(slot.plugin.name).trim();
+        if (name.isEmpty() && !slot.plugin.bundlePath.empty())
+            name = juce::String(slot.plugin.bundlePath.stem().string()).trim();
+        if (name.isEmpty())
+            name = juce::String("VST3 Effect Slot ") + juce::String(static_cast<int>(slotIndex) + 1);
+        return name;
+    }
+
     bool hasEnabledNonClapEffectSlots(const mw::core::Track& track)
     {
         const auto& effects = track.getVstEffects();
@@ -911,7 +940,7 @@ namespace
                 continue;
 
             const auto* slot = effects.slot(slotIndex);
-            if (slot == nullptr || !slot->plugin.hasPluginIdentity())
+            if (slot == nullptr || !slot->plugin.hasPluginIdentity() || slot->plugin.bypassed)
                 continue;
 
             if (!slot->isClapPlugin())
@@ -6259,7 +6288,7 @@ juce::Label helpLabel;
             playPauseButton.setEnabled(false);
             stopButton.setEnabled(false);
 
-            help.setText("Preview refreshes the selected scope and auto-plays, capturing open VST editor changes first. Rendered previews can pause; live CLAP uses Stop and seek.", juce::dontSendNotification);
+            help.setText("Preview refreshes the selected scope and auto-plays, capturing open VST editor changes first. Rendered previews can pause; live plugin playback uses Stop and seek.", juce::dontSendNotification);
             help.setJustificationType(juce::Justification::centredLeft);
             help.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
 
@@ -6892,7 +6921,7 @@ juce::Label helpLabel;
             }
             else if (livePreviewNow && roll.isPreviewPlayheadActive())
             {
-                statusLabel.setText("Status: Live CLAP playback", juce::dontSendNotification);
+                statusLabel.setText("Status: Live plugin playback", juce::dontSendNotification);
                 statusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
                 playPauseButton.setButtonText("Live");
                 beatLabel.setText("Beat: " + juce::String(roll.getPreviewPlayheadBeat() + 1.0, 2), juce::dontSendNotification);
@@ -7967,7 +7996,7 @@ namespace mw::gui
                 micGainUpButton.setButtonText("+");
                 micGainResetButton.setButtonText("0 dB");
                 trackLiveEffectToggle.setButtonText("Track Live Effect");
-                trackLiveEffectToggle.setTooltip("Monitor recorder input through the selected target track's first enabled, non-bypassed Effect Slot. The applied track effect is printed into the recorded clip whether this monitor checkbox is on or off.");
+                trackLiveEffectToggle.setTooltip("Monitor recorder input through the selected blank target track's first enabled, non-bypassed VST3 or CLAP Effect Slot. The current open editor state is used for monitoring when available without applying it to the project; otherwise saved Apply Changes state is restored, or the plugin default state is used. The recorded project WAV always remains dry.");
                 pauseButton.setButtonText("Pause");
                 stopButton.setButtonText("Stop");
                 keepButton.setButtonText("Save / Apply");
@@ -8019,7 +8048,7 @@ namespace mw::gui
 
                 startButton.setTooltip("Start recording into the selected blank target track after a short 0.25 second safety delay. If the take is paused, Record prompts to save, discard/start over, or cancel instead of resuming.");
                 delayedStartButton.setTooltip("Start recording into the selected blank target track after the chosen countdown delay. If the take is paused, Record With Delay prompts to save, discard/start over, or cancel instead of resuming.");
-                recordTestButton.setTooltip("Run a quick mic check without needing a target track: 3 second countdown, 5 second recording, automatic playback, then automatic temp cleanup. It does not create an AudioClip track.");
+                recordTestButton.setTooltip("Run a quick mic check: 3 second countdown, 5 second recording, automatic playback, then automatic temp cleanup. When the selected track has an eligible VST3 or CLAP effect, only the disposable test WAV uses that effect; Track Live Effect controls monitoring. Project recording media always remains dry.");
                 micGainDownButton.setTooltip("Reduce the recorder's software mic gain by 3 dB.");
                 micGainUpButton.setTooltip("Increase the recorder's software mic gain by 3 dB. Too much boost can add noise or clip.");
                 micGainResetButton.setTooltip("Reset software mic gain to 0.0 dB.");
@@ -9934,6 +9963,7 @@ namespace mw::gui
 
 
         stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
         disarmClapLiveEngineSession(false);
 
         cancelRenderRequested = true;
@@ -12740,6 +12770,8 @@ namespace mw::gui
                     && !descriptor.bundlePath.empty()
                     && pathsReferToSameLocation(currentBundlePath, descriptor.bundlePath)));
 
+        stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
         if (!samePluginIdentity)
             closeVstPluginWindowForTrack(index, "Closed open VST plugin window before replacing the track plugin assignment.");
 
@@ -12795,6 +12827,8 @@ namespace mw::gui
                     && !descriptor.pluginPath.empty()
                     && pathsReferToSameLocation(currentPluginPath, descriptor.pluginPath)));
 
+        stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
         if (!samePluginIdentity)
             closeVstPluginWindowForTrack(index, "Closed open VST plugin window before replacing the track plugin assignment.");
 
@@ -13297,6 +13331,7 @@ namespace mw::gui
                     if (assignmentToUpdate.backendType != mw::core::SampleBackendType::CLAP || !assignmentToUpdate.vst3.hasPluginIdentity())
                         return false;
 
+                    stopLivePlaybackBeforeProjectMutation();
                     assignmentToUpdate.vst3.stateBase64 = stateBase64.toStdString();
                     editedTrack.setInstrumentAssignment(assignmentToUpdate);
 
@@ -13372,6 +13407,7 @@ namespace mw::gui
                         return;
                     }
 
+                    stopLivePlaybackBeforeProjectMutation();
                     assignment.vst3.stateBase64 = record->stateBase64;
                     editedTrack.setInstrumentAssignment(assignment);
                     cleanupPianoRollPreviewFiles();
@@ -14037,6 +14073,7 @@ namespace mw::gui
 
                 // Track-owned VST3 state only. Store the latest applied plugin state
                 // as the single source of truth for preview, render, and project save.
+                stopLivePlaybackBeforeProjectMutation();
                 assignment.vst3.stateBase64 = stateBase64.toStdString();
 
                 editedTrack.setInstrumentAssignment(assignment);
@@ -14126,6 +14163,7 @@ namespace mw::gui
                     return;
                 }
 
+                stopLivePlaybackBeforeProjectMutation();
                 assignment.vst3.stateBase64 = record->stateBase64;
                 editedTrack.setInstrumentAssignment(assignment);
                 cleanupPianoRollPreviewFiles();
@@ -14663,6 +14701,7 @@ namespace mw::gui
                     if (!slot.plugin.hasPluginIdentity() || slot.backendType != mw::core::EffectSlotBackendType::CLAP)
                         return false;
 
+                    stopLivePlaybackBeforeProjectMutation();
                     slot.plugin.stateBase64 = stateBase64.toStdString();
                     editedTrack.setVstEffects(std::move(effects));
 
@@ -14732,6 +14771,7 @@ namespace mw::gui
                         return;
                     }
 
+                    stopLivePlaybackBeforeProjectMutation();
                     auto& slotRef = effects.ensureSlot(slotIndexSize);
                     slotRef.plugin.stateBase64 = record->stateBase64;
                     editedTrack.setVstEffects(std::move(effects));
@@ -15156,6 +15196,7 @@ namespace mw::gui
                 if (!slot.plugin.hasPluginIdentity())
                     return false;
 
+                stopLivePlaybackBeforeProjectMutation();
                 slot.plugin.stateBase64 = stateBase64.toStdString();
                 editedTrack.setVstEffects(std::move(effects));
 
@@ -15228,6 +15269,7 @@ namespace mw::gui
                     return;
                 }
 
+                stopLivePlaybackBeforeProjectMutation();
                 auto& slotRef = effects.ensureSlot(slotIndexSize);
                 slotRef.plugin.stateBase64 = record->stateBase64;
                 editedTrack.setVstEffects(std::move(effects));
@@ -15401,6 +15443,7 @@ namespace mw::gui
             if (backendMatchesOpenEditor
                 && assignment.vst3.stateBase64 != capturedState.toStdString())
             {
+                stopLivePlaybackBeforeProjectMutation();
                 assignment.vst3.stateBase64 = capturedState.toStdString();
                 track.setInstrumentAssignment(assignment);
                 setProjectDirty();
@@ -15581,6 +15624,350 @@ namespace mw::gui
     }
 
 
+    bool MainComponent::startSelectedTrackVstDirectAudition(int index)
+    {
+        if (!currentProject)
+            return false;
+
+        if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+            return false;
+
+        const auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
+        const auto assignment = track.getInstrument();
+        if (assignment.backendType != mw::core::SampleBackendType::VST3
+            || !assignment.vst3.hasPluginIdentity()
+            || track.getNotes().empty())
+        {
+            return false;
+        }
+
+        if (hasEnabledNonVst3EffectSlots(track))
+        {
+            logMessage("VST3 Live Preview: selected track has an enabled non-VST3 effect slot, so rendered preview will be used in Phase 1.");
+            return false;
+        }
+
+        stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
+
+        const int sampleRate = sampleRateCombo.getText().getIntValue() > 0
+            ? sampleRateCombo.getText().getIntValue()
+            : 48000;
+        const int channelCount = channelsCombo.getSelectedId() > 0
+            ? channelsCombo.getSelectedId()
+            : 2;
+        const int blockSize = 512;
+
+        auto instrumentSession = std::make_unique<mw::vst::VstLiveInstrumentSession>();
+        mw::vst::VstLiveInstrumentSessionConfig instrumentConfig;
+        instrumentConfig.plugin = assignment.vst3;
+        instrumentConfig.sampleRate = sampleRate;
+        instrumentConfig.channelCount = channelCount;
+        instrumentConfig.blockSize = blockSize;
+
+        std::string openError;
+        if (!instrumentSession->open(instrumentConfig, openError))
+        {
+            logMessage("VST3 Live Preview: instrument failed to open: " + juce::String(openError) + ". Rendered preview will be used.");
+            return false;
+        }
+
+        std::vector<std::unique_ptr<VstLiveSelectedTrackEffectSession>> preparedEffects;
+        std::vector<mw::vst::VstLiveDirectPreviewEffectRequest> effectRequests;
+        const auto& effects = track.getVstEffects();
+        for (std::size_t slotIndex = 0; slotIndex < mw::core::maxEffectSlots; ++slotIndex)
+        {
+            const auto* effectSlot = effects.slot(slotIndex);
+            if (effectSlot == nullptr
+                || !effects.slotEnabled(slotIndex)
+                || effectSlot->plugin.bypassed
+                || !effectSlot->isVst3Plugin())
+            {
+                continue;
+            }
+
+            auto holder = std::make_unique<VstLiveSelectedTrackEffectSession>();
+            holder->slotIndex = static_cast<int>(slotIndex);
+            holder->displayName = vstEffectSlotDisplayName(*effectSlot, slotIndex);
+            holder->session = std::make_unique<mw::vst::VstLiveEffectSession>();
+
+            mw::vst::VstLiveEffectSessionConfig effectConfig;
+            effectConfig.plugin = effectSlot->plugin;
+            effectConfig.sampleRate = sampleRate;
+            effectConfig.channelCount = channelCount;
+            effectConfig.blockSize = blockSize;
+
+            std::string effectOpenError;
+            if (!holder->session->open(effectConfig, effectOpenError))
+            {
+                logMessage("VST3 Live Preview: Effect Slot "
+                    + juce::String(static_cast<int>(slotIndex) + 1)
+                    + " failed to open: " + juce::String(effectOpenError)
+                    + ". Rendered preview will be used.");
+                for (auto& prepared : preparedEffects)
+                    if (prepared != nullptr && prepared->session != nullptr)
+                        prepared->session->close();
+                instrumentSession->close();
+                return false;
+            }
+
+            mw::vst::VstLiveDirectPreviewEffectRequest effectRequest;
+            effectRequest.slotIndex = holder->slotIndex;
+            effectRequest.displayName = holder->displayName.toStdString();
+            effectRequest.session = holder->session.get();
+            effectRequest.sessionProcessMutex = &holder->processMutex;
+            effectRequests.push_back(effectRequest);
+            preparedEffects.push_back(std::move(holder));
+        }
+
+        std::vector<mw::clap::ClapLivePlaybackNote> liveNotes;
+        liveNotes.reserve(track.getNotes().size());
+        for (const auto& note : track.getNotes())
+        {
+            mw::clap::ClapLivePlaybackNote liveNote;
+            liveNote.pitch = note.pitch;
+            liveNote.velocity = note.velocity;
+            liveNote.midiChannel = note.midiChannel;
+            liveNote.startTick = note.startTick;
+            liveNote.durationTicks = note.durationTicks;
+            liveNotes.push_back(liveNote);
+        }
+
+        mw::clap::ClapLiveCallbackBridgeConfig bridgeConfig;
+        bridgeConfig.trackIndex = index;
+        bridgeConfig.trackName = track.getName();
+        bridgeConfig.outputChannelCount = channelCount;
+        bridgeConfig.scheduler.tempoBpm = std::max(1, currentProject->getTempoBpm());
+        bridgeConfig.scheduler.sampleRate = sampleRate;
+        bridgeConfig.scheduler.blockSize = blockSize;
+        bridgeConfig.scheduler.ticksPerQuarterNote = mw::core::Project::ticksPerQuarterNote;
+        const auto previewStartSeconds = std::max(0.0, pendingPianoRollPreviewStartSeconds);
+        bridgeConfig.scheduler.startTick = static_cast<std::int64_t>(std::llround(
+            previewStartSeconds
+            * static_cast<double>(bridgeConfig.scheduler.tempoBpm)
+            * static_cast<double>(mw::core::Project::ticksPerQuarterNote)
+            / 60.0));
+        bridgeConfig.scheduler.startSample = 0;
+        bridgeConfig.scheduler.tailSeconds = 1.0;
+
+        mw::vst::VstLiveDirectPreviewTrackRequest request;
+        request.stableTrackId = track.getStableId();
+        request.trackIndex = index;
+        request.trackName = track.getName();
+        request.session = instrumentSession.get();
+        request.sessionProcessMutex = &vstLiveSessionProcessMutex;
+        request.notes = std::move(liveNotes);
+        request.config = std::move(bridgeConfig);
+        request.effects = std::move(effectRequests);
+        request.outputGain = mw::audio::sanitizeMainUiGain(
+            static_cast<float>(static_cast<double>(track.getMixerSettings().volume)
+                * masterVolumeSlider.getValue()));
+
+        vstLiveTransportStartSample = static_cast<std::int64_t>(std::llround(previewStartSeconds * sampleRate));
+        vstLiveTransportGeneration = playbackTransportCoordinator.beginPreparing(
+            currentProject->getStableId(),
+            vstLiveTransportStartSample,
+            sampleRate,
+            blockSize,
+            { track.getStableId() });
+
+        auto startResult = vstLiveDirectPreviewEngine.start(std::move(request), channelCount);
+        if (!startResult.started)
+        {
+            const auto reason = startResult.errorMessage.isNotEmpty()
+                ? startResult.errorMessage
+                : juce::String("VST3 live selected-track preview did not start.");
+            playbackTransportCoordinator.fail(vstLiveTransportGeneration, reason.toStdString());
+            vstLiveTransportGeneration = 0;
+            vstLiveTransportStartSample = 0;
+            for (auto& prepared : preparedEffects)
+                if (prepared != nullptr && prepared->session != nullptr)
+                    prepared->session->close();
+            instrumentSession->close();
+            logMessage("VST3 Live Preview: " + reason + " Rendered preview will be used.");
+            return false;
+        }
+
+        vstLiveInstrumentSession = std::move(instrumentSession);
+        vstLiveSelectedTrackEffectSessions = std::move(preparedEffects);
+
+        if (!playbackTransportCoordinator.beginPlaying(
+                vstLiveTransportGeneration,
+                vstLiveTransportStartSample + startResult.totalSamples))
+        {
+            vstLiveDirectPreviewEngine.stop();
+            for (auto& effect : vstLiveSelectedTrackEffectSessions)
+                if (effect != nullptr && effect->session != nullptr)
+                    effect->session->close();
+            vstLiveSelectedTrackEffectSessions.clear();
+            vstLiveInstrumentSession->close();
+            vstLiveInstrumentSession.reset();
+            vstLiveTransportGeneration = 0;
+            vstLiveTransportStartSample = 0;
+            return false;
+        }
+
+        renderStatusLabel.setText("VST3 live preview playing.", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+        logMessage("VST3 Live Preview: selected track is playing through the native audio callback path with "
+            + juce::String(startResult.liveEffectSlotCount) + " live effect slot(s). Rendered preview remains the fallback.");
+        if (startResult.message.isNotEmpty())
+            logMessage("VST3 Live Preview: " + startResult.message);
+
+        beginVstDirectPreviewCompletionPolling();
+        return true;
+    }
+
+    bool MainComponent::tryStartSelectedTrackVstMainTransportPreview(int index)
+    {
+        if (!currentProject
+            || index < 0
+            || index >= static_cast<int>(currentProject->getTracks().size()))
+        {
+            return false;
+        }
+
+        const auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
+        if (track.getInstrument().backendType != mw::core::SampleBackendType::VST3
+            || !track.getInstrument().vst3.hasPluginIdentity())
+        {
+            return false;
+        }
+
+        if (!startSelectedTrackVstDirectAudition(index))
+            return false;
+
+        setPianoRollPreviewNoteMapFromTracks({ track });
+        setPianoRollPreviewAudioClipMapFromClips({});
+        lastPianoRollPreviewScope = 1;
+        lastPianoRollPreviewTempoBpm = currentProject->getTempoBpm();
+        lastPianoRollPreviewDurationBeats = std::max(0.01, trackEndBeatForPreview(track));
+        pendingPianoRollPreviewStartSeconds = std::max(0.0, pendingPianoRollPreviewStartSeconds);
+        pianoRollPreviewPaused = false;
+        const auto previewStartBeat = pendingPianoRollPreviewStartSeconds
+            * (lastPianoRollPreviewTempoBpm / 60.0);
+        pianoRoll.startPreviewPlayhead(
+            lastPianoRollPreviewTempoBpm,
+            std::max(0.01, lastPianoRollPreviewDurationBeats - previewStartBeat),
+            previewStartBeat);
+        openPianoRollPreviewPlayerWindow();
+
+        renderStatusLabel.setText("Preview Track: VST3 direct playback.", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+        return true;
+    }
+
+    void MainComponent::beginVstDirectPreviewCompletionPolling()
+    {
+        vstLiveDirectPreviewCompletionPollActive = true;
+        const int generation = ++vstLiveDirectPreviewCompletionPollGeneration;
+        scheduleVstDirectPreviewCompletionPoll(generation);
+    }
+
+    void MainComponent::cancelVstDirectPreviewCompletionPolling()
+    {
+        vstLiveDirectPreviewCompletionPollActive = false;
+        ++vstLiveDirectPreviewCompletionPollGeneration;
+    }
+
+    void MainComponent::scheduleVstDirectPreviewCompletionPoll(int generation)
+    {
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        juce::Timer::callAfterDelay(200, [safeThis, generation]() mutable
+        {
+            if (safeThis != nullptr)
+                safeThis->handleVstDirectPreviewCompletionPoll(generation);
+        });
+    }
+
+    void MainComponent::handleVstDirectPreviewCompletionPoll(int generation)
+    {
+        if (!vstLiveDirectPreviewCompletionPollActive
+            || generation != vstLiveDirectPreviewCompletionPollGeneration)
+        {
+            return;
+        }
+
+        const auto status = vstLiveDirectPreviewEngine.status();
+        if (currentProject
+            && vstLiveTransportGeneration != 0
+            && !playbackTransportCoordinator.matches(vstLiveTransportGeneration, currentProject->getStableId()))
+        {
+            logMessage("VST3 Live Preview: stopping stale playback after project identity changed.");
+            stopVstInstrumentLiveAudition(true);
+            return;
+        }
+
+        if (vstLiveTransportGeneration != 0)
+            playbackTransportCoordinator.updatePosition(
+                vstLiveTransportGeneration,
+                vstLiveTransportStartSample + status.currentSample,
+                vstLiveTransportStartSample + status.totalSamples);
+
+        if (!status.active)
+        {
+            cancelVstDirectPreviewCompletionPolling();
+            return;
+        }
+
+        if (!status.isTerminal())
+        {
+            scheduleVstDirectPreviewCompletionPoll(generation);
+            return;
+        }
+
+        const bool hadFailure = status.hadFailure;
+        const auto statusMessage = status.toStatusMessage();
+        stopVstInstrumentLiveAudition(true);
+
+        renderStatusLabel.setText(
+            hadFailure ? "VST3 live preview callback failed." : "VST3 live preview complete.",
+            juce::dontSendNotification);
+        renderStatusLabel.setColour(
+            juce::Label::textColourId,
+            hadFailure ? juce::Colours::red : juce::Colours::lightgreen);
+        logMessage(statusMessage);
+    }
+
+    void MainComponent::stopVstInstrumentLiveAudition(bool)
+    {
+        cancelVstDirectPreviewCompletionPolling();
+
+        if (vstLiveTransportGeneration != 0)
+            playbackTransportCoordinator.beginStopping(vstLiveTransportGeneration);
+
+        const auto stopSummary = vstLiveDirectPreviewEngine.stop();
+        for (auto& effect : vstLiveSelectedTrackEffectSessions)
+            if (effect != nullptr && effect->session != nullptr)
+                effect->session->close();
+        vstLiveSelectedTrackEffectSessions.clear();
+
+        if (vstLiveInstrumentSession != nullptr)
+        {
+            vstLiveInstrumentSession->close();
+            vstLiveInstrumentSession.reset();
+        }
+
+        if (vstLiveTransportGeneration != 0)
+        {
+            if (stopSummary.hadFailure)
+                playbackTransportCoordinator.fail(vstLiveTransportGeneration, stopSummary.lastMessage.toStdString());
+            else
+                playbackTransportCoordinator.finishStopped(vstLiveTransportGeneration);
+        }
+        vstLiveTransportGeneration = 0;
+        vstLiveTransportStartSample = 0;
+
+        if (stopSummary.wasActive)
+        {
+            renderStatusLabel.setText("VST3 live preview stopped.", juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+            const auto message = stopSummary.toLogMessage();
+            if (message.isNotEmpty())
+                logMessage(message);
+        }
+    }
+
     void MainComponent::armSelectedTrackClapLiveEngineSession()
     {
         showClapExperimentalWarningIfNeeded();
@@ -15695,6 +16082,7 @@ namespace mw::gui
         }
 
         stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
 
         const auto trackIndex = clapLiveEngineArmedSession->trackIndex;
         const auto pluginName = clapLiveEngineArmedSession->pluginName;
@@ -15958,7 +16346,7 @@ namespace mw::gui
     }
 
 
-    bool MainComponent::tryStartMultiTrackClapProjectPreview()
+    bool MainComponent::tryStartMixedLiveProjectPreview()
     {
         if (!currentProject)
             return false;
@@ -15973,9 +16361,11 @@ namespace mw::gui
             return track.getSolo();
         });
 
-        std::vector<int> liveTrackIndices;
+        std::vector<int> liveClapTrackIndices;
+        std::vector<int> liveVstTrackIndices;
         std::vector<int> fallbackTrackIndices;
-        liveTrackIndices.reserve(tracks.size());
+        liveClapTrackIndices.reserve(tracks.size());
+        liveVstTrackIndices.reserve(tracks.size());
         fallbackTrackIndices.reserve(tracks.size());
 
         for (int i = 0; i < static_cast<int>(tracks.size()); ++i)
@@ -15994,25 +16384,34 @@ namespace mw::gui
                 continue;
 
             const auto assignment = track.getInstrument();
-            const bool canRunLive = !track.isAudioClipTrack()
+            const bool commonLiveEligibility = !track.isAudioClipTrack()
                 && hasMidiContent
                 && !hasAudioClipContent
-                && assignment.backendType == mw::core::SampleBackendType::CLAP
-                && assignment.vst3.hasPluginIdentity()
-                && !hasEnabledNonClapEffectSlots(track);
+                && assignment.vst3.hasPluginIdentity();
 
-            if (canRunLive)
-                liveTrackIndices.push_back(i);
+            const bool canRunClapLive = commonLiveEligibility
+                && assignment.backendType == mw::core::SampleBackendType::CLAP
+                && !hasEnabledNonClapEffectSlots(track);
+            const bool canRunVstLive = commonLiveEligibility
+                && assignment.backendType == mw::core::SampleBackendType::VST3
+                && !hasEnabledNonVst3EffectSlots(track);
+
+            if (canRunClapLive)
+                liveClapTrackIndices.push_back(i);
+            else if (canRunVstLive)
+                liveVstTrackIndices.push_back(i);
             else
                 fallbackTrackIndices.push_back(i);
         }
 
-        if (liveTrackIndices.empty())
+        if (liveClapTrackIndices.empty() && liveVstTrackIndices.empty())
             return false;
 
-        showClapExperimentalWarningIfNeeded();
+        if (!liveClapTrackIndices.empty())
+            showClapExperimentalWarningIfNeeded();
         stopClapInstrumentLiveAudition(true);
-        closeClapProjectPreviewTrackSessions();
+        stopVstInstrumentLiveAudition(true);
+        closeMixedLiveProjectPreviewTrackSessions();
 
         const int sampleRate = sampleRateCombo.getText().getIntValue() > 0
             ? sampleRateCombo.getText().getIntValue()
@@ -16020,8 +16419,10 @@ namespace mw::gui
         const int blockSize = 512;
 
         std::vector<mw::core::StableId> liveTrackIds;
-        liveTrackIds.reserve(liveTrackIndices.size());
-        for (const auto index : liveTrackIndices)
+        liveTrackIds.reserve(liveClapTrackIndices.size() + liveVstTrackIndices.size());
+        for (const auto index : liveClapTrackIndices)
+            liveTrackIds.push_back(tracks[static_cast<std::size_t>(index)].getStableId());
+        for (const auto index : liveVstTrackIndices)
             liveTrackIds.push_back(tracks[static_cast<std::size_t>(index)].getStableId());
 
         const auto previewStartSeconds = std::max(0.0, pendingPianoRollPreviewStartSeconds);
@@ -16035,18 +16436,25 @@ namespace mw::gui
 
         if (fallbackTrackIndices.empty())
         {
-            if (startPreparedClapProjectPreview(liveTrackIndices, {}, clapLiveTransportGeneration, false))
+            if (startPreparedMixedLiveProjectPreview(
+                    liveClapTrackIndices,
+                    liveVstTrackIndices,
+                    {},
+                    clapLiveTransportGeneration,
+                    false))
+            {
                 return true;
+            }
 
             playbackTransportCoordinator.fail(
                 clapLiveTransportGeneration,
-                "Pure CLAP project preview could not be prepared; rendered fallback will be used.");
-            closeClapProjectPreviewTrackSessions();
+                "Pure mixed live project preview could not be prepared; rendered fallback will be used.");
+            closeMixedLiveProjectPreviewTrackSessions();
             return false;
         }
 
         auto fallbackJob = createRenderJobSnapshot();
-        fallbackJob.project.setName(currentProject->getName() + " - Hybrid Preview Fallback");
+        fallbackJob.project.setName(currentProject->getName() + " - Mixed Live Preview Fallback");
 
         std::vector<mw::core::Track> fallbackTracks;
         std::map<int, int> oldToNewTrackIndex;
@@ -16072,7 +16480,7 @@ namespace mw::gui
         fallbackJob.project.setAudioClips(std::move(fallbackClips));
         fallbackJob.project.setSequences({});
         fallbackJob.exportFolder = mw::app::AppPaths::previewFolder();
-        fallbackJob.baseFileName = "preview_project_hybrid_fallback";
+        fallbackJob.baseFileName = "preview_project_mixed_live_fallback";
         fallbackJob.outputFormat = mw::audio::RenderOutputFormat::Wav;
         fallbackJob.keepStemFilesMask = 0;
 
@@ -16086,8 +16494,9 @@ namespace mw::gui
         pendingPianoRollPreviewStartSeconds = previewStartSeconds;
         pianoRollPreviewPaused = false;
 
-        startRenderedFallbackForHybridClapPreview(
-            std::move(liveTrackIndices),
+        startRenderedFallbackForMixedLivePreview(
+            std::move(liveClapTrackIndices),
+            std::move(liveVstTrackIndices),
             std::move(fallbackJob),
             clapLiveTransportGeneration,
             currentProject->getStableId());
@@ -16095,8 +16504,9 @@ namespace mw::gui
     }
 
 
-    bool MainComponent::startPreparedClapProjectPreview(
-        const std::vector<int>& liveTrackIndices,
+    bool MainComponent::startPreparedMixedLiveProjectPreview(
+        const std::vector<int>& liveClapTrackIndices,
+        const std::vector<int>& liveVstTrackIndices,
         std::vector<mw::clap::ClapLiveDirectPreviewAudioSourceRequest> audioSources,
         std::uint64_t transportGeneration,
         bool hybridMode)
@@ -16116,11 +16526,14 @@ namespace mw::gui
             ? channelsCombo.getSelectedId()
             : 2;
         const int blockSize = 512;
+        const auto previewStartTick = static_cast<std::int64_t>(std::llround(
+            std::max(0.0, pendingPianoRollPreviewStartSeconds)
+            * static_cast<double>(tempoBpm)
+            * static_cast<double>(mw::core::Project::ticksPerQuarterNote) / 60.0));
 
-        std::vector<mw::clap::ClapLiveManagedTrackConfig> managedConfigs;
-        managedConfigs.reserve(liveTrackIndices.size());
-
-        for (const auto index : liveTrackIndices)
+        std::vector<mw::clap::ClapLiveManagedTrackConfig> clapConfigs;
+        clapConfigs.reserve(liveClapTrackIndices.size());
+        for (const auto index : liveClapTrackIndices)
         {
             if (index < 0 || index >= static_cast<int>(tracks.size()))
                 return false;
@@ -16140,12 +16553,9 @@ namespace mw::gui
             managed.trackName = track.getName();
             managed.outputGain = mw::audio::sanitizeMainUiGain(
                 static_cast<float>(static_cast<double>(track.getMixerSettings().volume) * masterVolumeSlider.getValue()));
-
             managed.sessionConfig.pluginPath = pluginPath;
             managed.sessionConfig.pluginUid = assignment.vst3.uid;
-            managed.sessionConfig.pluginName = assignment.vst3.name.empty()
-                ? pluginPath.stem().string()
-                : assignment.vst3.name;
+            managed.sessionConfig.pluginName = assignment.vst3.name.empty() ? pluginPath.stem().string() : assignment.vst3.name;
             managed.sessionConfig.stateBase64 = assignment.vst3.stateBase64;
             managed.sessionConfig.sampleRate = sampleRate;
             managed.sessionConfig.channelCount = channelCount;
@@ -16170,10 +16580,6 @@ namespace mw::gui
             managed.bridgeConfig.scheduler.sampleRate = sampleRate;
             managed.bridgeConfig.scheduler.blockSize = blockSize;
             managed.bridgeConfig.scheduler.ticksPerQuarterNote = mw::core::Project::ticksPerQuarterNote;
-            const auto previewStartTick = static_cast<std::int64_t>(std::llround(
-                std::max(0.0, pendingPianoRollPreviewStartSeconds)
-                * static_cast<double>(tempoBpm)
-                * static_cast<double>(mw::core::Project::ticksPerQuarterNote) / 60.0));
             managed.bridgeConfig.scheduler.startTick = previewStartTick;
             managed.bridgeConfig.scheduler.startSample = 0;
             managed.bridgeConfig.scheduler.tailSeconds = 1.0;
@@ -16182,9 +16588,12 @@ namespace mw::gui
             for (std::size_t slotIndex = 0; slotIndex < mw::core::maxEffectSlots; ++slotIndex)
             {
                 const auto* effectSlot = effects.slot(slotIndex);
-                if (effectSlot == nullptr || !effects.slotEnabled(slotIndex))
+                if (effectSlot == nullptr
+                    || !effects.slotEnabled(slotIndex)
+                    || effectSlot->plugin.bypassed)
+                {
                     continue;
-
+                }
                 if (!effectSlot->isClapPlugin())
                     return false;
 
@@ -16202,9 +16611,7 @@ namespace mw::gui
                 effectConfig.displayName = clapEffectSlotDisplayName(*effectSlot, slotIndex).toStdString();
                 effectConfig.sessionConfig.pluginPath = effectPath;
                 effectConfig.sessionConfig.pluginUid = effectSlot->plugin.uid;
-                effectConfig.sessionConfig.pluginName = effectSlot->plugin.name.empty()
-                    ? effectPath.stem().string()
-                    : effectSlot->plugin.name;
+                effectConfig.sessionConfig.pluginName = effectSlot->plugin.name.empty() ? effectPath.stem().string() : effectSlot->plugin.name;
                 effectConfig.sessionConfig.stateBase64 = effectSlot->plugin.stateBase64;
                 effectConfig.sessionConfig.sampleRate = sampleRate;
                 effectConfig.sessionConfig.channelCount = channelCount;
@@ -16212,37 +16619,130 @@ namespace mw::gui
                 managed.effects.push_back(std::move(effectConfig));
             }
 
-            managedConfigs.push_back(std::move(managed));
+            clapConfigs.push_back(std::move(managed));
         }
 
-        const auto prepareResult = clapLiveProjectTrackSessionManager.prepare(std::move(managedConfigs));
-        if (!prepareResult.success)
+        std::vector<mw::vst::VstLiveManagedTrackConfig> vstConfigs;
+        vstConfigs.reserve(liveVstTrackIndices.size());
+        for (const auto index : liveVstTrackIndices)
         {
-            logMessage("Phase 2 Transport: " + juce::String(prepareResult.message));
-            return false;
+            if (index < 0 || index >= static_cast<int>(tracks.size()))
+                return false;
+
+            const auto& track = tracks[static_cast<std::size_t>(index)];
+            const auto assignment = track.getInstrument();
+            if (assignment.backendType != mw::core::SampleBackendType::VST3 || !assignment.vst3.hasPluginIdentity())
+                return false;
+
+            mw::vst::VstLiveManagedTrackConfig managed;
+            managed.stableTrackId = track.getStableId();
+            managed.trackIndex = index;
+            managed.trackName = track.getName();
+            managed.outputGain = mw::audio::sanitizeMainUiGain(
+                static_cast<float>(static_cast<double>(track.getMixerSettings().volume) * masterVolumeSlider.getValue()));
+            managed.sessionConfig.plugin = assignment.vst3;
+            managed.sessionConfig.sampleRate = sampleRate;
+            managed.sessionConfig.channelCount = channelCount;
+            managed.sessionConfig.blockSize = blockSize;
+
+            managed.notes.reserve(track.getNotes().size());
+            for (const auto& note : track.getNotes())
+            {
+                mw::clap::ClapLivePlaybackNote liveNote;
+                liveNote.pitch = note.pitch;
+                liveNote.velocity = note.velocity;
+                liveNote.midiChannel = note.midiChannel;
+                liveNote.startTick = note.startTick;
+                liveNote.durationTicks = note.durationTicks;
+                managed.notes.push_back(liveNote);
+            }
+
+            managed.bridgeConfig.trackIndex = index;
+            managed.bridgeConfig.trackName = track.getName();
+            managed.bridgeConfig.outputChannelCount = channelCount;
+            managed.bridgeConfig.scheduler.tempoBpm = tempoBpm;
+            managed.bridgeConfig.scheduler.sampleRate = sampleRate;
+            managed.bridgeConfig.scheduler.blockSize = blockSize;
+            managed.bridgeConfig.scheduler.ticksPerQuarterNote = mw::core::Project::ticksPerQuarterNote;
+            managed.bridgeConfig.scheduler.startTick = previewStartTick;
+            managed.bridgeConfig.scheduler.startSample = 0;
+            managed.bridgeConfig.scheduler.tailSeconds = 1.0;
+
+            const auto& effects = track.getVstEffects();
+            for (std::size_t slotIndex = 0; slotIndex < mw::core::maxEffectSlots; ++slotIndex)
+            {
+                const auto* effectSlot = effects.slot(slotIndex);
+                if (effectSlot == nullptr
+                    || !effects.slotEnabled(slotIndex)
+                    || effectSlot->plugin.bypassed)
+                {
+                    continue;
+                }
+                if (!effectSlot->isVst3Plugin())
+                    return false;
+
+                mw::vst::VstLiveManagedEffectConfig effectConfig;
+                effectConfig.slotIndex = static_cast<int>(slotIndex);
+                effectConfig.displayName = vstEffectSlotDisplayName(*effectSlot, slotIndex).toStdString();
+                effectConfig.sessionConfig.plugin = effectSlot->plugin;
+                effectConfig.sessionConfig.sampleRate = sampleRate;
+                effectConfig.sessionConfig.channelCount = channelCount;
+                effectConfig.sessionConfig.blockSize = blockSize;
+                managed.effects.push_back(std::move(effectConfig));
+            }
+
+            vstConfigs.push_back(std::move(managed));
         }
 
-        auto requests = clapLiveProjectTrackSessionManager.makeDirectPreviewRequests();
-        auto startResult = clapLiveDirectPreviewEngine.start(
-            std::move(requests),
+        if (!clapConfigs.empty())
+        {
+            const auto prepareResult = clapLiveProjectTrackSessionManager.prepare(std::move(clapConfigs));
+            if (!prepareResult.success)
+            {
+                logMessage("Phase 2 Transport: " + juce::String(prepareResult.message));
+                closeMixedLiveProjectPreviewTrackSessions();
+                return false;
+            }
+        }
+
+        if (!vstConfigs.empty())
+        {
+            const auto prepareResult = vstLiveProjectTrackSessionManager.prepare(std::move(vstConfigs));
+            if (!prepareResult.success)
+            {
+                logMessage("Phase 2 Transport: " + juce::String(prepareResult.message));
+                closeMixedLiveProjectPreviewTrackSessions();
+                return false;
+            }
+        }
+
+        auto startResult = mixedLiveProjectPreviewEngine.start(
+            clapLiveProjectTrackSessionManager.makeDirectPreviewRequests(),
+            vstLiveProjectTrackSessionManager.makeDirectPreviewRequests(),
             std::move(audioSources),
             channelCount);
         if (!startResult.started)
         {
             const auto reason = startResult.errorMessage.isNotEmpty()
                 ? startResult.errorMessage
-                : juce::String("Direct project transport did not start.");
+                : juce::String("Mixed live project transport did not start.");
             logMessage("Phase 2 Transport: " + reason);
-            clapLiveProjectTrackSessionManager.close();
+            closeMixedLiveProjectPreviewTrackSessions();
             return false;
         }
 
-        if (!playbackTransportCoordinator.beginPlaying(
+        clapLiveTransportStartSample = static_cast<std::int64_t>(std::llround(
+            std::max(0.0, pendingPianoRollPreviewStartSeconds)
+            * static_cast<double>(std::max(1, startResult.sampleRate))));
+        if (!playbackTransportCoordinator.beginPlayingWithAudioFormat(
                 transportGeneration,
-                clapLiveTransportStartSample + startResult.totalSamples))
+                clapLiveTransportStartSample,
+                clapLiveTransportStartSample + startResult.totalSamples,
+                startResult.sampleRate,
+                startResult.blockSize))
         {
-            clapLiveDirectPreviewEngine.stop();
-            clapLiveProjectTrackSessionManager.close();
+            mixedLiveProjectPreviewEngine.stop();
+            closeMixedLiveProjectPreviewTrackSessions();
             return false;
         }
 
@@ -16258,8 +16758,7 @@ namespace mw::gui
             audioClipsEndBeatForPreview(currentProject->getAudioClips(), static_cast<double>(currentProject->getTempoBpm())));
         pendingPianoRollPreviewStartSeconds = std::max(0.0, pendingPianoRollPreviewStartSeconds);
         pianoRollPreviewPaused = false;
-        const auto previewStartBeat = pendingPianoRollPreviewStartSeconds
-            * (lastPianoRollPreviewTempoBpm / 60.0);
+        const auto previewStartBeat = pendingPianoRollPreviewStartSeconds * (lastPianoRollPreviewTempoBpm / 60.0);
         pianoRoll.startPreviewPlayhead(
             lastPianoRollPreviewTempoBpm,
             std::max(0.01, lastPianoRollPreviewDurationBeats - previewStartBeat),
@@ -16268,14 +16767,15 @@ namespace mw::gui
 
         renderStatusLabel.setText(
             hybridMode
-                ? "Preview Project: Phase 2 hybrid playback."
-                : "Preview Project: Phase 2 live CLAP playback.",
+                ? "Preview Project: mixed live playback with prepared sources."
+                : "Preview Project: native mixed CLAP/VST3 playback.",
             juce::dontSendNotification);
         renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
 
         logMessage("Phase 2 Transport: state Playing, generation "
             + juce::String(static_cast<juce::int64>(transportGeneration))
-            + ", live CLAP tracks " + juce::String(startResult.trackCount)
+            + ", live CLAP tracks " + juce::String(startResult.clapTrackCount)
+            + ", live VST3 tracks " + juce::String(startResult.vstTrackCount)
             + ", prepared audio sources " + juce::String(startResult.audioSourceCount)
             + ", total samples " + juce::String(static_cast<juce::int64>(startResult.totalSamples)) + ".");
         if (startResult.message.isNotEmpty())
@@ -16344,8 +16844,9 @@ namespace mw::gui
     }
 
 
-    void MainComponent::startRenderedFallbackForHybridClapPreview(
-        std::vector<int> liveTrackIndices,
+    void MainComponent::startRenderedFallbackForMixedLivePreview(
+        std::vector<int> liveClapTrackIndices,
+        std::vector<int> liveVstTrackIndices,
         mw::audio::RenderJob fallbackJob,
         std::uint64_t transportGeneration,
         mw::core::StableId projectId)
@@ -16354,14 +16855,15 @@ namespace mw::gui
         setRenderingState(true);
         renderStatusLabel.setText("Phase 2: preparing mixed-project playback...", juce::dontSendNotification);
         renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
-        logMessage("Phase 2 Transport: rendering non-live project sources before hybrid playback.");
+        logMessage("Phase 2 Transport: rendering non-live project sources before mixed live playback.");
 
         if (renderThread.joinable())
             renderThread.join();
 
         renderThread = std::thread(
             [this,
-             liveTrackIndices = std::move(liveTrackIndices),
+             liveClapTrackIndices = std::move(liveClapTrackIndices),
+             liveVstTrackIndices = std::move(liveVstTrackIndices),
              fallbackJob = std::move(fallbackJob),
              transportGeneration,
              projectId]() mutable
@@ -16383,7 +16885,8 @@ namespace mw::gui
 
                 juce::MessageManager::callAsync(
                     [this,
-                     liveTrackIndices = std::move(liveTrackIndices),
+                     liveClapTrackIndices = std::move(liveClapTrackIndices),
+                     liveVstTrackIndices = std::move(liveVstTrackIndices),
                      transportGeneration,
                      projectId,
                      result]() mutable
@@ -16394,7 +16897,7 @@ namespace mw::gui
                             || currentProject->getStableId() != projectId
                             || !playbackTransportCoordinator.matches(transportGeneration, projectId))
                         {
-                            logMessage("Phase 2 Transport: discarded stale hybrid preparation result after project/transport change.");
+                            logMessage("Phase 2 Transport: discarded stale mixed-live preparation result after project/transport change.");
                             return;
                         }
 
@@ -16414,14 +16917,14 @@ namespace mw::gui
 
                         if (result.cancelled)
                         {
-                            playbackTransportCoordinator.fail(transportGeneration, "Hybrid preview preparation was cancelled.");
-                            logMessage("Phase 2 Transport: hybrid preparation cancelled.");
+                            playbackTransportCoordinator.fail(transportGeneration, "Mixed-live preview preparation was cancelled.");
+                            logMessage("Phase 2 Transport: mixed-live preparation cancelled.");
                             return;
                         }
 
                         if (!result.success || result.finalAudioPath.extension() != ".wav")
                         {
-                            playbackTransportCoordinator.fail(transportGeneration, "Hybrid rendered-source preparation failed.");
+                            playbackTransportCoordinator.fail(transportGeneration, "Mixed-live rendered-source preparation failed.");
                             logMessage("Phase 2 Transport: rendered-source preparation failed; using the full rendered preview fallback.");
                             startFullRenderedPreview();
                             return;
@@ -16429,7 +16932,7 @@ namespace mw::gui
 
                         auto audioSource = loadClapPreviewAudioSource(
                             result.finalAudioPath,
-                            "Rendered VST3/SF2/SFZ/AudioClip project sources",
+                            "Rendered AudioClip/SF2/SF3/SFZ/unsupported project sources",
                             pendingPianoRollPreviewStartSeconds);
                         if (!audioSource)
                         {
@@ -16448,15 +16951,16 @@ namespace mw::gui
 
                         std::vector<mw::clap::ClapLiveDirectPreviewAudioSourceRequest> audioSources;
                         audioSources.push_back(std::move(*audioSource));
-                        if (!startPreparedClapProjectPreview(
-                                liveTrackIndices,
+                        if (!startPreparedMixedLiveProjectPreview(
+                                liveClapTrackIndices,
+                                liveVstTrackIndices,
                                 std::move(audioSources),
                                 transportGeneration,
                                 true))
                         {
-                            playbackTransportCoordinator.fail(transportGeneration, "Live CLAP preparation failed after fallback rendering.");
-                            closeClapProjectPreviewTrackSessions();
-                            logMessage("Phase 2 Transport: live CLAP preparation failed; using the full rendered preview fallback.");
+                            playbackTransportCoordinator.fail(transportGeneration, "Mixed live preparation failed after fallback rendering.");
+                            closeMixedLiveProjectPreviewTrackSessions();
+                            logMessage("Phase 2 Transport: mixed live preparation failed; using the full rendered preview fallback.");
                             startFullRenderedPreview();
                         }
                     });
@@ -16464,15 +16968,28 @@ namespace mw::gui
     }
 
 
-    void MainComponent::closeClapProjectPreviewTrackSessions()
+    void MainComponent::closeMixedLiveProjectPreviewTrackSessions()
     {
-        for (auto& selectedEffect : clapLiveSelectedTrackPreviewEffectSessions)
-            if (selectedEffect != nullptr && selectedEffect->session != nullptr)
-                selectedEffect->session->close();
-        clapLiveSelectedTrackPreviewEffectSessions.clear();
-
+        mixedLiveProjectPreviewEngine.stop();
         clapLiveProjectTrackSessionManager.close();
+        vstLiveProjectTrackSessionManager.close();
         clapLiveDirectPreviewProjectMode = false;
+    }
+
+
+    void MainComponent::stopLivePlaybackBeforeProjectMutation()
+    {
+        if (clapLiveTransportGeneration == 0
+            && vstLiveTransportGeneration == 0
+            && !mixedLiveProjectPreviewEngine.isActive()
+            && !clapLiveDirectPreviewEngine.isActive()
+            && !vstLiveDirectPreviewEngine.isActive())
+        {
+            return;
+        }
+
+        stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
     }
 
 
@@ -16504,16 +17021,59 @@ namespace mw::gui
         if (!clapLiveDirectPreviewCompletionPollActive || generation != clapLiveDirectPreviewCompletionPollGeneration)
             return;
 
-        const auto status = clapLiveDirectPreviewEngine.status();
         if (currentProject
             && clapLiveTransportGeneration != 0
             && !playbackTransportCoordinator.matches(clapLiveTransportGeneration, currentProject->getStableId()))
         {
             logMessage("Phase 2 Transport: stopping stale playback after project identity changed.");
             stopClapInstrumentLiveAudition(true);
+            stopVstInstrumentLiveAudition(true);
             return;
         }
 
+        if (clapLiveDirectPreviewProjectMode)
+        {
+            const auto status = mixedLiveProjectPreviewEngine.status();
+            if (clapLiveTransportGeneration != 0)
+            {
+                clapLiveTransportStartSample = static_cast<std::int64_t>(std::llround(
+                    std::max(0.0, pendingPianoRollPreviewStartSeconds)
+                    * static_cast<double>(std::max(1, status.sampleRate))));
+                playbackTransportCoordinator.updatePositionWithAudioFormat(
+                    clapLiveTransportGeneration,
+                    clapLiveTransportStartSample + status.currentSample,
+                    clapLiveTransportStartSample + status.totalSamples,
+                    status.sampleRate,
+                    status.blockSize);
+            }
+
+            if (!status.active)
+            {
+                cancelClapDirectPreviewCompletionPolling();
+                return;
+            }
+            if (!status.isTerminal())
+            {
+                scheduleClapDirectPreviewCompletionPoll(generation);
+                return;
+            }
+
+            const bool hadFailure = status.hadFailure;
+            const auto statusMessage = status.toStatusMessage();
+            stopClapInstrumentLiveAudition(true);
+            stopVstInstrumentLiveAudition(true);
+
+            renderStatusLabel.setText(
+                hadFailure ? "Mixed live project preview failed." : "Mixed live project preview complete.",
+                juce::dontSendNotification);
+            renderStatusLabel.setColour(
+                juce::Label::textColourId,
+                hadFailure ? juce::Colours::red : juce::Colours::lightgreen);
+            logMessage(statusMessage);
+            return;
+        }
+
+        const auto status = clapLiveDirectPreviewEngine.status();
         if (clapLiveTransportGeneration != 0)
             playbackTransportCoordinator.updatePosition(
                 clapLiveTransportGeneration,
@@ -16525,7 +17085,6 @@ namespace mw::gui
             cancelClapDirectPreviewCompletionPolling();
             return;
         }
-
         if (!status.isTerminal())
         {
             scheduleClapDirectPreviewCompletionPoll(generation);
@@ -16545,19 +17104,15 @@ namespace mw::gui
         const bool hadFailure = status.hadFailure;
         const auto statusMessage = status.toStatusMessage();
         stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
 
-        if (hadFailure)
-        {
-            renderStatusLabel.setText("CLAP preview callback failed.", juce::dontSendNotification);
-            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::red);
-            logMessage(statusMessage);
-        }
-        else
-        {
-            renderStatusLabel.setText("CLAP preview complete.", juce::dontSendNotification);
-            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
-            logMessage(statusMessage);
-        }
+        renderStatusLabel.setText(
+            hadFailure ? "CLAP preview callback failed." : "CLAP preview complete.",
+            juce::dontSendNotification);
+        renderStatusLabel.setColour(
+            juce::Label::textColourId,
+            hadFailure ? juce::Colours::red : juce::Colours::lightgreen);
+        logMessage(statusMessage);
     }
 
 
@@ -16571,47 +17126,64 @@ namespace mw::gui
         if (transportBeforeStop.state == mw::playback::TransportState::Preparing)
             cancelRenderRequested = true;
 
-        const bool projectDirectPreviewWasActive = clapLiveDirectPreviewProjectMode;
-        const auto directStopSummary = clapLiveDirectPreviewEngine.stop();
-        const bool directWasActive = directStopSummary.wasActive;
-        const auto directSummary = directStopSummary.toLogMessage();
+        bool directWasActive = false;
+        bool hadFailure = false;
+        juce::String failureMessage;
+        juce::String directSummary;
 
-        closeClapProjectPreviewTrackSessions();
-
-        if (directWasActive && !projectDirectPreviewWasActive && clapLiveEngineArmedSession)
+        if (clapLiveDirectPreviewProjectMode)
         {
-            clapLiveEngineArmedSession->callbackBridgePrepared = true;
-            clapLiveEngineArmedSession->callbackDirectOutputEnabled = false;
-            clapLiveEngineArmedSession->callbackBridgeScheduledEvents = directStopSummary.scheduledEvents;
-            clapLiveEngineArmedSession->callbackBridgeMaxEventsPerBlock = directStopSummary.maxEventsPerBlock;
-            clapLiveEngineArmedSession->callbackBridgeTotalSamples = directStopSummary.totalSamples;
-            clapLiveEngineArmedSession->callbackBridgeMessage = directSummary;
+            const auto stopSummary = mixedLiveProjectPreviewEngine.stop();
+            directWasActive = stopSummary.wasActive;
+            hadFailure = stopSummary.hadFailure;
+            failureMessage = stopSummary.lastMessage;
+            directSummary = stopSummary.toLogMessage();
+            clapLiveProjectTrackSessionManager.close();
+            vstLiveProjectTrackSessionManager.close();
+            clapLiveDirectPreviewProjectMode = false;
+        }
+        else
+        {
+            const auto stopSummary = clapLiveDirectPreviewEngine.stop();
+            directWasActive = stopSummary.wasActive;
+            hadFailure = stopSummary.hadFailure;
+            failureMessage = stopSummary.lastMessage;
+            directSummary = stopSummary.toLogMessage();
+
+            for (auto& selectedEffect : clapLiveSelectedTrackPreviewEffectSessions)
+                if (selectedEffect != nullptr && selectedEffect->session != nullptr)
+                    selectedEffect->session->close();
+            clapLiveSelectedTrackPreviewEffectSessions.clear();
+
+            if (directWasActive && clapLiveEngineArmedSession)
+            {
+                clapLiveEngineArmedSession->callbackBridgePrepared = true;
+                clapLiveEngineArmedSession->callbackDirectOutputEnabled = false;
+                clapLiveEngineArmedSession->callbackBridgeScheduledEvents = stopSummary.scheduledEvents;
+                clapLiveEngineArmedSession->callbackBridgeMaxEventsPerBlock = stopSummary.maxEventsPerBlock;
+                clapLiveEngineArmedSession->callbackBridgeTotalSamples = stopSummary.totalSamples;
+                clapLiveEngineArmedSession->callbackBridgeMessage = directSummary;
+            }
         }
 
         if (clapLiveTransportGeneration != 0)
         {
-            if (directStopSummary.hadFailure)
-            {
-                playbackTransportCoordinator.fail(
-                    clapLiveTransportGeneration,
-                    directStopSummary.lastMessage.toStdString());
-            }
+            if (hadFailure)
+                playbackTransportCoordinator.fail(clapLiveTransportGeneration, failureMessage.toStdString());
             else
-            {
                 playbackTransportCoordinator.finishStopped(clapLiveTransportGeneration);
-            }
         }
         clapLiveTransportGeneration = 0;
         clapLiveTransportStartSample = 0;
 
         if (directWasActive)
         {
-            renderStatusLabel.setText("CLAP preview stopped.", juce::dontSendNotification);
+            renderStatusLabel.setText("Live preview stopped.", juce::dontSendNotification);
             renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
             if (directSummary.isNotEmpty())
                 logMessage(directSummary);
             else
-                logMessage("CLAP Preview stopped.");
+                logMessage("Live preview stopped.");
         }
     }
 
@@ -17002,6 +17574,7 @@ namespace mw::gui
             if (slot.plugin.hasPluginIdentity()
                 && slot.plugin.stateBase64 != capturedState.toStdString())
             {
+                stopLivePlaybackBeforeProjectMutation();
                 slot.plugin.stateBase64 = capturedState.toStdString();
                 track.setVstEffects(std::move(effects));
                 setProjectDirty();
@@ -17433,6 +18006,7 @@ namespace mw::gui
         int closedCount = 0;
 
         stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
         disarmClapLiveEngineSession(false);
 
         auto closeOwnedWindow = [&closedCount](std::unique_ptr<juce::DocumentWindow>& window)
@@ -17962,6 +18536,7 @@ namespace mw::gui
     void MainComponent::resetProjectWorkspace()
     {
         stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
         playbackTransportCoordinator.reset();
         suppressDirtyTracking = true;
 
@@ -18202,6 +18777,7 @@ namespace mw::gui
                     return;
 
                 stopClapInstrumentLiveAudition(true);
+                stopVstInstrumentLiveAudition(true);
                 playbackTransportCoordinator.reset();
                 suppressDirtyTracking = true;
                 finishClosingPianoRollWindow();
@@ -18783,6 +19359,7 @@ namespace mw::gui
 
         preserveCurrentVstAppliedStates(state.project, *currentProject);
         stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
         currentProject = state.project;
         importSections = std::move(state.importSections);
         sequenceColourOverrides = std::move(state.sequenceColourOverrides);
@@ -18853,6 +19430,7 @@ namespace mw::gui
 
         preserveCurrentVstAppliedStates(state.project, *currentProject);
         stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
         currentProject = state.project;
         importSections = std::move(state.importSections);
         sequenceColourOverrides = std::move(state.sequenceColourOverrides);
@@ -19042,6 +19620,7 @@ namespace mw::gui
             preserveCurrentVstAppliedStates(restoredProject, *currentProject);
 
         stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
         currentProject = std::move(restoredProject);
         importSections = trackManagerSessionImportSectionsSnapshot;
         sequenceColourOverrides = trackManagerSessionColourOverridesSnapshot;
@@ -19187,6 +19766,8 @@ namespace mw::gui
             return;
         }
 
+        stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
         captureTrackManagerUndoState("Add Blank Track");
 
         const int trackNumber = static_cast<int>(currentProject->getTracks().size()) + 1;
@@ -19271,6 +19852,8 @@ namespace mw::gui
             return;
         }
 
+        stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
         captureTrackManagerUndoState("Duplicate Track");
 
         auto copy = currentProject->getTracks()[static_cast<std::size_t>(index)];
@@ -19352,6 +19935,8 @@ namespace mw::gui
             return;
         }
 
+        stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
         captureTrackManagerUndoState("Remove Track");
 
         const auto removedTrackNumber = index + 1;
@@ -19628,6 +20213,7 @@ namespace mw::gui
                 refreshAlbumArtControls();
 
                 stopClapInstrumentLiveAudition(true);
+                stopVstInstrumentLiveAudition(true);
                 playbackTransportCoordinator.reset();
                 clearAudioRecordingSessionStaging(true);
                 currentProject.reset();
@@ -20002,6 +20588,7 @@ void MainComponent::importMusicXmlOnly()
             return;
 
         stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
         playbackTransportCoordinator.reset();
         currentProject = *project;
         currentProjectFilePath.reset();
@@ -20842,7 +21429,7 @@ void MainComponent::openAudioRecorderWindow()
         if (auto* recorderContent = dynamic_cast<AudioRecorderWindowContent*>(audioRecorderContent.get()))
             recorderContent->setTrackLiveEffectEnabled(audioRecorderTrackLiveEffectEnabled);
         refreshAudioRecorderWindowStatus();
-        logMessage("Opened AudioClip Recorder. Record and Record With Delay use the selected track; Record Test is a standalone mic check.");
+        logMessage("Opened AudioClip Recorder. Record and Record With Delay use the selected blank target track. Record Test is temporary and uses the selected track's first eligible VST3 or CLAP effect when available.");
     }
 
     void MainComponent::refreshAudioRecorderInputDevices()
@@ -20898,21 +21485,34 @@ void MainComponent::openAudioRecorderWindow()
 
     void MainComponent::setAudioRecorderTrackLiveEffectEnabled(bool enabled)
     {
-        audioRecorderTrackLiveEffectEnabled = enabled;
+        audioRecorderTrackLiveEffectEnabled = false;
+        audioRecorderTrackLiveEffectTargetId = 0;
+
+        if (enabled && currentProject)
+        {
+            const int targetTrackIndex = getAudioRecorderTargetTrackIndex();
+            if (targetTrackIndex >= 0 && targetTrackIndex < static_cast<int>(currentProject->getTracks().size())
+                && trackHasUsableLiveEffectForAudioRecorder(targetTrackIndex))
+            {
+                audioRecorderTrackLiveEffectEnabled = true;
+                audioRecorderTrackLiveEffectTargetId = currentProject->getTracks()[static_cast<std::size_t>(targetTrackIndex)].getStableId();
+            }
+        }
+
         if (auto* content = dynamic_cast<AudioRecorderWindowContent*>(audioRecorderContent.get()))
             content->setTrackLiveEffectEnabled(audioRecorderTrackLiveEffectEnabled);
 
-        logMessage(enabled
-            ? "AudioClip Recorder Track Live Effect monitor enabled. The applied track Effect Slot will be printed into the take either way."
-            : "AudioClip Recorder Track Live Effect monitor disabled. Applied track Effect Slots still print into the recorded take.");
+        logMessage(audioRecorderTrackLiveEffectEnabled
+            ? "AudioClip Recorder Track Live Effect monitor enabled. The project WAV remains dry; previews and exports apply the track effect non-destructively."
+            : (enabled
+                ? "AudioClip Recorder Track Live Effect monitor could not be enabled because the current blank target does not have an eligible effect."
+                : "AudioClip Recorder Track Live Effect monitor disabled. The project WAV records dry and the assigned effect remains available for preview/export."));
         refreshAudioRecorderWindowStatus();
     }
 
-    mw::audio::AudioClipRecorderLiveEffectOptions MainComponent::buildAudioRecorderLiveEffectOptions(int targetTrackIndex, int sourceTrackIndex) const
+    mw::audio::AudioClipRecorderLiveEffectOptions MainComponent::buildAudioRecorderLiveEffectOptions(int targetTrackIndex, int sourceTrackIndex)
     {
         mw::audio::AudioClipRecorderLiveEffectOptions options;
-        options.monitorEnabled = audioRecorderTrackLiveEffectEnabled;
-
         if (!currentProject)
             return options;
 
@@ -20923,6 +21523,14 @@ void MainComponent::openAudioRecorderWindow()
                 return false;
 
             const auto& track = tracks[static_cast<std::size_t>(index)];
+            options.monitorEnabled = audioRecorderTrackLiveEffectEnabled
+                && audioRecorderTrackLiveEffectTargetId != 0
+                && audioRecorderTrackLiveEffectTargetId == track.getStableId();
+            const double monitorTrackVolume = index == getSelectedTrackIndex()
+                ? trackVolumeSlider.getValue()
+                : static_cast<double>(track.getMixerSettings().volume);
+            options.monitorOutputGain = mw::audio::sanitizeMainUiGain(
+                static_cast<float>(monitorTrackVolume * masterVolumeSlider.getValue()));
             const auto& effects = track.getVstEffects();
             for (std::size_t slotIndex = 0; slotIndex < mw::core::maxVstEffectSlots; ++slotIndex)
             {
@@ -20939,13 +21547,23 @@ void MainComponent::openAudioRecorderWindow()
                 options.enabled = true;
                 options.backendType = slot->backendType;
                 options.trackName = track.getName() + " - Effect Slot " + std::to_string(slotIndex + 1);
-                if (slot->plugin.stateBase64.empty())
+                options.effect = slot->plugin;
+
+                // Match Test Effect without silently committing editor changes:
+                // use the currently open editor state for this recording session
+                // only, then leave the project-owned Apply Changes state untouched.
+                const auto currentEditorState = captureOpenVstEffectStateForTrack(index,
+                                                                                  static_cast<int>(slotIndex),
+                                                                                  false,
+                                                                                  false);
+                if (currentEditorState.isNotEmpty())
                 {
-                    options.unavailableMessage = "Track effect recording requested, but this Effect Slot has no applied parameter state yet. Open the effect editor and click Apply Changes once before recording; unapplied live editor tweaks are not printed into the take.";
-                    return true;
+                    options.effect.stateBase64 = currentEditorState.toStdString();
+                    logMessage("AudioClip Recorder: using the current open Effect Slot "
+                        + juce::String(static_cast<int>(slotIndex + 1))
+                        + " editor state for this take without applying it to the project.");
                 }
 
-                options.effect = slot->plugin;
                 return true;
             }
 
@@ -20958,6 +21576,7 @@ void MainComponent::openAudioRecorderWindow()
         populateFromTrack(targetTrackIndex);
         return options;
     }
+
 
     void MainComponent::startAudioRecorderTest()
     {
@@ -20996,7 +21615,14 @@ void MainComponent::openAudioRecorderWindow()
             audioClipRecorder = std::make_unique<mw::audio::AudioClipRecorder>();
         audioClipRecorder->setInputGainDb(audioRecorderMicGainDb);
 
-        const auto startResult = audioClipRecorder->startRecording(audioRecorderTestTempWavPath, channelsCombo.getSelectedId() == 1 ? 1 : 2, 24);
+        const int selectedEffectTrackIndex = getSelectedTrackIndex();
+        auto liveEffectOptions = buildAudioRecorderLiveEffectOptions(selectedEffectTrackIndex, selectedEffectTrackIndex);
+        liveEffectOptions.writeEffectToOutputFile = liveEffectOptions.enabled;
+        audioRecorderTestPlaybackGain = liveEffectOptions.monitorOutputGain;
+        const auto startResult = audioClipRecorder->startRecording(audioRecorderTestTempWavPath,
+                                                                    channelsCombo.getSelectedId() == 1 ? 1 : 2,
+                                                                    24,
+                                                                    liveEffectOptions);
         if (!startResult.success)
         {
             logMessage(juce::String("ERROR: AudioClip Record Test did not start: ") + startResult.message);
@@ -21010,6 +21636,14 @@ void MainComponent::openAudioRecorderWindow()
         audioRecorderTestActive = true;
         audioRecorderTestPlaybackActive = false;
         logMessage("AudioClip Record Test: recording 5 second test sample.");
+        if (startResult.recordEffectRequested)
+        {
+            logMessage(startResult.recordEffectActive
+                ? juce::String("AudioClip Record Test: ") + juce::String(startResult.recordEffectMessage)
+                : juce::String("AudioClip Record Test: effect unavailable; temporary playback uses dry capture. ") + juce::String(startResult.recordEffectMessage));
+        }
+        if (startResult.liveEffectMonitorRequested)
+            logMessage(juce::String("AudioClip Record Test: ") + juce::String(startResult.liveEffectMessage));
         refreshAudioRecorderWindowStatus();
 
         juce::Component::SafePointer<MainComponent> safeThis(this);
@@ -21082,6 +21716,7 @@ void MainComponent::openAudioRecorderWindow()
         audioRecorderTestSourcePlayer.setSource(&audioRecorderTestTransport);
         audioRecorderTestPlaybackDeviceManager.addAudioCallback(&audioRecorderTestSourcePlayer);
         audioRecorderTestTransport.setPosition(0.0);
+        audioRecorderTestTransport.setGain(audioRecorderTestPlaybackGain);
         audioRecorderTestPlaybackActive = true;
         audioRecorderTestTransport.start();
         refreshAudioRecorderWindowStatus();
@@ -21178,10 +21813,10 @@ void MainComponent::openAudioRecorderWindow()
             if (slot != nullptr
                 && effects.slotEnabled(slotIndex)
                 && !slot->plugin.bypassed
-                && slot->backendType == mw::core::EffectSlotBackendType::VST3
+                && (slot->backendType == mw::core::EffectSlotBackendType::VST3
+                    || slot->backendType == mw::core::EffectSlotBackendType::CLAP)
                 && slot->plugin.hasPluginIdentity()
-                && !slot->plugin.bundlePath.empty()
-                && !slot->plugin.stateBase64.empty())
+                && !slot->plugin.bundlePath.empty())
                 return true;
         }
 
@@ -21207,6 +21842,19 @@ void MainComponent::openAudioRecorderWindow()
         const int selectedRecordingTargetIndex = getAudioRecorderTargetTrackIndex();
         const bool hasRecordingTarget = selectedRecordingTargetIndex >= 0;
         const bool hasLiveEffectTarget = trackHasUsableLiveEffectForAudioRecorder(selectedRecordingTargetIndex);
+        const auto selectedRecordingTargetId = hasRecordingTarget
+            ? currentProject->getTracks()[static_cast<std::size_t>(selectedRecordingTargetIndex)].getStableId()
+            : mw::core::StableId { 0 };
+
+        if (audioRecorderTrackLiveEffectEnabled
+            && (audioRecorderTrackLiveEffectTargetId == 0
+                || audioRecorderTrackLiveEffectTargetId != selectedRecordingTargetId
+                || !hasLiveEffectTarget))
+        {
+            audioRecorderTrackLiveEffectEnabled = false;
+            audioRecorderTrackLiveEffectTargetId = 0;
+            logMessage("AudioClip Recorder Track Live Effect monitor reset because the blank recording target changed or its eligible effect was removed.");
+        }
 
         if (activeRecordingTrackIndex >= 0)
             status << "Track #" << (activeRecordingTrackIndex + 1) << " | Seq #" << activeRecordingSequenceNumber;
@@ -21221,8 +21869,10 @@ void MainComponent::openAudioRecorderWindow()
                << " | Quality: " << getSelectedAudioClipQualityKbps() << " kbps for compressed formats";
 
         status << "\nMic Gain: " << juce::String(audioRecorderMicGainDb, 1) << " dB";
-        const bool trackLiveEffectUsable = audioRecorderTrackLiveEffectEnabled && hasLiveEffectTarget;
-        status << "\nTrack VST Record Effect: " << (hasLiveEffectTarget ? "On (prints applied effect into take)" : "Off");
+        const bool trackLiveEffectUsable = audioRecorderTrackLiveEffectEnabled
+            && audioRecorderTrackLiveEffectTargetId == selectedRecordingTargetId
+            && hasLiveEffectTarget;
+        status << "\nCapture: Dry WAV (effects remain non-destructive)";
         status << "\nTrack Live Effect Monitor: " << (trackLiveEffectUsable ? "On" : "Off");
 
         if (hasLiveEffectTarget && currentProject)
@@ -21235,11 +21885,18 @@ void MainComponent::openAudioRecorderWindow()
                 if (slot != nullptr
                     && effects.slotEnabled(slotIndex)
                     && !slot->plugin.bypassed
-                    && slot->backendType == mw::core::EffectSlotBackendType::VST3
+                    && (slot->backendType == mw::core::EffectSlotBackendType::VST3
+                        || slot->backendType == mw::core::EffectSlotBackendType::CLAP)
                     && slot->plugin.hasPluginIdentity()
-                    && !slot->plugin.stateBase64.empty())
+                    && !slot->plugin.bundlePath.empty())
                 {
-                    status << " | Source: " << juce::String(selectedTrack.getName()) << " / Slot " << juce::String(static_cast<int>(slotIndex + 1)) << " / " << juce::String(slot->plugin.name.empty() ? slot->plugin.bundlePath.filename().string() : slot->plugin.name);
+                    const auto backendName = slot->backendType == mw::core::EffectSlotBackendType::CLAP ? "CLAP" : "VST3";
+                    status << " | Source: " << juce::String(selectedTrack.getName())
+                           << " / Slot " << juce::String(static_cast<int>(slotIndex + 1))
+                           << " / " << backendName
+                           << " / " << juce::String(slot->plugin.name.empty() ? slot->plugin.bundlePath.filename().string() : slot->plugin.name);
+                    if (slot->plugin.stateBase64.empty())
+                        status << " (plugin default state)";
                     break;
                 }
             }
@@ -21337,9 +21994,9 @@ void MainComponent::openAudioRecorderWindow()
 
         const bool trackLiveEffectUsable = trackHasUsableLiveEffectForAudioRecorder(trackIndex);
         if (trackLiveEffectUsable)
-            logMessage("AudioClip Recorder will print the selected track's last applied Effect Slot state into the take. Unapplied open effect-editor tweaks are ignored until Apply Changes is clicked.");
+            logMessage("AudioClip Recorder will keep the project WAV dry. The selected track effect remains available for non-destructive preview/export; when live monitoring is enabled, the current open editor state is used transiently when available.");
         if (audioRecorderTrackLiveEffectEnabled && trackLiveEffectUsable)
-            logMessage("AudioClip Recorder Track Live Effect monitor is enabled for the same applied wet signal.");
+            logMessage("AudioClip Recorder Track Live Effect monitor is enabled. Monitoring is wet while the project WAV records dry.");
 
         if (activeImportSectionIndex < 0 || activeImportSectionIndex >= static_cast<int>(importSections.size()))
         {
@@ -21415,12 +22072,6 @@ void MainComponent::openAudioRecorderWindow()
         activeRecordingSampleRate = startResult.sampleRate;
         activeRecordingChannelCount = startResult.channelCount;
         logMessage("Recording AudioClip take to temp file. Pause skips time; no silent gap is inserted.");
-        if (startResult.recordEffectRequested)
-        {
-            logMessage(startResult.recordEffectActive
-                ? juce::String("AudioClip Recorder: ") + juce::String(startResult.recordEffectMessage)
-                : juce::String("AudioClip Recorder: dry recording continues. ") + juce::String(startResult.recordEffectMessage));
-        }
         if (startResult.liveEffectMonitorRequested)
         {
             logMessage(startResult.liveEffectMonitorActive
@@ -21611,6 +22262,7 @@ void MainComponent::openAudioRecorderWindow()
 
         expandSequenceEndTickForAudioClip(clip);
         addAudioClipToProject(std::move(clip));
+
 
         activeRecordingTempWavPath.clear();
         activeRecordingSourceWavPath.clear();
@@ -22313,10 +22965,18 @@ void MainComponent::openAudioRecorderWindow()
         cleanupPianoRollPreviewFiles();
         lastPianoRollPreviewScope = 1;
 
+        const auto selectedBackend = currentProject->getTracks()[static_cast<std::size_t>(index)].getInstrument().backendType;
+        if (selectedBackend == mw::core::SampleBackendType::VST3)
+            captureOpenVstPluginStatesForPreview("selected track live preview");
+
+        if (tryStartSelectedTrackVstMainTransportPreview(index))
+            return;
+
         if (tryStartSelectedTrackClapMainTransportPreview(index))
             return;
 
-        captureOpenVstPluginStatesForPreview("selected track preview");
+        if (selectedBackend != mw::core::SampleBackendType::VST3)
+            captureOpenVstPluginStatesForPreview("selected track preview");
 
         auto job = createRenderJobSnapshot();
         const auto& sourceTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
@@ -22512,7 +23172,7 @@ void MainComponent::openAudioRecorderWindow()
         lastPianoRollPreviewScope = 3;
         captureOpenVstPluginStatesForPreview("project preview");
 
-        if (tryStartMultiTrackClapProjectPreview())
+        if (tryStartMixedLiveProjectPreview())
             return;
 
         auto job = createRenderJobSnapshot();
@@ -23266,6 +23926,11 @@ void MainComponent::refreshSoundFontList()
         const bool anyPluginIdentityChanged = slotPluginChanged(0) || slotPluginChanged(1);
         const bool changed = slotChanged(0) || slotChanged(1) || beforeEffects.enabled != effects.enabled;
 
+        if (changed)
+        {
+            stopClapInstrumentLiveAudition(true);
+            stopVstInstrumentLiveAudition(true);
+        }
         track.setVstEffects(std::move(effects));
         if (anyPluginIdentityChanged)
         {
@@ -25349,6 +26014,16 @@ void MainComponent::refreshTrackSelector()
         if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
             return;
 
+        if (clapLiveTransportGeneration != 0
+            || vstLiveTransportGeneration != 0
+            || mixedLiveProjectPreviewEngine.isActive()
+            || clapLiveDirectPreviewEngine.isActive()
+            || vstLiveDirectPreviewEngine.isActive())
+        {
+            stopClapInstrumentLiveAudition(true);
+            stopVstInstrumentLiveAudition(true);
+        }
+
         auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
 
         if (track.isAudioClipTrack())
@@ -25796,6 +26471,41 @@ void MainComponent::refreshTrackSelector()
     {
         if (currentProject)
         {
+            bool timingWillChange = false;
+            try
+            {
+                const int bpm = std::stoi(pianoRollBpmBox.getText().toStdString());
+                timingWillChange = bpm > 0 && bpm <= 400 && bpm != currentProject->getTempoBpm();
+            }
+            catch (...)
+            {
+            }
+
+            const auto requestedTimeSignature = pianoRollTimeSigBox.getText().toStdString();
+            const auto requestedSlash = requestedTimeSignature.find('/');
+            if (requestedSlash != std::string::npos)
+            {
+                try
+                {
+                    const int numerator = std::stoi(requestedTimeSignature.substr(0, requestedSlash));
+                    const int denominator = std::stoi(requestedTimeSignature.substr(requestedSlash + 1));
+                    const auto& currentTimeSignature = currentProject->getTimeSignature();
+                    timingWillChange = timingWillChange
+                        || (numerator > 0 && denominator > 0
+                            && (numerator != currentTimeSignature.numerator
+                                || denominator != currentTimeSignature.denominator));
+                }
+                catch (...)
+                {
+                }
+            }
+
+            if (timingWillChange)
+            {
+                stopClapInstrumentLiveAudition(true);
+                stopVstInstrumentLiveAudition(true);
+            }
+
             try
             {
                 const int bpm = std::stoi(pianoRollBpmBox.getText().toStdString());
@@ -26069,6 +26779,41 @@ void MainComponent::refreshTrackSelector()
     {
         if (currentProject)
         {
+            bool timingWillChange = false;
+            try
+            {
+                const int bpm = std::stoi(state.bpmBox.getText().toStdString());
+                timingWillChange = bpm > 0 && bpm <= 400 && bpm != currentProject->getTempoBpm();
+            }
+            catch (...)
+            {
+            }
+
+            const auto requestedTimeSignature = state.timeSigBox.getText().toStdString();
+            const auto requestedSlash = requestedTimeSignature.find('/');
+            if (requestedSlash != std::string::npos)
+            {
+                try
+                {
+                    const int numerator = std::stoi(requestedTimeSignature.substr(0, requestedSlash));
+                    const int denominator = std::stoi(requestedTimeSignature.substr(requestedSlash + 1));
+                    const auto& currentTimeSignature = currentProject->getTimeSignature();
+                    timingWillChange = timingWillChange
+                        || (numerator > 0 && denominator > 0
+                            && (numerator != currentTimeSignature.numerator
+                                || denominator != currentTimeSignature.denominator));
+                }
+                catch (...)
+                {
+                }
+            }
+
+            if (timingWillChange)
+            {
+                stopClapInstrumentLiveAudition(true);
+                stopVstInstrumentLiveAudition(true);
+            }
+
             try
             {
                 const int bpm = std::stoi(state.bpmBox.getText().toStdString());
@@ -26233,6 +26978,8 @@ void MainComponent::refreshTrackSelector()
         if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
             return false;
 
+        stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
         applyPianoRollSettings(state);
 
         auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
@@ -26532,6 +27279,13 @@ void MainComponent::refreshTrackSelector()
         auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
         auto absoluteNotes = makeAbsoluteNotesForTrackFromLocal(index, pianoRoll.getNotes());
         const auto changed = !noteListsEqual(track.getNotes(), absoluteNotes);
+
+        if (changed)
+        {
+            stopClapInstrumentLiveAudition(true);
+            stopVstInstrumentLiveAudition(true);
+        }
+
         track.getNotes() = std::move(absoluteNotes);
 
         expandSequenceEndTickForTrack(index);
@@ -27909,6 +28663,8 @@ void MainComponent::refreshTrackSelector()
             return false;
         }
 
+        stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
         captureUndoOnce();
 
         const int sourceSequenceIndex = getSequenceIndexForTrack(trackNumber);
@@ -28097,6 +28853,8 @@ void MainComponent::refreshTrackSelector()
                         return;
                     }
 
+                    stopClapInstrumentLiveAudition(true);
+                    stopVstInstrumentLiveAudition(true);
                     captureTrackManagerUndoState("Remove Seq #" + juce::String(sequenceNumber));
 
                     std::vector<int> deletedTrackNumbers = importSections[static_cast<std::size_t>(sequenceIndex)].trackNumbers;
@@ -32578,8 +33336,12 @@ void MainComponent::openTrackManagerWindow()
 
         auto isLivePreview = [this]
         {
-            const auto liveStatus = clapLiveDirectPreviewEngine.status();
-            return liveStatus.active && clapLiveTransportGeneration != 0;
+            const auto clapStatus = clapLiveDirectPreviewEngine.status();
+            const auto vstStatus = vstLiveDirectPreviewEngine.status();
+            const auto mixedStatus = mixedLiveProjectPreviewEngine.status();
+            return (clapStatus.active && clapLiveTransportGeneration != 0)
+                || (mixedStatus.active && clapLiveTransportGeneration != 0)
+                || (vstStatus.active && vstLiveTransportGeneration != 0);
         };
 
         auto hasPreview = [this, isLivePreview]
@@ -33133,8 +33895,43 @@ void MainComponent::openPianoRollWindow()
 
     bool MainComponent::seekPianoRollPreviewToSeconds(double seconds)
     {
-        const auto liveStatus = clapLiveDirectPreviewEngine.status();
-        if (liveStatus.active && currentProject && clapLiveTransportGeneration != 0)
+        const auto vstLiveStatus = vstLiveDirectPreviewEngine.status();
+        if (vstLiveStatus.active && currentProject && vstLiveTransportGeneration != 0)
+        {
+            const auto transport = playbackTransportCoordinator.snapshot();
+            const auto totalSeconds = transport.durationSeconds();
+            if (totalSeconds <= 0.0 || seconds < 0.0 || seconds > totalSeconds)
+                return false;
+
+            const auto targetSeconds = std::clamp(
+                seconds,
+                0.0,
+                std::max(0.0, totalSeconds - 0.001));
+            const auto targetSample = static_cast<std::int64_t>(std::llround(targetSeconds * transport.sampleRate));
+            const auto priorTrackIndex = vstLiveDirectPreviewEngine.activeTrackIndex();
+
+            playbackTransportCoordinator.beginSeeking(vstLiveTransportGeneration, targetSample);
+            pendingPianoRollPreviewStartSeconds = targetSeconds;
+            stopVstInstrumentLiveAudition(true);
+            pendingPianoRollPreviewStartSeconds = targetSeconds;
+
+            if (priorTrackIndex < 0 || !tryStartSelectedTrackVstMainTransportPreview(priorTrackIndex))
+            {
+                logMessage("VST3 Live Preview: seek restart failed. Use Preview to restart through the rendered fallback path.");
+                return false;
+            }
+
+            logMessage("VST3 Live Preview: restarted at " + formatPreviewClockTime(targetSeconds) + ".");
+            return true;
+        }
+
+        const bool mixedProjectActive = clapLiveDirectPreviewProjectMode
+            && mixedLiveProjectPreviewEngine.status().active;
+        const auto clapStatus = clapLiveDirectPreviewEngine.status();
+        const bool clapSelectedTrackActive = !clapLiveDirectPreviewProjectMode && clapStatus.active;
+        if ((mixedProjectActive || clapSelectedTrackActive)
+            && currentProject
+            && clapLiveTransportGeneration != 0)
         {
             const auto transport = playbackTransportCoordinator.snapshot();
             const auto totalSeconds = transport.durationSeconds();
@@ -33147,18 +33944,21 @@ void MainComponent::openPianoRollWindow()
                 std::max(0.0, totalSeconds - 0.001));
             const auto targetSample = static_cast<std::int64_t>(std::llround(targetSeconds * transport.sampleRate));
             const auto priorScope = lastPianoRollPreviewScope;
-            const auto priorTrackIndex = clapLiveDirectPreviewEngine.activeTrackIndex();
+            const auto priorTrackIndex = clapSelectedTrackActive
+                ? clapLiveDirectPreviewEngine.activeTrackIndex()
+                : -1;
 
             playbackTransportCoordinator.beginSeeking(clapLiveTransportGeneration, targetSample);
             pendingPianoRollPreviewStartSeconds = targetSeconds;
             stopClapInstrumentLiveAudition(true);
+            stopVstInstrumentLiveAudition(true);
             pendingPianoRollPreviewStartSeconds = targetSeconds;
 
             bool restarted = false;
             if (priorScope == 1 && priorTrackIndex >= 0)
                 restarted = tryStartSelectedTrackClapMainTransportPreview(priorTrackIndex);
             else if (priorScope == 3)
-                restarted = tryStartMultiTrackClapProjectPreview();
+                restarted = tryStartMixedLiveProjectPreview();
 
             if (!restarted)
             {
@@ -33281,6 +34081,7 @@ void MainComponent::openPianoRollWindow()
     void MainComponent::stopPianoRollPreview()
     {
         stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
 #if JUCE_WINDOWS
         mciSendStringW(L"stop PoorMansStudioPianoRollPreview", nullptr, 0, nullptr);
         mciSendStringW(L"close PoorMansStudioPianoRollPreview", nullptr, 0, nullptr);
@@ -33392,6 +34193,7 @@ void MainComponent::openPianoRollWindow()
     void MainComponent::stopProjectPreview()
     {
         stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
 #if JUCE_WINDOWS
         PlaySoundW(nullptr, nullptr, 0);
         logMessage("Stopped project preview playback.");
@@ -33923,6 +34725,9 @@ void MainComponent::renderPianoRollPreview()
         if (!currentProject)
             return;
 
+        stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
+
         try
         {
             const int tempo = std::stoi(tempoBox.getText().toStdString());
@@ -33968,6 +34773,9 @@ void MainComponent::renderPianoRollPreview()
 
         if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
             return;
+
+        stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
 
         auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
         track.getNotes().clear();
@@ -34059,6 +34867,8 @@ void MainComponent::renderPianoRollPreview()
         if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
             return;
 
+        stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
         auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
 
         std::int64_t nextStart = 0;
@@ -34092,6 +34902,8 @@ void MainComponent::renderPianoRollPreview()
         if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
             return;
 
+        stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
         auto& notes = currentProject->getTracks()[static_cast<std::size_t>(index)].getNotes();
 
         if (!notes.empty())

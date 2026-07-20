@@ -34,6 +34,12 @@ VST3 support is experimental. Some plugins are perfectly calm. Some plugins are 
 
 Current VST3 support includes:
 
+- Native selected-track VST3 playback through a persistent JUCE audio callback session.
+- Project-wide persistent VST3 instrument/effect sessions owned by stable track IDs during live playback.
+- Mixes compatible live VST3 tracks, live CLAP tracks, and prepared rendered sources on the same timeline.
+- Live VST3 Effect Slot 1 / Slot 2 processing in slot order when every enabled effect in that track's chain is VST3.
+- Preview Player integration for live VST3 Stop and seek-by-safe-rebuild behavior; Pause remains available only for rendered previews.
+- Device-rate/block-size preparation, callback busy protection, emergency note-off flushing, finite-sample filtering, clipping protection, and rendered fallback.
 - VST3 scanning from `workspace/vst3` and standard Windows VST3 locations.
 - VST3 Plugin Manager with **All Plugins**, **Supported Instruments**, **Supported Effects**, and **Unsupported** filters.
 - Two-slot VST Effect chain controls in the main track inspector: choose Supported Effects for slot 1 and slot 2, enable/disable or bypass each slot, save the assignments in `.mwproj` files, and process the chain during offline preview/render paths for MIDI and AudioClip tracks.
@@ -47,7 +53,7 @@ Current VST3 support includes:
 - VST Host Helper Status from the VST Plugins menu, backed by the helper executable.
 - One-time experimental dragon warning before VST3 becomes active through defaults, track assignment, plugin UI, preview, or render.
 
-Normal VST3 instrument hosting is still mostly in-process, so a plugin crash can still close the main app. The helper executable provides isolated checks and groundwork for future risky plugin work.
+VST3 instrument hosting remains in-process, so a plugin crash can still close the main app.
 
 ### CLAP Plugin Support
 
@@ -62,16 +68,21 @@ Current CLAP support includes:
 - CLAP instrument editor windows with **Apply Changes**, **Test Instrument**, snapshots, and explicit state capture.
 - CLAP effect editor windows for track Effect Slot 1 / Slot 2 with **Apply Changes**, **Test Effect**, snapshots, and explicit state capture.
 - Offline CLAP instrument rendering and CLAP effect processing for render/export and fallback preview paths.
-- Direct CLAP preview for compatible selected-track and CLAP-only multi-track projects through the live scheduler/callback bridge.
+- Direct CLAP preview for compatible selected-track and multi-track CLAP projects through the live scheduler/callback bridge.
 - Guarded live CLAP Effect Slot 1 / Slot 2 routing during direct CLAP preview when the selected effects are CLAP effects.
-- Fallback to the existing rendered/temp-WAV preview path for mixed projects, unsupported routing, audio clips, non-CLAP effects, or unsafe live-preview situations.
+- Compatible CLAP and VST3 instrument tracks remain live together while SF2/SF3, SFZ, AudioClip, cross-backend effect chains, latency-reporting plugins, and otherwise unsafe tracks use the prepared or full rendered fallback.
+- Explicit transport lifecycle state and playback generation tracking protect project replacement, stop/restart, live seek restart, stale asynchronous preparation, and completion handling.
+- Stable project and track identities are saved in `.mwproj` project format version 9 so live session ownership does not depend only on mutable track indexes.
+- Full rendered/temp-WAV fallback remains available when hybrid preparation, plugin opening, the audio device, or live routing cannot run safely.
 
 Direct CLAP preview is not the same as final export. Render/export paths still use the saved project state and offline processing so output remains repeatable and compatible with the existing render workflow.
+
+The Help menu includes one combined **Plugin Compatibility Warnings** toggle for VST3 and CLAP warning popups. The app keeps the VST3 and CLAP acknowledgement state separate internally, but the user-facing Help menu stays compact with one shared warning control.
 
 ### Preview, Render, And Export
 
 - Preview a selected track, selected sequence, Piano Roll area, enhanced AudioClip source preview, AudioClip arrangement, or the full project.
-- Compatible CLAP selected-track and CLAP-only project previews may play through the guarded direct/live CLAP preview path; mixed or unsupported cases use the rendered/temp-WAV fallback.
+- Compatible VST3 and CLAP selected-track previews may play through their guarded direct/live paths. Project Preview uses one shared callback for compatible live VST3 and CLAP tracks plus prepared rendered sources; unsupported or unsafe cases still use the full rendered/temp-WAV fallback.
 - Render the full project, selected track, selected sequence, or stems depending on render settings.
 - Export WAV, FLAC, MP3, and OGG audio.
 - Attach album art to MP3 renders when Output Format is MP3.
@@ -198,7 +209,7 @@ Recommended build environment:
 - Windows 10 or Windows 11 SDK.
 - MSBuild.
 - C++ CMake tools for Windows.
-- CMake 3.24 or newer; current local validation uses CMake 4.4.0-rc3.
+- CMake 3.24 or newer; current local validation uses CMake 4.4.0.
 - Git for Windows, recommended for obtaining/updating JUCE.
 - JUCE source tree at `external/JUCE`; current local validation uses JUCE 8.0.14.
 - C++20-capable compiler.
@@ -210,7 +221,7 @@ cmake_minimum_required(VERSION 3.24)
 set(CMAKE_CXX_STANDARD 20)
 ```
 
-JUCE's own CMake support requires CMake 3.22 or newer, but this project requires 3.24 or newer. The current development setup is using JUCE 8.0.14 and CMake 4.4.0-rc3.
+JUCE's own CMake support requires CMake 3.22 or newer, but this project requires 3.24 or newer. The current development setup is using JUCE 8.0.14 and CMake 4.4.0.
 
 ## Visual Studio Community Setup
 
@@ -266,7 +277,7 @@ These are needed to build the app from source:
 | MSVC C++ build tools | C++ compiler/linker | Required for compiling the JUCE/C++ app. |
 | Windows SDK | Windows headers/libraries | Installed through the C++ workload/components. |
 | MSBuild | Visual Studio build engine | Used by Visual Studio CMake generators. |
-| CMake 3.24+ | Configures/generates builds | The project uses CMake directly. Current local setup uses CMake 4.4.0-rc3. |
+| CMake 3.24+ | Configures/generates builds | The project uses CMake directly. Current local setup uses CMake 4.4.0. |
 | Git | Cloning/updating source and JUCE | Optional if JUCE is copied manually, recommended otherwise. |
 | JUCE source tree | C++ app framework | Must exist at `external/JUCE`. Current local setup uses JUCE 8.0.14. Build-time source dependency, not a separate runtime install. |
 
@@ -358,13 +369,14 @@ Example summary:
 ```text
 Poor Man's Studio Build Summary
 --------------------------------
+Version:        0.66.3
 Configuration:  Release
 Generator:      Visual Studio 18 2026
 Platform:       x64
 Parallel Jobs:  16
-Started:        2026-06-02 18:16:47
-Finished:       2026-06-02 18:20:04
-Elapsed:        3 min 17 sec
+Started:        2026-07-19 11:05:39
+Finished:       2026-07-19 11:10:13
+Elapsed:        4 min 33 sec
 Result:         SUCCESS
 Output:         C:\Dev\PoorMansStudio\workspace\program\Poor Man's Studio.exe
 VST Host:       C:\Dev\PoorMansStudio\workspace\vst_host\PoorMansStudioVstHost.exe

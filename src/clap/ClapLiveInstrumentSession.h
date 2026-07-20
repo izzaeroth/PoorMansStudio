@@ -28,6 +28,7 @@ namespace mw::clap
         int sampleRate = 0;
         int channelCount = 0;
         int blockSize = 0;
+        int latencySamples = 0;
         bool stateRestored = false;
         bool audioPortsAvailable = false;
         bool startedProcessing = false;
@@ -84,6 +85,7 @@ namespace mw::clap
         bool open(const ClapLiveInstrumentSessionConfig& config, std::string& errorMessage);
         void close();
         bool isOpen() const;
+        bool prepareForPlayback(int sampleRate, int blockSize, int channelCount, std::string& errorMessage);
         ClapLiveInstrumentSessionInfo info() const;
         ClapLiveProcessResult processBlock(const ClapLiveProcessRequest& request);
 

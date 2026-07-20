@@ -35,10 +35,15 @@ namespace mw::audio
 
     struct AudioClipRecorderLiveEffectOptions
     {
-        // enabled means the selected track's applied Effect Slot should be printed into the recorded take.
+        // enabled means the selected track has an eligible Effect Slot available for non-destructive monitoring.
+        // Saved state is restored when available; an empty state uses the plugin's default state.
         bool enabled = false;
-        // monitorEnabled only controls whether that same wet signal is sent to the output while recording.
+        // monitorEnabled sends the wet signal to the output while the WAV writer always keeps the normal take dry.
         bool monitorEnabled = false;
+        // Record Test may request a temporary wet audition file. This is never used for project recording media.
+        bool writeEffectToOutputFile = false;
+        // Monitoring and temporary Record Test playback are post track/master fader; normal recorded WAVs remain dry and pre-fader.
+        float monitorOutputGain = 1.0f;
         mw::core::EffectSlotBackendType backendType = mw::core::EffectSlotBackendType::None;
         mw::core::VstPluginAssignment effect;
         std::string trackName;
@@ -72,7 +77,7 @@ namespace mw::audio
         double getInputGainDb() const { return static_cast<double>(inputGainDb.load()); }
         bool isLiveEffectMonitorActive() const { return liveEffectMonitorActive.load(); }
         juce::String getLiveEffectMonitorSummary() const { return liveEffectMonitorSummary; }
-        bool isRecordEffectActive() const { return recordEffectActive.load(); }
+        bool isRecordEffectActive() const { return writeEffectToOutputFile.load() && effectProcessingActive.load(); }
         juce::String getRecordEffectSummary() const { return recordEffectSummary; }
 
     private:
@@ -111,14 +116,16 @@ namespace mw::audio
         std::atomic<float> inputGainDb { 0.0f };
         std::atomic<float> inputGainLinear { 1.0f };
         std::atomic<bool> liveEffectMonitorActive { false };
-        std::atomic<bool> recordEffectActive { false };
+        std::atomic<bool> effectProcessingActive { false };
+        std::atomic<bool> writeEffectToOutputFile { false };
+        std::atomic<float> liveEffectMonitorGain { 1.0f };
         std::filesystem::path outputPath;
         juce::String preferredInputDeviceName;
         double currentSampleRate = 48000.0;
         int channelCount = 1;
         int bitDepth = 24;
         int liveEffectMonitorChannels = 0;
-        int recordEffectProcessChannels = 0;
+        int effectProcessChannels = 0;
         mw::core::EffectSlotBackendType liveEffectBackend = mw::core::EffectSlotBackendType::None;
         juce::String liveEffectMonitorSummary;
         juce::String recordEffectSummary;

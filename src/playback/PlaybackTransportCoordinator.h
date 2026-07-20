@@ -48,8 +48,18 @@ namespace mw::playback
                                      std::vector<mw::core::StableId> trackIds);
 
         bool beginPlaying(std::uint64_t generation, std::int64_t totalSamples);
+        bool beginPlayingWithAudioFormat(std::uint64_t generation,
+                                         std::int64_t currentSample,
+                                         std::int64_t totalSamples,
+                                         int sampleRate,
+                                         int blockSize);
         bool beginSeeking(std::uint64_t generation, std::int64_t targetSample);
         bool updatePosition(std::uint64_t generation, std::int64_t currentSample, std::int64_t totalSamples);
+        bool updatePositionWithAudioFormat(std::uint64_t generation,
+                                           std::int64_t currentSample,
+                                           std::int64_t totalSamples,
+                                           int sampleRate,
+                                           int blockSize);
         bool beginStopping(std::uint64_t generation);
         bool finishStopped(std::uint64_t generation);
         bool fail(std::uint64_t generation, std::string message);

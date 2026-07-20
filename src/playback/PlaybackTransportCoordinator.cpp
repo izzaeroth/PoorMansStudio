@@ -70,6 +70,24 @@ namespace mw::playback
         return true;
     }
 
+    bool PlaybackTransportCoordinator::beginPlayingWithAudioFormat(std::uint64_t generation,
+                                                                    std::int64_t currentSample,
+                                                                    std::int64_t totalSamples,
+                                                                    int sampleRate,
+                                                                    int blockSize)
+    {
+        std::scoped_lock lock(mutex_);
+        if (generation != state_.generation || state_.state != TransportState::Preparing)
+            return false;
+
+        state_.state = TransportState::Playing;
+        state_.sampleRate = std::max(1, sampleRate);
+        state_.blockSize = std::max(1, blockSize);
+        state_.currentSample = std::max<std::int64_t>(0, currentSample);
+        state_.totalSamples = std::max(state_.currentSample, totalSamples);
+        return true;
+    }
+
     bool PlaybackTransportCoordinator::beginSeeking(std::uint64_t generation, std::int64_t targetSample)
     {
         std::scoped_lock lock(mutex_);
@@ -95,6 +113,25 @@ namespace mw::playback
 
         state_.currentSample = std::max<std::int64_t>(0, currentSample);
         state_.totalSamples = std::max({ state_.currentSample, state_.totalSamples, totalSamples });
+        if (state_.state == TransportState::Seeking)
+            state_.state = TransportState::Playing;
+        return true;
+    }
+
+    bool PlaybackTransportCoordinator::updatePositionWithAudioFormat(std::uint64_t generation,
+                                                                      std::int64_t currentSample,
+                                                                      std::int64_t totalSamples,
+                                                                      int sampleRate,
+                                                                      int blockSize)
+    {
+        std::scoped_lock lock(mutex_);
+        if (generation != state_.generation || !state_.isActive())
+            return false;
+
+        state_.sampleRate = std::max(1, sampleRate);
+        state_.blockSize = std::max(1, blockSize);
+        state_.currentSample = std::max<std::int64_t>(0, currentSample);
+        state_.totalSamples = std::max({ state_.currentSample, totalSamples });
         if (state_.state == TransportState::Seeking)
             state_.state = TransportState::Playing;
         return true;

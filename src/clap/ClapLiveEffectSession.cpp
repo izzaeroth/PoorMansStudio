@@ -28,6 +28,7 @@ namespace
     constexpr const char* clapPluginFactoryId = "clap.plugin-factory";
     constexpr const char* clapStateExtensionId = "clap.state";
     constexpr const char* clapAudioPortsExtensionId = "clap.audio-ports";
+    constexpr const char* clapLatencyExtensionId = "clap.latency";
     constexpr std::size_t clapNameSize = 256;
 
     struct clap_version_t
@@ -90,6 +91,11 @@ namespace
     {
         std::uint32_t (*count)(const clap_plugin_t* plugin, bool is_input);
         bool (*get)(const clap_plugin_t* plugin, std::uint32_t index, bool is_input, clap_audio_port_info_t* info);
+    };
+
+    struct clap_plugin_latency_t
+    {
+        std::uint32_t (*get)(const clap_plugin_t* plugin);
     };
 
     struct clap_ostream_t
@@ -197,30 +203,57 @@ namespace
         std::size_t offset = 0;
     };
 
+    struct FlattenedChannelRef
+    {
+        std::size_t port = 0;
+        std::size_t channel = 0;
+    };
+
     struct LiveAudioStorage
     {
-        std::vector<std::vector<float>> samples;
-        std::vector<float*> channelPointers;
-        clap_audio_buffer_t buffer {};
+        std::vector<std::vector<std::vector<float>>> samples;
+        std::vector<std::vector<float*>> channelPointers;
+        std::vector<clap_audio_buffer_t> buffers;
+        std::vector<FlattenedChannelRef> flattenedChannels;
 
-        void build(int channelCount, int frames)
+        void build(const std::vector<std::uint32_t>& channelCounts, int frames)
         {
-            const auto channels = std::max(1, std::min(channelCount, 32));
             const auto frameCount = std::max(1, frames);
-            samples.assign(static_cast<std::size_t>(channels), {});
-            channelPointers.assign(static_cast<std::size_t>(channels), nullptr);
+            samples.clear();
+            channelPointers.clear();
+            buffers.clear();
+            flattenedChannels.clear();
+            samples.resize(channelCounts.size());
+            channelPointers.resize(channelCounts.size());
+            buffers.resize(channelCounts.size());
 
-            for (int channel = 0; channel < channels; ++channel)
+            for (std::size_t port = 0; port < channelCounts.size(); ++port)
             {
-                samples[static_cast<std::size_t>(channel)].assign(static_cast<std::size_t>(frameCount), 0.0f);
-                channelPointers[static_cast<std::size_t>(channel)] = samples[static_cast<std::size_t>(channel)].data();
-            }
+                const auto channels = std::max<std::uint32_t>(1, std::min<std::uint32_t>(channelCounts[port], 32));
+                samples[port].resize(channels);
+                channelPointers[port].resize(channels, nullptr);
 
-            buffer.data32 = channelPointers.empty() ? nullptr : channelPointers.data();
-            buffer.data64 = nullptr;
-            buffer.channel_count = static_cast<std::uint32_t>(channels);
-            buffer.latency = 0;
-            buffer.constant_mask = 0;
+                for (std::uint32_t channel = 0; channel < channels; ++channel)
+                {
+                    samples[port][channel].assign(static_cast<std::size_t>(frameCount), 0.0f);
+                    channelPointers[port][channel] = samples[port][channel].data();
+                    flattenedChannels.push_back({ port, channel });
+                }
+
+                buffers[port].data32 = channelPointers[port].empty() ? nullptr : channelPointers[port].data();
+                buffers[port].data64 = nullptr;
+                buffers[port].channel_count = channels;
+                buffers[port].latency = 0;
+                buffers[port].constant_mask = 0;
+            }
+        }
+
+        int totalChannels() const
+        {
+            int total = 0;
+            for (const auto& port : samples)
+                total += static_cast<int>(port.size());
+            return total;
         }
     };
 
@@ -425,26 +458,45 @@ namespace
         return true;
     }
 
-    int firstAudioPortChannelCount(const clap_plugin_t* plugin, bool isInput, int fallbackChannels, bool& extensionAvailable)
+    std::vector<std::uint32_t> collectAudioPortChannels(const clap_plugin_t* plugin,
+                                                        const clap_plugin_audio_ports_t* ports,
+                                                        bool isInput)
     {
-        const auto safeFallback = std::max(1, std::min(fallbackChannels, 32));
-        if (plugin == nullptr || plugin->get_extension == nullptr)
-            return safeFallback;
+        std::vector<std::uint32_t> result;
+        if (plugin == nullptr || ports == nullptr || ports->count == nullptr || ports->get == nullptr)
+            return result;
 
-        const auto* ports = static_cast<const clap_plugin_audio_ports_t*>(plugin->get_extension(plugin, clapAudioPortsExtensionId));
-        extensionAvailable = ports != nullptr;
-        if (ports == nullptr || ports->count == nullptr || ports->get == nullptr)
-            return safeFallback;
+        constexpr std::uint32_t maxPorts = 16;
+        const auto count = std::min(ports->count(plugin, isInput), maxPorts);
+        result.reserve(count);
+        for (std::uint32_t port = 0; port < count; ++port)
+        {
+            clap_audio_port_info_t info {};
+            if (ports->get(plugin, port, isInput, &info) && info.channel_count > 0)
+                result.push_back(std::max<std::uint32_t>(1, std::min<std::uint32_t>(info.channel_count, 32)));
+        }
+        return result;
+    }
 
-        const auto count = ports->count(plugin, isInput);
-        if (count == 0)
-            return isInput ? 0 : safeFallback;
+    void copyPlanarToStorage(const float* const* inputChannelData,
+                             int suppliedInputChannelCount,
+                             LiveAudioStorage& storage,
+                             int frames)
+    {
+        const auto& refs = storage.flattenedChannels;
+        for (std::size_t flattenedChannel = 0; flattenedChannel < refs.size(); ++flattenedChannel)
+        {
+            const auto& ref = refs[flattenedChannel];
+            auto& destination = storage.samples[ref.port][ref.channel];
+            const float* source = nullptr;
+            if (inputChannelData != nullptr && suppliedInputChannelCount > 0)
+                source = inputChannelData[std::min<int>(static_cast<int>(flattenedChannel), suppliedInputChannelCount - 1)];
 
-        clap_audio_port_info_t info {};
-        if (!ports->get(plugin, 0, isInput, &info) || info.channel_count == 0)
-            return safeFallback;
-
-        return std::max(1, std::min(static_cast<int>(info.channel_count), 32));
+            if (source != nullptr)
+                std::copy_n(source, frames, destination.begin());
+            else
+                std::fill_n(destination.begin(), frames, 0.0f);
+        }
     }
 
     void copyInterleavedToStorage(const std::vector<float>& interleaved,
@@ -452,41 +504,86 @@ namespace
                                   LiveAudioStorage& storage,
                                   int frames)
     {
-        const auto storageChannels = static_cast<int>(storage.samples.size());
+        const auto& refs = storage.flattenedChannels;
         const auto sourceChannels = std::max(1, inputChannels);
-        for (int frame = 0; frame < frames; ++frame)
+        for (std::size_t flattenedChannel = 0; flattenedChannel < refs.size(); ++flattenedChannel)
         {
-            for (int channel = 0; channel < storageChannels; ++channel)
+            const auto& ref = refs[flattenedChannel];
+            auto& destination = storage.samples[ref.port][ref.channel];
+            const int sourceChannel = std::min<int>(static_cast<int>(flattenedChannel), sourceChannels - 1);
+            for (int frame = 0; frame < frames; ++frame)
             {
-                float sample = 0.0f;
-                if (channel < sourceChannels)
-                {
-                    const auto idx = static_cast<std::size_t>(frame * sourceChannels + channel);
-                    if (idx < interleaved.size())
-                        sample = interleaved[idx];
-                }
-                storage.samples[static_cast<std::size_t>(channel)][static_cast<std::size_t>(frame)] = sample;
+                const auto index = static_cast<std::size_t>(frame * sourceChannels + sourceChannel);
+                destination[static_cast<std::size_t>(frame)] = index < interleaved.size() ? interleaved[index] : 0.0f;
             }
         }
+    }
+
+    void clearStorage(LiveAudioStorage& storage, int frames)
+    {
+        for (auto& port : storage.samples)
+            for (auto& channel : port)
+                std::fill_n(channel.begin(), frames, 0.0f);
     }
 
     void primeOutputsFromInputs(const LiveAudioStorage& inputStorage,
                                 LiveAudioStorage& outputStorage,
                                 int frames)
     {
-        const auto channels = std::min(inputStorage.samples.size(), outputStorage.samples.size());
-        for (std::size_t channel = 0; channel < channels; ++channel)
+        const auto& inputRefs = inputStorage.flattenedChannels;
+        const auto& outputRefs = outputStorage.flattenedChannels;
+        if (inputRefs.empty() || outputRefs.empty())
+            return;
+
+        for (std::size_t flattenedChannel = 0; flattenedChannel < outputRefs.size(); ++flattenedChannel)
+        {
+            const auto& sourceRef = inputRefs[std::min(flattenedChannel, inputRefs.size() - 1)];
+            const auto& outputRef = outputRefs[flattenedChannel];
+            const auto& source = inputStorage.samples[sourceRef.port][sourceRef.channel];
+            auto& destination = outputStorage.samples[outputRef.port][outputRef.channel];
+            std::copy_n(source.begin(), frames, destination.begin());
+        }
+    }
+
+    void copyStorageToPlanar(const LiveAudioStorage& storage,
+                             float* const* outputChannelData,
+                             int suppliedOutputChannelCount,
+                             int frames)
+    {
+        const auto& refs = storage.flattenedChannels;
+        if (refs.empty())
+            return;
+
+        for (int channel = 0; channel < suppliedOutputChannelCount; ++channel)
+        {
+            auto* destination = outputChannelData[channel];
+            if (destination == nullptr)
+                continue;
+
+            const auto& ref = refs[std::min<std::size_t>(static_cast<std::size_t>(channel), refs.size() - 1)];
+            const auto& source = storage.samples[ref.port][ref.channel];
             for (int frame = 0; frame < frames; ++frame)
-                outputStorage.samples[channel][static_cast<std::size_t>(frame)] = inputStorage.samples[channel][static_cast<std::size_t>(frame)];
+            {
+                const auto sample = source[static_cast<std::size_t>(frame)];
+                destination[frame] = std::isfinite(sample) ? sample : 0.0f;
+            }
+        }
     }
 
     std::vector<float> storageToInterleaved(const LiveAudioStorage& storage, int frames)
     {
-        const auto channels = static_cast<int>(storage.samples.size());
+        const auto& refs = storage.flattenedChannels;
+        const auto channels = static_cast<int>(refs.size());
         std::vector<float> interleaved(static_cast<std::size_t>(std::max(0, frames) * std::max(0, channels)), 0.0f);
         for (int frame = 0; frame < frames; ++frame)
+        {
             for (int channel = 0; channel < channels; ++channel)
-                interleaved[static_cast<std::size_t>(frame * channels + channel)] = storage.samples[static_cast<std::size_t>(channel)][static_cast<std::size_t>(frame)];
+            {
+                const auto& ref = refs[static_cast<std::size_t>(channel)];
+                const auto sample = storage.samples[ref.port][ref.channel][static_cast<std::size_t>(frame)];
+                interleaved[static_cast<std::size_t>(frame * channels + channel)] = std::isfinite(sample) ? sample : 0.0f;
+            }
+        }
         return interleaved;
     }
 }
@@ -505,6 +602,7 @@ namespace mw::clap
             close();
             config = configIn;
             infoState = {};
+            steadyFramePosition = 0;
             infoState.pluginPath = config.pluginPath;
             infoState.pluginName = config.pluginName;
             infoState.pluginUid = config.pluginUid;
@@ -607,16 +705,6 @@ namespace mw::clap
                 infoState.stateRestored = true;
             }
 
-            bool audioPortsAvailable = false;
-            inputChannelCount = firstAudioPortChannelCount(plugin, true, fallbackChannels, audioPortsAvailable);
-            outputChannelCount = firstAudioPortChannelCount(plugin, false, fallbackChannels, audioPortsAvailable);
-            infoState.audioPortsAvailable = audioPortsAvailable;
-            infoState.inputChannelCount = inputChannelCount;
-            infoState.outputChannelCount = outputChannelCount;
-
-            if (outputChannelCount <= 0)
-                return fail(error, "CLAP live effect did not expose a usable audio output port.");
-
             if (plugin->activate == nullptr || plugin->deactivate == nullptr)
                 return fail(error, "CLAP live effect instance did not expose activate()/deactivate().");
             if (plugin->start_processing == nullptr || plugin->stop_processing == nullptr || plugin->process == nullptr)
@@ -625,25 +713,66 @@ namespace mw::clap
                 return fail(error, "CLAP live effect activate() returned false.");
             activated = true;
 
+            if (plugin->get_extension != nullptr)
+            {
+                const auto* latency = static_cast<const clap_plugin_latency_t*>(
+                    plugin->get_extension(plugin, clapLatencyExtensionId));
+                if (latency != nullptr && latency->get != nullptr)
+                {
+                    infoState.latencySamples = static_cast<int>(std::min<std::uint32_t>(
+                        latency->get(plugin),
+                        static_cast<std::uint32_t>(std::numeric_limits<int>::max())));
+                }
+            }
+
+            const auto* audioPorts = plugin->get_extension == nullptr
+                ? nullptr
+                : static_cast<const clap_plugin_audio_ports_t*>(plugin->get_extension(plugin, clapAudioPortsExtensionId));
+            const bool audioPortsAvailable = audioPorts != nullptr && audioPorts->count != nullptr && audioPorts->get != nullptr;
+            inputPortChannels = audioPortsAvailable ? collectAudioPortChannels(plugin, audioPorts, true) : std::vector<std::uint32_t>{};
+            outputPortChannels = audioPortsAvailable ? collectAudioPortChannels(plugin, audioPorts, false) : std::vector<std::uint32_t>{};
+            if (!audioPortsAvailable)
+            {
+                inputPortChannels = { static_cast<std::uint32_t>(fallbackChannels) };
+                outputPortChannels = { static_cast<std::uint32_t>(fallbackChannels) };
+            }
+
+            inputChannelCount = 0;
+            for (const auto channels : inputPortChannels)
+                inputChannelCount += static_cast<int>(channels);
+            outputChannelCount = 0;
+            for (const auto channels : outputPortChannels)
+                outputChannelCount += static_cast<int>(channels);
+
+            infoState.audioPortsAvailable = audioPortsAvailable;
+            infoState.inputChannelCount = inputChannelCount;
+            infoState.outputChannelCount = outputChannelCount;
+
+            if (outputPortChannels.empty() || outputChannelCount <= 0)
+                return fail(error, "CLAP live effect did not expose a usable audio output port.");
+
             if (!plugin->start_processing(plugin))
                 return fail(error, "CLAP live effect start_processing() returned false.");
             startedProcessing = true;
             infoState.startedProcessing = true;
             infoState.open = true;
 
-            if (inputChannelCount > 0)
-                realtimeInputStorage.build(inputChannelCount, infoState.blockSize);
-            realtimeOutputStorage.build(std::max(1, outputChannelCount), infoState.blockSize);
+            if (!inputPortChannels.empty())
+                realtimeInputStorage.build(inputPortChannels, infoState.blockSize);
+            realtimeOutputStorage.build(outputPortChannels, infoState.blockSize);
             realtimeStorageReady = true;
 
             std::ostringstream message;
             message << "CLAP live effect instance opened and started for "
                     << (config.pluginName.empty() ? safeString(selectedDesc->name) : config.pluginName)
                     << " at " << infoState.sampleRate << " Hz, block " << infoState.blockSize
-                    << ", input channels " << inputChannelCount
-                    << ", output channels " << outputChannelCount
+                    << ", input ports " << inputPortChannels.size()
+                    << " / channels " << inputChannelCount
+                    << ", output ports " << outputPortChannels.size()
+                    << " / channels " << outputChannelCount
                     << ", state restored: " << (infoState.stateRestored ? "yes" : "no")
                     << ", audio-ports: " << (infoState.audioPortsAvailable ? "yes" : "no")
+                    << ", latency samples: " << infoState.latencySamples
                     << ", host process request: " << (hostState.processRequested ? "yes" : "no")
                     << ".";
             infoState.message = message.str();
@@ -668,28 +797,14 @@ namespace mw::clap
 
             if (pluginInputChannels > 0)
             {
-                if (static_cast<int>(realtimeInputStorage.samples.size()) < pluginInputChannels)
+                if (realtimeInputStorage.totalChannels() < pluginInputChannels)
                     return result;
-
-                for (int channel = 0; channel < pluginInputChannels; ++channel)
-                {
-                    auto& destination = realtimeInputStorage.samples[static_cast<std::size_t>(channel)];
-                    const float* source = nullptr;
-                    if (inputChannelData != nullptr && suppliedInputChannelCount > 0)
-                        source = inputChannelData[std::min(channel, suppliedInputChannelCount - 1)];
-
-                    if (source != nullptr)
-                        std::copy_n(source, frames, destination.begin());
-                    else
-                        std::fill_n(destination.begin(), frames, 0.0f);
-                }
+                copyPlanarToStorage(inputChannelData, suppliedInputChannelCount, realtimeInputStorage, frames);
             }
 
-            if (static_cast<int>(realtimeOutputStorage.samples.size()) < pluginOutputChannels)
+            if (realtimeOutputStorage.totalChannels() < pluginOutputChannels)
                 return result;
-
-            for (int channel = 0; channel < pluginOutputChannels; ++channel)
-                std::fill_n(realtimeOutputStorage.samples[static_cast<std::size_t>(channel)].begin(), frames, 0.0f);
+            clearStorage(realtimeOutputStorage, frames);
 
             if (pluginInputChannels > 0)
                 primeOutputsFromInputs(realtimeInputStorage, realtimeOutputStorage, frames);
@@ -704,11 +819,12 @@ namespace mw::clap
             outputEvents.try_push = outputEventsTryPush;
 
             clap_process_t process {};
+            process.steady_time = steadyFramePosition;
             process.frames_count = static_cast<std::uint32_t>(frames);
-            process.audio_inputs = pluginInputChannels > 0 ? &realtimeInputStorage.buffer : nullptr;
-            process.audio_inputs_count = pluginInputChannels > 0 ? 1u : 0u;
-            process.audio_outputs = &realtimeOutputStorage.buffer;
-            process.audio_outputs_count = 1;
+            process.audio_inputs = pluginInputChannels > 0 && !realtimeInputStorage.buffers.empty() ? realtimeInputStorage.buffers.data() : nullptr;
+            process.audio_inputs_count = pluginInputChannels > 0 ? static_cast<std::uint32_t>(realtimeInputStorage.buffers.size()) : 0u;
+            process.audio_outputs = realtimeOutputStorage.buffers.data();
+            process.audio_outputs_count = static_cast<std::uint32_t>(realtimeOutputStorage.buffers.size());
             process.in_events = &inputEvents;
             process.out_events = &outputEvents;
 
@@ -725,26 +841,15 @@ namespace mw::clap
             result.processStatus = status;
             result.outputChannelCount = pluginOutputChannels;
             result.success = status != clapProcessError;
+            if (result.success)
+                steadyFramePosition += static_cast<std::int64_t>(frames);
             ++infoState.processedBlocks;
             infoState.lastProcessStatus = status;
 
             if (!result.success)
                 return result;
 
-            for (int channel = 0; channel < suppliedOutputChannelCount; ++channel)
-            {
-                auto* destination = outputChannelData[channel];
-                if (destination == nullptr)
-                    continue;
-
-                const auto sourceChannel = std::min(channel, pluginOutputChannels - 1);
-                const auto& source = realtimeOutputStorage.samples[static_cast<std::size_t>(sourceChannel)];
-                for (int frame = 0; frame < frames; ++frame)
-                {
-                    const auto sample = source[static_cast<std::size_t>(frame)];
-                    destination[frame] = std::isfinite(sample) ? sample : 0.0f;
-                }
-            }
+            copyStorageToPlanar(realtimeOutputStorage, outputChannelData, suppliedOutputChannelCount, frames);
 
             return result;
         }
@@ -765,12 +870,13 @@ namespace mw::clap
             LiveAudioStorage inputStorage;
             if (storageInputChannels > 0)
             {
-                inputStorage.build(storageInputChannels, frames);
+                inputStorage.build(inputPortChannels, frames);
                 copyInterleavedToStorage(request.interleavedInputAudio, inputChannels, inputStorage, frames);
             }
 
             LiveAudioStorage outputStorage;
-            outputStorage.build(std::max(1, outputChannelCount), frames);
+            outputStorage.build(outputPortChannels, frames);
+            clearStorage(outputStorage, frames);
             if (storageInputChannels > 0)
                 primeOutputsFromInputs(inputStorage, outputStorage, frames);
 
@@ -784,11 +890,12 @@ namespace mw::clap
             outputEvents.try_push = outputEventsTryPush;
 
             clap_process_t process {};
+            process.steady_time = steadyFramePosition;
             process.frames_count = static_cast<std::uint32_t>(frames);
-            process.audio_inputs = storageInputChannels > 0 ? &inputStorage.buffer : nullptr;
-            process.audio_inputs_count = storageInputChannels > 0 ? 1u : 0u;
-            process.audio_outputs = &outputStorage.buffer;
-            process.audio_outputs_count = 1;
+            process.audio_inputs = storageInputChannels > 0 && !inputStorage.buffers.empty() ? inputStorage.buffers.data() : nullptr;
+            process.audio_inputs_count = storageInputChannels > 0 ? static_cast<std::uint32_t>(inputStorage.buffers.size()) : 0u;
+            process.audio_outputs = outputStorage.buffers.data();
+            process.audio_outputs_count = static_cast<std::uint32_t>(outputStorage.buffers.size());
             process.in_events = &inputEvents;
             process.out_events = &outputEvents;
 
@@ -796,6 +903,8 @@ namespace mw::clap
             result.processStatus = status;
             result.processStatusText = processStatusToString(status);
             result.success = status != clapProcessError;
+            if (result.success)
+                steadyFramePosition += static_cast<std::int64_t>(frames);
             result.inputChannelCount = inputChannels;
             result.outputChannelCount = outputChannelCount;
             result.outputFrameCount = frames;
@@ -843,7 +952,10 @@ namespace mw::clap
             library.reset();
             realtimeInputStorage = {};
             realtimeOutputStorage = {};
+            inputPortChannels.clear();
+            outputPortChannels.clear();
             realtimeStorageReady = false;
+            steadyFramePosition = 0;
             pluginInitialized = false;
             infoState.open = false;
             infoState.startedProcessing = false;
@@ -878,9 +990,12 @@ namespace mw::clap
         ClapHostRequestState hostState;
         int inputChannelCount = 2;
         int outputChannelCount = 2;
+        std::vector<std::uint32_t> inputPortChannels;
+        std::vector<std::uint32_t> outputPortChannels;
         LiveAudioStorage realtimeInputStorage;
         LiveAudioStorage realtimeOutputStorage;
         bool realtimeStorageReady = false;
+        std::int64_t steadyFramePosition = 0;
         bool entryInitialized = false;
         bool pluginInitialized = false;
         bool activated = false;
@@ -907,6 +1022,37 @@ namespace mw::clap
     bool ClapLiveEffectSession::isOpen() const
     {
         return impl->isOpen();
+    }
+
+    bool ClapLiveEffectSession::prepareForPlayback(int sampleRate,
+                                                      int blockSize,
+                                                      int channelCount,
+                                                      std::string& errorMessage)
+    {
+        if (impl == nullptr || !impl->isOpen())
+        {
+            errorMessage = "CLAP live effect session is not open.";
+            return false;
+        }
+
+        const auto current = impl->info();
+        const auto safeSampleRate = std::clamp(sampleRate, 8000, 384000);
+        const auto safeBlockSize = std::clamp(blockSize, 16, 8192);
+        const auto safeChannels = std::clamp(channelCount, 1, 32);
+        if (current.sampleRate == safeSampleRate
+            && current.blockSize == safeBlockSize
+            && impl->config.channelCount == safeChannels
+            && current.outputChannelCount > 0)
+        {
+            errorMessage.clear();
+            return true;
+        }
+
+        auto config = impl->config;
+        config.sampleRate = safeSampleRate;
+        config.blockSize = safeBlockSize;
+        config.channelCount = safeChannels;
+        return impl->open(config, errorMessage);
     }
 
     ClapLiveEffectSessionInfo ClapLiveEffectSession::info() const

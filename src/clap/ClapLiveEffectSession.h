@@ -29,6 +29,7 @@ namespace mw::clap
         int inputChannelCount = 0;
         int outputChannelCount = 0;
         int blockSize = 0;
+        int latencySamples = 0;
         bool stateRestored = false;
         bool audioPortsAvailable = false;
         bool startedProcessing = false;
@@ -77,6 +78,7 @@ namespace mw::clap
         bool open(const ClapLiveEffectSessionConfig& config, std::string& errorMessage);
         void close();
         bool isOpen() const;
+        bool prepareForPlayback(int sampleRate, int blockSize, int channelCount, std::string& errorMessage);
         ClapLiveEffectSessionInfo info() const;
         ClapLiveEffectProcessResult processBlock(const ClapLiveEffectProcessRequest& request);
         ClapLiveEffectRealtimeProcessResult processPlanarBlock(const float* const* inputChannelData,

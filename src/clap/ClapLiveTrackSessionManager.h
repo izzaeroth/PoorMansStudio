@@ -34,6 +34,7 @@ namespace mw::clap
         bool success = false;
         int preparedTrackCount = 0;
         int preparedEffectCount = 0;
+        int rejectedLatencySamples = 0;
         std::string message;
     };
 

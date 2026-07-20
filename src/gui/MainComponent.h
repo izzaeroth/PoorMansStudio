@@ -21,12 +21,17 @@
 #include "audio/RenderJob.h"
 #include "audio/AudioClipRecorder.h"
 #include "vst/VstPluginTypes.h"
+#include "vst/VstLiveInstrumentSession.h"
+#include "vst/VstLiveEffectSession.h"
+#include "vst/VstLiveDirectPreviewEngine.h"
+#include "vst/VstLiveTrackSessionManager.h"
 #include "clap/ClapPluginTypes.h"
 #include "clap/ClapLiveInstrumentSession.h"
 #include "clap/ClapLiveEffectSession.h"
 #include "clap/ClapLiveDirectPreviewEngine.h"
 #include "clap/ClapLiveTrackSessionManager.h"
 #include "playback/PlaybackTransportCoordinator.h"
+#include "playback/MixedLiveProjectPreviewEngine.h"
 #include "gui/AudioClipEditorComponent.h"
 #include "gui/PianoRollComponent.h"
 
@@ -495,7 +500,7 @@ namespace mw::gui
         void cancelAudioRecorderTestAndCleanup();
         void setAudioRecorderMicGainDb(double gainDb);
         void setAudioRecorderTrackLiveEffectEnabled(bool enabled);
-        mw::audio::AudioClipRecorderLiveEffectOptions buildAudioRecorderLiveEffectOptions(int targetTrackIndex, int sourceTrackIndex) const;
+        mw::audio::AudioClipRecorderLiveEffectOptions buildAudioRecorderLiveEffectOptions(int targetTrackIndex, int sourceTrackIndex);
         int getAudioRecorderTargetTrackIndex() const;
         bool trackIsBlankForAudioClipTarget(int trackIndex) const;
         bool trackHasUsableLiveEffectForAudioRecorder(int trackIndex) const;
@@ -597,24 +602,34 @@ namespace mw::gui
         void renderVstInstrumentTestNoteForTrack(int trackIndex, juce::String liveEditorStateOverride = {});
         void renderVstEffectTestSampleForTrack(int trackIndex, int effectSlotIndex);
         void renderClapInstrumentTestNoteForTrack(int trackIndex, juce::String liveEditorStateOverride = {});
+        bool startSelectedTrackVstDirectAudition(int trackIndex);
+        bool tryStartSelectedTrackVstMainTransportPreview(int trackIndex);
+        void stopVstInstrumentLiveAudition(bool deleteTempFile = true);
+        void beginVstDirectPreviewCompletionPolling();
+        void cancelVstDirectPreviewCompletionPolling();
+        void scheduleVstDirectPreviewCompletionPoll(int generation);
+        void handleVstDirectPreviewCompletionPoll(int generation);
         void armSelectedTrackClapLiveEngineSession();
         void disarmClapLiveEngineSession(bool logIfInactive = true);
         bool startSelectedTrackClapDirectAudition(int trackIndex);
         bool tryStartSelectedTrackClapMainTransportPreview(int trackIndex);
-        bool tryStartMultiTrackClapProjectPreview();
-        bool startPreparedClapProjectPreview(const std::vector<int>& liveTrackIndices,
-                                             std::vector<mw::clap::ClapLiveDirectPreviewAudioSourceRequest> audioSources,
-                                             std::uint64_t transportGeneration,
-                                             bool hybridMode);
+        bool tryStartMixedLiveProjectPreview();
+        bool startPreparedMixedLiveProjectPreview(const std::vector<int>& liveClapTrackIndices,
+                                                  const std::vector<int>& liveVstTrackIndices,
+                                                  std::vector<mw::clap::ClapLiveDirectPreviewAudioSourceRequest> audioSources,
+                                                  std::uint64_t transportGeneration,
+                                                  bool hybridMode);
         std::optional<mw::clap::ClapLiveDirectPreviewAudioSourceRequest> loadClapPreviewAudioSource(
             const std::filesystem::path& wavPath,
             const juce::String& displayName,
             double sourceStartSeconds) const;
-        void startRenderedFallbackForHybridClapPreview(std::vector<int> liveTrackIndices,
-                                                       mw::audio::RenderJob fallbackJob,
-                                                       std::uint64_t transportGeneration,
-                                                       mw::core::StableId projectId);
-        void closeClapProjectPreviewTrackSessions();
+        void startRenderedFallbackForMixedLivePreview(std::vector<int> liveClapTrackIndices,
+                                                        std::vector<int> liveVstTrackIndices,
+                                                        mw::audio::RenderJob fallbackJob,
+                                                        std::uint64_t transportGeneration,
+                                                        mw::core::StableId projectId);
+        void closeMixedLiveProjectPreviewTrackSessions();
+        void stopLivePlaybackBeforeProjectMutation();
         void stopClapInstrumentLiveAudition(bool deleteTempFile = true);
         void beginClapDirectPreviewCompletionPolling();
         void cancelClapDirectPreviewCompletionPolling();
@@ -1170,8 +1185,27 @@ namespace mw::gui
 
         std::vector<std::unique_ptr<ClapLiveProjectPreviewEffectSession>> clapLiveSelectedTrackPreviewEffectSessions;
         mw::clap::ClapLiveTrackSessionManager clapLiveProjectTrackSessionManager;
+        mw::vst::VstLiveTrackSessionManager vstLiveProjectTrackSessionManager;
+
+        struct VstLiveSelectedTrackEffectSession
+        {
+            int slotIndex = -1;
+            juce::String displayName;
+            std::unique_ptr<mw::vst::VstLiveEffectSession> session;
+            std::mutex processMutex;
+        };
+
+        std::unique_ptr<mw::vst::VstLiveInstrumentSession> vstLiveInstrumentSession;
+        std::mutex vstLiveSessionProcessMutex;
+        std::vector<std::unique_ptr<VstLiveSelectedTrackEffectSession>> vstLiveSelectedTrackEffectSessions;
+        mw::vst::VstLiveDirectPreviewEngine vstLiveDirectPreviewEngine;
+        std::uint64_t vstLiveTransportGeneration = 0;
+        std::int64_t vstLiveTransportStartSample = 0;
+        bool vstLiveDirectPreviewCompletionPollActive = false;
+        int vstLiveDirectPreviewCompletionPollGeneration = 0;
 
         mw::clap::ClapLiveDirectPreviewEngine clapLiveDirectPreviewEngine;
+        mw::playback::MixedLiveProjectPreviewEngine mixedLiveProjectPreviewEngine;
         mw::playback::PlaybackTransportCoordinator playbackTransportCoordinator;
         std::uint64_t clapLiveTransportGeneration = 0;
         std::int64_t clapLiveTransportStartSample = 0;
@@ -1180,6 +1214,8 @@ namespace mw::gui
         int clapLiveDirectPreviewCompletionPollGeneration = 0;
         double audioRecorderMicGainDb = 0.0;
         bool audioRecorderTrackLiveEffectEnabled = false;
+        mw::core::StableId audioRecorderTrackLiveEffectTargetId = 0;
+        float audioRecorderTestPlaybackGain = 1.0f;
         std::optional<std::filesystem::path> audioRecordingSessionFolderPath;
         std::filesystem::path selectedAlbumArtPath;
         std::filesystem::path activeRecordingTempWavPath;

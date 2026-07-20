@@ -27,6 +27,7 @@ namespace
     constexpr const char* clapPluginFactoryId = "clap.plugin-factory";
     constexpr const char* clapStateExtensionId = "clap.state";
     constexpr const char* clapAudioPortsExtensionId = "clap.audio-ports";
+    constexpr const char* clapLatencyExtensionId = "clap.latency";
     constexpr const char* clapNotePortsExtensionId = "clap.note-ports";
     constexpr std::size_t clapNameSize = 256;
 
@@ -94,6 +95,11 @@ namespace
     {
         std::uint32_t (*count)(const clap_plugin_t* plugin, bool is_input);
         bool (*get)(const clap_plugin_t* plugin, std::uint32_t index, bool is_input, clap_audio_port_info_t* info);
+    };
+
+    struct clap_plugin_latency_t
+    {
+        std::uint32_t (*get)(const clap_plugin_t* plugin);
     };
 
     struct clap_host_t;
@@ -674,6 +680,7 @@ namespace mw::clap
             error.clear();
             config = configIn;
             infoState = {};
+            steadyFramePosition = 0;
             infoState.pluginPath = config.pluginPath;
             infoState.pluginName = config.pluginName;
             infoState.pluginUid = config.pluginUid;
@@ -810,6 +817,18 @@ namespace mw::clap
                 return fail(error, "CLAP live instrument activate() returned false.");
             activated = true;
 
+            if (plugin->get_extension != nullptr)
+            {
+                const auto* latency = static_cast<const clap_plugin_latency_t*>(
+                    plugin->get_extension(plugin, clapLatencyExtensionId));
+                if (latency != nullptr && latency->get != nullptr)
+                {
+                    infoState.latencySamples = static_cast<int>(std::min<std::uint32_t>(
+                        latency->get(plugin),
+                        static_cast<std::uint32_t>(std::numeric_limits<int>::max())));
+                }
+            }
+
             if (!plugin->start_processing(plugin))
                 return fail(error, "CLAP live instrument start_processing() returned false.");
             startedProcessing = true;
@@ -824,6 +843,7 @@ namespace mw::clap
                     << ", state restored: " << (infoState.stateRestored ? "yes" : "no")
                     << ", audio-ports: " << (infoState.audioPortsAvailable ? "yes" : "no")
                     << ", output channels: " << outputChannelCount
+                    << ", latency samples: " << infoState.latencySamples
                     << ", note dialect: " << noteDialectSelection.summary
                     << ", host process request: " << (hostState.processRequested ? "yes" : "no")
                     << ".";
@@ -870,6 +890,7 @@ namespace mw::clap
             outputStorage.build(outputChannelCount, frames);
 
             clap_process_t process {};
+            process.steady_time = steadyFramePosition;
             process.frames_count = static_cast<std::uint32_t>(frames);
             process.audio_inputs = nullptr;
             process.audio_inputs_count = 0;
@@ -882,6 +903,8 @@ namespace mw::clap
             result.processStatus = status;
             result.processStatusText = processStatusToString(status);
             result.success = status != clapProcessError;
+            if (result.success)
+                steadyFramePosition += static_cast<std::int64_t>(frames);
             result.eventsSubmitted = static_cast<int>(eventBlock.events.size());
             result.outputChannelCount = outputChannelCount;
             result.outputFrameCount = frames;
@@ -938,6 +961,7 @@ namespace mw::clap
                 entry = nullptr;
             }
             library.reset();
+            steadyFramePosition = 0;
             pluginInitialized = false;
             infoState.open = false;
             infoState.startedProcessing = false;
@@ -972,6 +996,7 @@ namespace mw::clap
         ClapHostRequestState hostState;
         NoteDialectSelection noteDialectSelection;
         int outputChannelCount = 2;
+        std::int64_t steadyFramePosition = 0;
         bool entryInitialized = false;
         bool pluginInitialized = false;
         bool activated = false;
@@ -998,6 +1023,36 @@ namespace mw::clap
     bool ClapLiveInstrumentSession::isOpen() const
     {
         return impl->isOpen();
+    }
+
+    bool ClapLiveInstrumentSession::prepareForPlayback(int sampleRate,
+                                                          int blockSize,
+                                                          int channelCount,
+                                                          std::string& errorMessage)
+    {
+        if (impl == nullptr || !impl->isOpen())
+        {
+            errorMessage = "CLAP live instrument session is not open.";
+            return false;
+        }
+
+        const auto current = impl->info();
+        const auto safeSampleRate = std::clamp(sampleRate, 8000, 384000);
+        const auto safeBlockSize = std::clamp(blockSize, 16, 8192);
+        const auto safeChannels = std::clamp(channelCount, 1, 32);
+        if (current.sampleRate == safeSampleRate
+            && current.blockSize == safeBlockSize
+            && current.channelCount == safeChannels)
+        {
+            errorMessage.clear();
+            return true;
+        }
+
+        auto config = impl->config;
+        config.sampleRate = safeSampleRate;
+        config.blockSize = safeBlockSize;
+        config.channelCount = safeChannels;
+        return impl->open(config, errorMessage);
     }
 
     ClapLiveInstrumentSessionInfo ClapLiveInstrumentSession::info() const

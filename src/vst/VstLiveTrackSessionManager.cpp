@@ -1,42 +1,43 @@
-#include "clap/ClapLiveTrackSessionManager.h"
+#include "vst/VstLiveTrackSessionManager.h"
 
 #include <utility>
 
-namespace mw::clap
+namespace mw::vst
 {
-    struct ClapLiveTrackSessionManager::EffectSlot
+    struct VstLiveTrackSessionManager::EffectSlot
     {
         int slotIndex = -1;
         std::string displayName;
-        std::unique_ptr<ClapLiveEffectSession> session;
+        std::unique_ptr<VstLiveEffectSession> session;
         std::mutex processMutex;
     };
 
-    struct ClapLiveTrackSessionManager::TrackSlot
+    struct VstLiveTrackSessionManager::TrackSlot
     {
         mw::core::StableId stableTrackId = 0;
         int trackIndex = -1;
         std::string trackName;
-        std::unique_ptr<ClapLiveInstrumentSession> session;
+        std::unique_ptr<VstLiveInstrumentSession> session;
         std::mutex processMutex;
-        std::vector<ClapLivePlaybackNote> notes;
-        ClapLiveCallbackBridgeConfig bridgeConfig;
+        std::vector<mw::clap::ClapLivePlaybackNote> notes;
+        mw::clap::ClapLiveCallbackBridgeConfig bridgeConfig;
         std::vector<std::unique_ptr<EffectSlot>> effects;
         float outputGain = 1.0f;
     };
 
-    ClapLiveTrackSessionManager::ClapLiveTrackSessionManager() = default;
+    VstLiveTrackSessionManager::VstLiveTrackSessionManager() = default;
 
-    ClapLiveTrackSessionManager::~ClapLiveTrackSessionManager()
+    VstLiveTrackSessionManager::~VstLiveTrackSessionManager()
     {
         close();
     }
 
-    ClapLiveTrackSessionPrepareResult ClapLiveTrackSessionManager::prepare(std::vector<ClapLiveManagedTrackConfig> configs)
+    VstLiveTrackSessionPrepareResult VstLiveTrackSessionManager::prepare(
+        std::vector<VstLiveManagedTrackConfig> configs)
     {
         close();
 
-        ClapLiveTrackSessionPrepareResult result;
+        VstLiveTrackSessionPrepareResult result;
         for (auto& config : configs)
         {
             if (config.stableTrackId == 0 || config.trackIndex < 0 || config.notes.empty())
@@ -49,12 +50,12 @@ namespace mw::clap
             track->notes = std::move(config.notes);
             track->bridgeConfig = std::move(config.bridgeConfig);
             track->outputGain = config.outputGain;
-            track->session = std::make_unique<ClapLiveInstrumentSession>();
+            track->session = std::make_unique<VstLiveInstrumentSession>();
 
             std::string openError;
             if (!track->session->open(config.sessionConfig, openError))
             {
-                result.message = "Failed to open CLAP live instrument for track "
+                result.message = "Failed to open VST3 live instrument for track "
                     + std::to_string(config.trackIndex + 1) + ": " + openError;
                 close();
                 return result;
@@ -64,7 +65,7 @@ namespace mw::clap
             if (instrumentInfo.latencySamples > 0)
             {
                 result.rejectedLatencySamples = instrumentInfo.latencySamples;
-                result.message = "CLAP live instrument on track "
+                result.message = "VST3 live instrument on track "
                     + std::to_string(config.trackIndex + 1)
                     + " reports " + std::to_string(instrumentInfo.latencySamples)
                     + " latency samples; rendered fallback is required for safe project alignment.";
@@ -77,12 +78,12 @@ namespace mw::clap
                 auto effect = std::make_unique<EffectSlot>();
                 effect->slotIndex = effectConfig.slotIndex;
                 effect->displayName = std::move(effectConfig.displayName);
-                effect->session = std::make_unique<ClapLiveEffectSession>();
+                effect->session = std::make_unique<VstLiveEffectSession>();
 
                 std::string effectOpenError;
                 if (!effect->session->open(effectConfig.sessionConfig, effectOpenError))
                 {
-                    result.message = "Failed to open CLAP live effect on track "
+                    result.message = "Failed to open VST3 live effect on track "
                         + std::to_string(config.trackIndex + 1) + ", slot "
                         + std::to_string(effectConfig.slotIndex + 1) + ": " + effectOpenError;
                     close();
@@ -93,7 +94,7 @@ namespace mw::clap
                 if (effectInfo.latencySamples > 0)
                 {
                     result.rejectedLatencySamples = effectInfo.latencySamples;
-                    result.message = "CLAP live effect on track "
+                    result.message = "VST3 live effect on track "
                         + std::to_string(config.trackIndex + 1) + ", slot "
                         + std::to_string(effectConfig.slotIndex + 1)
                         + " reports " + std::to_string(effectInfo.latencySamples)
@@ -112,14 +113,14 @@ namespace mw::clap
 
         result.success = result.preparedTrackCount > 0;
         result.message = result.success
-            ? "Prepared " + std::to_string(result.preparedTrackCount) + " CLAP live track session(s)."
-            : "No CLAP live tracks were eligible for preparation.";
+            ? "Prepared " + std::to_string(result.preparedTrackCount) + " VST3 live track session(s)."
+            : "No VST3 live tracks were eligible for preparation.";
         return result;
     }
 
-    std::vector<ClapLiveDirectPreviewTrackRequest> ClapLiveTrackSessionManager::makeDirectPreviewRequests()
+    std::vector<VstLiveDirectPreviewTrackRequest> VstLiveTrackSessionManager::makeDirectPreviewRequests()
     {
-        std::vector<ClapLiveDirectPreviewTrackRequest> requests;
+        std::vector<VstLiveDirectPreviewTrackRequest> requests;
         requests.reserve(tracks_.size());
 
         for (auto& track : tracks_)
@@ -127,7 +128,7 @@ namespace mw::clap
             if (track == nullptr || track->session == nullptr || !track->session->isOpen())
                 continue;
 
-            ClapLiveDirectPreviewTrackRequest request;
+            VstLiveDirectPreviewTrackRequest request;
             request.stableTrackId = track->stableTrackId;
             request.trackIndex = track->trackIndex;
             request.trackName = track->trackName;
@@ -143,7 +144,7 @@ namespace mw::clap
                 if (effect == nullptr || effect->session == nullptr || !effect->session->isOpen())
                     continue;
 
-                ClapLiveDirectPreviewEffectRequest effectRequest;
+                VstLiveDirectPreviewEffectRequest effectRequest;
                 effectRequest.slotIndex = effect->slotIndex;
                 effectRequest.displayName = effect->displayName;
                 effectRequest.session = effect->session.get();
@@ -157,7 +158,7 @@ namespace mw::clap
         return requests;
     }
 
-    std::vector<mw::core::StableId> ClapLiveTrackSessionManager::stableTrackIds() const
+    std::vector<mw::core::StableId> VstLiveTrackSessionManager::stableTrackIds() const
     {
         std::vector<mw::core::StableId> ids;
         ids.reserve(tracks_.size());
@@ -167,12 +168,12 @@ namespace mw::clap
         return ids;
     }
 
-    int ClapLiveTrackSessionManager::trackCount() const noexcept
+    int VstLiveTrackSessionManager::trackCount() const noexcept
     {
         return static_cast<int>(tracks_.size());
     }
 
-    void ClapLiveTrackSessionManager::close()
+    void VstLiveTrackSessionManager::close()
     {
         for (auto& track : tracks_)
         {

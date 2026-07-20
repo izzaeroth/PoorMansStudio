@@ -24,7 +24,7 @@ Shawn's current local toolchain snapshot:
 Tool	Current local version / note
 FluidSynth	2.5.6
 JUCE	8.0.14
-CMake	4.4.0-rc3
+CMake	4.4.0
 FFmpeg	Latest available Windows build in the workspace
 Visual Studio / MSVC	Visual Studio with x64 MSVC build tools; recent local build logs used MSVC 14.51.36231
 
@@ -71,7 +71,7 @@ Confirm that Desktop development with C++ is checked.
 
 4. Install CMake
 
-Install CMake. Shawn's current local setup uses CMake 4.4.0-rc3.
+Install CMake. Shawn's current local setup uses CMake 4.4.0.
 
 During setup, choose one of these PATH options:
 
@@ -87,9 +87,9 @@ cmake --version
 
 Expected result:
 
-cmake version 4.4.0-rc3
+cmake version 4.4.0
 
-A newer stable CMake may also work, but when comparing build logs, treat 4.4.0-rc3 as the current local reference.
+A newer stable CMake may also work, but when comparing build logs, treat 4.4.0 as the current local reference.
 
 If Windows says cmake is not recognized, close and reopen Command Prompt. If it still fails, reinstall CMake and enable the PATH option.
 
@@ -444,7 +444,7 @@ The continuation handoff file should be provided separately, not inside the sour
 Use this checklist for a fresh machine:
 
 [ ] Install Visual Studio with Desktop development with C++
-[ ] Install CMake 4.4.0-rc3 or compatible and add it to PATH
+[ ] Install CMake 4.4.0 or compatible and add it to PATH
 [ ] Install Git for Windows
 [ ] Download or clone JUCE 8.0.14
 [ ] Download or clone Poor Man’s Studio
