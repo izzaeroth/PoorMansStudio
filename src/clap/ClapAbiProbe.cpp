@@ -11,6 +11,9 @@
 #include <limits>
 #include <string>
 #include <system_error>
+#include <cstring>
+#include <iomanip>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -28,6 +31,12 @@ namespace
     constexpr const char* clapPluginFactoryId = "clap.plugin-factory";
     constexpr const char* clapAudioPortsExtensionId = "clap.audio-ports";
     constexpr const char* clapNotePortsExtensionId = "clap.note-ports";
+    constexpr const char* clapLatencyExtensionId = "clap.latency";
+    constexpr const char* clapTailExtensionId = "clap.tail";
+    constexpr const char* clapParamsExtensionId = "clap.params";
+    constexpr const char* clapStateExtensionId = "clap.state";
+    constexpr const char* clapGuiExtensionId = "clap.gui";
+    constexpr const char* clapThreadCheckExtensionId = "clap.thread-check";
     constexpr std::size_t clapNameSize = 256;
 
     struct clap_version_t
@@ -75,6 +84,7 @@ namespace
     };
 
     using clap_id = std::uint32_t;
+    struct clap_host_t;
 
     struct clap_audio_port_info_t
     {
@@ -104,6 +114,45 @@ namespace
     {
         std::uint32_t (*count)(const clap_plugin_t* plugin, bool is_input);
         bool (*get)(const clap_plugin_t* plugin, std::uint32_t index, bool is_input, clap_note_port_info_t* info);
+    };
+
+    struct clap_plugin_latency_t
+    {
+        std::uint32_t (*get)(const clap_plugin_t* plugin);
+    };
+
+    struct clap_plugin_tail_t
+    {
+        std::uint32_t (*get)(const clap_plugin_t* plugin);
+    };
+
+    struct clap_plugin_params_t
+    {
+        std::uint32_t (*count)(const clap_plugin_t* plugin);
+    };
+
+    struct clap_ostream_t
+    {
+        void* ctx;
+        std::int64_t (*write)(const clap_ostream_t* stream, const void* buffer, std::uint64_t size);
+    };
+
+    struct clap_istream_t
+    {
+        void* ctx;
+        std::int64_t (*read)(const clap_istream_t* stream, void* buffer, std::uint64_t size);
+    };
+
+    struct clap_plugin_state_t
+    {
+        bool (*save)(const clap_plugin_t* plugin, const clap_ostream_t* stream);
+        bool (*load)(const clap_plugin_t* plugin, const clap_istream_t* stream);
+    };
+
+    struct clap_host_thread_check_t
+    {
+        bool (*is_main_thread)(const clap_host_t* host);
+        bool (*is_audio_thread)(const clap_host_t* host);
     };
 
 
@@ -199,14 +248,26 @@ namespace
             }
         }
 
-        double maxAbs() const
+        std::pair<double, int> analyze() const
         {
-            double result = 0.0;
+            double maximum = 0.0;
+            int nonFinite = 0;
             for (const auto& port : samples)
+            {
                 for (const auto& channel : port)
+                {
                     for (const auto sample : channel)
-                        result = std::max(result, static_cast<double>(std::abs(sample)));
-            return result;
+                    {
+                        if (!std::isfinite(sample))
+                        {
+                            ++nonFinite;
+                            continue;
+                        }
+                        maximum = std::max(maximum, static_cast<double>(std::abs(sample)));
+                    }
+                }
+            }
+            return { maximum, nonFinite };
         }
     };
 
@@ -215,6 +276,8 @@ namespace
         bool restartRequested = false;
         bool processRequested = false;
         bool callbackRequested = false;
+        bool audioThreadPhase = false;
+        bool threadCheckRequested = false;
     };
 
     struct clap_host_t
@@ -560,8 +623,147 @@ namespace
         result.notePortsMessage = "CLAP note-ports extension was queried.";
     }
 
-    const void* hostGetExtension(const clap_host_t*, const char*)
+    template <typename Result>
+    void queryCapabilities(const clap_plugin_t* plugin, Result& result, bool queryActiveLatency)
     {
+        if (plugin == nullptr || plugin->get_extension == nullptr)
+            return;
+
+        if (const auto* latency = static_cast<const clap_plugin_latency_t*>(plugin->get_extension(plugin, clapLatencyExtensionId)))
+        {
+            result.latencyExtensionAvailable = true;
+            if (queryActiveLatency && latency->get != nullptr)
+            {
+                result.latencySamples = static_cast<std::int64_t>(latency->get(plugin));
+                result.latencyValueQueried = true;
+            }
+        }
+
+        if (const auto* tail = static_cast<const clap_plugin_tail_t*>(plugin->get_extension(plugin, clapTailExtensionId)))
+        {
+            result.tailExtensionAvailable = true;
+            if (tail->get != nullptr)
+            {
+                const auto tailSamples = tail->get(plugin);
+                result.tailSamples = static_cast<std::int64_t>(tailSamples);
+                result.tailValueQueried = true;
+                result.tailInfinite = tailSamples >= static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max());
+            }
+        }
+
+        if (const auto* params = static_cast<const clap_plugin_params_t*>(plugin->get_extension(plugin, clapParamsExtensionId)))
+        {
+            result.paramsExtensionAvailable = true;
+            if (params->count != nullptr)
+            {
+                result.parameterCount = static_cast<int>(params->count(plugin));
+                result.parameterCountQueried = true;
+            }
+        }
+
+        result.stateExtensionAvailable = plugin->get_extension(plugin, clapStateExtensionId) != nullptr;
+        result.guiExtensionAvailable = plugin->get_extension(plugin, clapGuiExtensionId) != nullptr;
+    }
+
+    std::string fnv1a64(const void* data, std::size_t size)
+    {
+        constexpr std::uint64_t offsetBasis = 14695981039346656037ull;
+        constexpr std::uint64_t prime = 1099511628211ull;
+        auto hash = offsetBasis;
+        const auto* bytes = static_cast<const unsigned char*>(data);
+        for (std::size_t i = 0; i < size; ++i)
+        {
+            hash ^= static_cast<std::uint64_t>(bytes[i]);
+            hash *= prime;
+        }
+        std::ostringstream stream;
+        stream << std::hex << std::setfill('0') << std::setw(16) << hash;
+        return stream.str();
+    }
+
+    struct StateWriteStorage
+    {
+        std::vector<std::uint8_t> bytes;
+    };
+
+    std::int64_t stateWrite(const clap_ostream_t* stream, const void* buffer, std::uint64_t size)
+    {
+        if (stream == nullptr || stream->ctx == nullptr || (buffer == nullptr && size > 0))
+            return -1;
+        if (size == 0)
+            return 0;
+        if (size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())
+            || size > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+            return -1;
+
+        auto* storage = static_cast<StateWriteStorage*>(stream->ctx);
+        const auto* begin = static_cast<const std::uint8_t*>(buffer);
+        try
+        {
+            storage->bytes.insert(storage->bytes.end(), begin, begin + static_cast<std::size_t>(size));
+        }
+        catch (...)
+        {
+            // Never allow an allocation exception to cross the CLAP C callback boundary.
+            return -1;
+        }
+        return static_cast<std::int64_t>(size);
+    }
+
+    struct StateReadStorage
+    {
+        const std::vector<std::uint8_t>* bytes = nullptr;
+        std::size_t offset = 0;
+    };
+
+    std::int64_t stateRead(const clap_istream_t* stream, void* buffer, std::uint64_t size)
+    {
+        if (stream == nullptr || stream->ctx == nullptr || (buffer == nullptr && size > 0))
+            return -1;
+        auto* storage = static_cast<StateReadStorage*>(stream->ctx);
+        if (storage->bytes == nullptr)
+            return -1;
+        const auto remaining = storage->bytes->size() - std::min(storage->offset, storage->bytes->size());
+        const auto requested = size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())
+            ? std::numeric_limits<std::size_t>::max()
+            : static_cast<std::size_t>(size);
+        const auto count = std::min(remaining, requested);
+        if (count > 0)
+            std::memcpy(buffer, storage->bytes->data() + storage->offset, count);
+        storage->offset += count;
+        return static_cast<std::int64_t>(count);
+    }
+
+    bool hostIsMainThread(const clap_host_t* host)
+    {
+        if (host == nullptr)
+            return false;
+        if (auto* state = static_cast<ClapHostRequestState*>(host->host_data))
+        {
+            state->threadCheckRequested = true;
+            return !state->audioThreadPhase;
+        }
+        return false;
+    }
+
+    bool hostIsAudioThread(const clap_host_t* host)
+    {
+        if (host == nullptr)
+            return false;
+        if (auto* state = static_cast<ClapHostRequestState*>(host->host_data))
+        {
+            state->threadCheckRequested = true;
+            return state->audioThreadPhase;
+        }
+        return false;
+    }
+
+    const clap_host_thread_check_t hostThreadCheckExtension { hostIsMainThread, hostIsAudioThread };
+
+    const void* hostGetExtension(const clap_host_t*, const char* extensionId)
+    {
+        if (extensionId != nullptr && std::strcmp(extensionId, clapThreadCheckExtensionId) == 0)
+            return &hostThreadCheckExtension;
         return nullptr;
     }
 
@@ -664,10 +866,12 @@ namespace
 
 namespace mw::clap
 {
-    ClapAbiProbeResult ClapAbiProbe::probePluginPath(const std::filesystem::path& outerPluginPath)
+    ClapAbiProbeResult ClapAbiProbe::probePluginPath(const std::filesystem::path& outerPluginPath,
+                                                       int pluginIndex)
     {
         ClapAbiProbeResult result;
         result.attempted = true;
+        result.selectedIndex = pluginIndex < 0 ? 0 : pluginIndex;
         result.descriptor = ClapPluginScanner::inspectPluginPath(outerPluginPath);
         result.descriptor.metadataOnly = true;
         result.descriptor.abiProbed = false;
@@ -774,10 +978,18 @@ namespace mw::clap
                 return result;
             }
 
-            const auto* desc = factory->get_plugin_descriptor(factory, 0);
+            if (result.selectedIndex >= static_cast<int>(count))
+            {
+                result.message = "Requested CLAP plugin index is outside the bundle's descriptor range.";
+                result.descriptor.status = ClapPluginScanStatus::Unsupported;
+                result.descriptor.statusMessage = result.message;
+                return result;
+            }
+
+            const auto* desc = factory->get_plugin_descriptor(factory, static_cast<std::uint32_t>(result.selectedIndex));
             if (desc == nullptr)
             {
-                result.message = "CLAP plugin factory returned a null descriptor for plugin index 0.";
+                result.message = "CLAP plugin factory returned a null descriptor for the selected plugin index.";
                 result.descriptor.status = ClapPluginScanStatus::Unsupported;
                 result.descriptor.statusMessage = result.message;
                 return result;
@@ -786,7 +998,7 @@ namespace mw::clap
 
             populateDescriptorFromClapDescriptor(result.descriptor, *desc, count);
             result.descriptor.statusMessage = count > 1
-                ? "CLAP ABI probe succeeded. This bundle exposes " + std::to_string(count) + " plugin descriptors; the manager is showing descriptor 1."
+                ? "CLAP ABI probe succeeded. This bundle exposes " + std::to_string(count) + " plugin descriptors; selected descriptor " + std::to_string(result.selectedIndex + 1) + "."
                 : "CLAP ABI probe succeeded. Descriptor metadata was read without creating a plugin instance.";
             result.message = result.descriptor.statusMessage;
             return result;
@@ -840,6 +1052,7 @@ namespace mw::clap
             result.restartRequested = hostState.restartRequested;
             result.processRequested = hostState.processRequested;
             result.callbackRequested = hostState.callbackRequested;
+            result.hostThreadCheckRequested = hostState.threadCheckRequested;
         };
 
         auto fail = [&result, &cleanup](std::string stage, std::string message) -> ClapInstanceValidationResult&
@@ -930,7 +1143,7 @@ namespace mw::clap
             host.name = "Poor Man's Studio CLAP Host Helper";
             host.vendor = "Poor Man's Studio";
             host.url = "";
-            host.version = "0.66.4";
+            host.version = "0.66.5";
             host.get_extension = hostGetExtension;
             host.request_restart = hostRequestRestart;
             host.request_process = hostRequestProcess;
@@ -952,10 +1165,12 @@ namespace mw::clap
             if (!plugin->init(plugin))
                 return fail("plugin_init", "CLAP plugin init() returned false.");
             result.pluginInitialized = true;
+            queryCapabilities(plugin, result, false);
 
             result.restartRequested = hostState.restartRequested;
             result.processRequested = hostState.processRequested;
             result.callbackRequested = hostState.callbackRequested;
+            result.hostThreadCheckRequested = hostState.threadCheckRequested;
 
             result.stage = "ok";
             result.message = count > 1
@@ -1031,6 +1246,7 @@ namespace mw::clap
             result.restartRequested = hostState.restartRequested;
             result.processRequested = hostState.processRequested;
             result.callbackRequested = hostState.callbackRequested;
+            result.hostThreadCheckRequested = hostState.threadCheckRequested;
         };
 
         auto fail = [&result, &cleanup](std::string stage, std::string message) -> ClapActivationValidationResult&
@@ -1121,7 +1337,7 @@ namespace mw::clap
             host.name = "Poor Man's Studio CLAP Host Helper";
             host.vendor = "Poor Man's Studio";
             host.url = "";
-            host.version = "0.66.4";
+            host.version = "0.66.5";
             host.get_extension = hostGetExtension;
             host.request_restart = hostRequestRestart;
             host.request_process = hostRequestProcess;
@@ -1143,6 +1359,7 @@ namespace mw::clap
             if (!plugin->init(plugin))
                 return fail("plugin_init", "CLAP plugin init() returned false.");
             result.pluginInitialized = true;
+            queryCapabilities(plugin, result, false);
 
             if (plugin->activate == nullptr)
                 return fail("plugin_activate", "CLAP plugin instance did not expose activate().");
@@ -1153,6 +1370,7 @@ namespace mw::clap
             if (!plugin->activate(plugin, result.sampleRate, static_cast<std::uint32_t>(result.minFrames), static_cast<std::uint32_t>(result.maxFrames)))
                 return fail("plugin_activate", "CLAP plugin activate() returned false.");
             result.pluginActivated = true;
+            queryCapabilities(plugin, result, true);
 
             queryAudioPorts(plugin, result);
             queryNotePorts(plugin, result);
@@ -1163,6 +1381,7 @@ namespace mw::clap
             result.restartRequested = hostState.restartRequested;
             result.processRequested = hostState.processRequested;
             result.callbackRequested = hostState.callbackRequested;
+            result.hostThreadCheckRequested = hostState.threadCheckRequested;
 
             result.stage = "ok";
             result.message = count > 1
@@ -1223,7 +1442,9 @@ namespace mw::clap
         {
             if (createdPlugin != nullptr && result.pluginStartedProcessing && createdPlugin->stop_processing != nullptr && !result.pluginStoppedProcessing)
             {
+                hostState.audioThreadPhase = true;
                 createdPlugin->stop_processing(createdPlugin);
+                hostState.audioThreadPhase = false;
                 result.pluginStoppedProcessing = true;
             }
 
@@ -1250,6 +1471,7 @@ namespace mw::clap
             result.restartRequested = hostState.restartRequested;
             result.processRequested = hostState.processRequested;
             result.callbackRequested = hostState.callbackRequested;
+            result.hostThreadCheckRequested = hostState.threadCheckRequested;
         };
 
         auto fail = [&result, &cleanup](std::string stage, std::string message) -> ClapProcessValidationResult&
@@ -1340,7 +1562,7 @@ namespace mw::clap
             host.name = "Poor Man's Studio CLAP Host Helper";
             host.vendor = "Poor Man's Studio";
             host.url = "";
-            host.version = "0.66.4";
+            host.version = "0.66.5";
             host.get_extension = hostGetExtension;
             host.request_restart = hostRequestRestart;
             host.request_process = hostRequestProcess;
@@ -1362,6 +1584,7 @@ namespace mw::clap
             if (!plugin->init(plugin))
                 return fail("plugin_init", "CLAP plugin init() returned false.");
             result.pluginInitialized = true;
+            queryCapabilities(plugin, result, false);
 
             if (plugin->activate == nullptr)
                 return fail("plugin_activate", "CLAP plugin instance did not expose activate().");
@@ -1372,6 +1595,7 @@ namespace mw::clap
             if (!plugin->activate(plugin, result.sampleRate, static_cast<std::uint32_t>(result.minFrames), static_cast<std::uint32_t>(result.maxFrames)))
                 return fail("plugin_activate", "CLAP plugin activate() returned false.");
             result.pluginActivated = true;
+            queryCapabilities(plugin, result, true);
 
             queryAudioPorts(plugin, result);
             queryNotePorts(plugin, result);
@@ -1418,8 +1642,12 @@ namespace mw::clap
             process.in_events = &inputEvents;
             process.out_events = &outputEvents;
 
+            hostState.audioThreadPhase = true;
             if (!plugin->start_processing(plugin))
+            {
+                hostState.audioThreadPhase = false;
                 return fail("plugin_start_processing", "CLAP plugin start_processing() returned false.");
+            }
             result.pluginStartedProcessing = true;
 
             const auto status = plugin->process(plugin, &process);
@@ -1428,7 +1656,10 @@ namespace mw::clap
             result.processStatusText = processStatusToString(status);
             result.pluginProcessReturnedOk = isProcessStatusOk(status);
             result.outputEventCount = outputEventState.pushedEvents;
-            result.maxOutputAbs = outputBuffers.maxAbs();
+            const auto [maximumOutput, nonFiniteSamples] = outputBuffers.analyze();
+            result.maxOutputAbs = maximumOutput;
+            result.nonFiniteSampleCount = nonFiniteSamples;
+            result.finiteOutput = nonFiniteSamples == 0;
 
             if (!result.pluginProcessReturnedOk)
             {
@@ -1436,8 +1667,15 @@ namespace mw::clap
                 return fail("plugin_process", result.processMessage);
             }
 
+            if (!result.finiteOutput)
+            {
+                result.processMessage = "CLAP process() produced non-finite output samples.";
+                return fail("plugin_process_output", result.processMessage);
+            }
+
             plugin->stop_processing(plugin);
             result.pluginStoppedProcessing = true;
+            hostState.audioThreadPhase = false;
 
             plugin->deactivate(plugin);
             result.pluginDeactivated = true;
@@ -1445,6 +1683,7 @@ namespace mw::clap
             result.restartRequested = hostState.restartRequested;
             result.processRequested = hostState.processRequested;
             result.callbackRequested = hostState.callbackRequested;
+            result.hostThreadCheckRequested = hostState.threadCheckRequested;
             result.processMessage = "CLAP process() accepted one silent buffer block and returned " + result.processStatusText + ".";
 
             result.stage = "ok";
@@ -1473,6 +1712,303 @@ namespace mw::clap
             result.descriptor.status = ClapPluginScanStatus::Unsupported;
             result.descriptor.statusMessage = result.message;
             return result;
+        }
+    }
+
+
+    ClapStateValidationResult ClapAbiProbe::validatePluginStateRoundTrip(const std::filesystem::path& outerPluginPath,
+                                                                          int pluginIndex,
+                                                                          double sampleRate,
+                                                                          int minFrames,
+                                                                          int maxFrames,
+                                                                          int processFrames)
+    {
+        ClapStateValidationResult result;
+        result.attempted = true;
+        result.selectedIndex = pluginIndex < 0 ? 0 : pluginIndex;
+        result.sampleRate = sampleRate > 0.0 ? sampleRate : 48000.0;
+        result.minFrames = std::max(1, minFrames);
+        result.maxFrames = std::max(result.minFrames, maxFrames);
+        result.processFrames = std::clamp(processFrames, result.minFrames, result.maxFrames);
+        result.descriptor = ClapPluginScanner::inspectPluginPath(outerPluginPath);
+        result.descriptor.metadataOnly = true;
+        result.descriptor.abiProbed = false;
+
+        const clap_plugin_entry_t* initializedEntry = nullptr;
+        const clap_plugin_t* firstPlugin = nullptr;
+        const clap_plugin_t* secondPlugin = nullptr;
+        ClapHostRequestState hostState;
+
+        auto cleanup = [&]()
+        {
+            if (secondPlugin != nullptr)
+            {
+                if (result.secondPluginStartedProcessing && !result.secondPluginStoppedProcessing && secondPlugin->stop_processing != nullptr)
+                {
+                    hostState.audioThreadPhase = true;
+                    secondPlugin->stop_processing(secondPlugin);
+                    hostState.audioThreadPhase = false;
+                    result.secondPluginStoppedProcessing = true;
+                }
+                if (result.secondPluginActivated && !result.secondPluginDeactivated && secondPlugin->deactivate != nullptr)
+                {
+                    secondPlugin->deactivate(secondPlugin);
+                    result.secondPluginDeactivated = true;
+                }
+                if (secondPlugin->destroy != nullptr && !result.secondInstanceDestroyed)
+                {
+                    secondPlugin->destroy(secondPlugin);
+                    result.secondInstanceDestroyed = true;
+                }
+                secondPlugin = nullptr;
+            }
+
+            if (firstPlugin != nullptr)
+            {
+                if (firstPlugin->destroy != nullptr && !result.firstInstanceDestroyed)
+                {
+                    firstPlugin->destroy(firstPlugin);
+                    result.firstInstanceDestroyed = true;
+                }
+                firstPlugin = nullptr;
+            }
+
+            if (initializedEntry != nullptr && initializedEntry->deinit != nullptr && !result.entryDeinitialized)
+            {
+                initializedEntry->deinit();
+                initializedEntry = nullptr;
+                result.entryDeinitialized = true;
+            }
+
+            result.restartRequested = hostState.restartRequested;
+            result.processRequested = hostState.processRequested;
+            result.callbackRequested = hostState.callbackRequested;
+            result.hostThreadCheckRequested = hostState.threadCheckRequested;
+        };
+
+        auto fail = [&](std::string stage, std::string message) -> ClapStateValidationResult&
+        {
+            cleanup();
+            result.stage = std::move(stage);
+            result.message = std::move(message);
+            if (result.descriptor.status != ClapPluginScanStatus::Missing)
+                result.descriptor.status = ClapPluginScanStatus::Unsupported;
+            result.descriptor.statusMessage = result.message;
+            return result;
+        };
+
+        try
+        {
+            std::error_code ec;
+            if (!std::filesystem::exists(outerPluginPath, ec))
+            {
+                result.descriptor.status = ClapPluginScanStatus::Missing;
+                return fail("path", "CLAP plugin path was not found.");
+            }
+            if (!ClapPluginScanner::isOuterClapPlugin(outerPluginPath))
+                return fail("path", "Path is not an outer .clap plugin file or bundle.");
+            if (result.descriptor.binaryPath.empty())
+                return fail("binary", "Could not find a loadable CLAP binary inside the plugin path.");
+
+            DynamicLibrary library(result.descriptor.binaryPath);
+            if (!library.isLoaded())
+            {
+                auto message = std::string("Could not load CLAP binary");
+                const auto error = library.lastErrorText();
+                if (!error.empty()) message += ": " + error;
+                return fail("load_library", message);
+            }
+            result.loadedLibrary = true;
+
+            auto* entry = static_cast<const clap_plugin_entry_t*>(library.symbol("clap_entry"));
+            if (entry == nullptr)
+                return fail("entry", "Loaded binary but did not find exported CLAP entry symbol 'clap_entry'.");
+            result.foundEntry = true;
+            result.descriptor.clapVersionMajor = entry->clap_version.major;
+            result.descriptor.clapVersionMinor = entry->clap_version.minor;
+            result.descriptor.clapVersionRevision = entry->clap_version.revision;
+            if (entry->init == nullptr || entry->deinit == nullptr || entry->get_factory == nullptr)
+                return fail("entry", "CLAP entry is incomplete.");
+            if (!entry->init(outerPluginPath.string().c_str()))
+                return fail("entry_init", "CLAP entry init() returned false.");
+            result.entryInitialized = true;
+            initializedEntry = entry;
+
+            const auto* factory = static_cast<const clap_plugin_factory_t*>(entry->get_factory(clapPluginFactoryId));
+            if (factory == nullptr || factory->get_plugin_count == nullptr || factory->get_plugin_descriptor == nullptr || factory->create_plugin == nullptr)
+                return fail("factory", "CLAP plugin factory was not available or was incomplete.");
+            result.foundFactory = true;
+
+            const auto count = factory->get_plugin_count(factory);
+            result.pluginCount = static_cast<int>(count);
+            result.descriptor.clapPluginCount = result.pluginCount;
+            if (count == 0)
+                return fail("descriptor", "CLAP plugin factory reported zero plugins.");
+            if (result.selectedIndex >= static_cast<int>(count))
+                return fail("descriptor", "Requested CLAP plugin index is outside the bundle's descriptor range.");
+
+            const auto* desc = factory->get_plugin_descriptor(factory, static_cast<std::uint32_t>(result.selectedIndex));
+            if (desc == nullptr || desc->id == nullptr || std::string(desc->id).empty())
+                return fail("descriptor", "CLAP factory did not provide a usable descriptor for the selected plugin index.");
+            result.foundDescriptor = true;
+            populateDescriptorFromClapDescriptor(result.descriptor, *desc, count);
+
+            clap_host_t host {};
+            host.clap_version = { 1, 1, 0 };
+            host.host_data = &hostState;
+            host.name = "Poor Man's Studio CLAP Host Helper";
+            host.vendor = "Poor Man's Studio";
+            host.url = "";
+            host.version = "0.66.5";
+            host.get_extension = hostGetExtension;
+            host.request_restart = hostRequestRestart;
+            host.request_process = hostRequestProcess;
+            host.request_callback = hostRequestCallback;
+
+            firstPlugin = static_cast<const clap_plugin_t*>(factory->create_plugin(factory, &host, desc->id));
+            if (firstPlugin == nullptr)
+                return fail("first_create", "CLAP factory returned a null first plugin instance.");
+            result.firstInstanceCreated = true;
+            if (firstPlugin->destroy == nullptr || firstPlugin->init == nullptr)
+                return fail("first_instance", "First CLAP plugin instance did not expose init() and destroy().");
+            if (!firstPlugin->init(firstPlugin))
+                return fail("first_init", "First CLAP plugin init() returned false.");
+            result.firstPluginInitialized = true;
+            queryCapabilities(firstPlugin, result, false);
+
+            const auto* firstState = firstPlugin->get_extension == nullptr
+                ? nullptr
+                : static_cast<const clap_plugin_state_t*>(firstPlugin->get_extension(firstPlugin, clapStateExtensionId));
+            if (firstState == nullptr || firstState->save == nullptr || firstState->load == nullptr)
+                return fail("state_extension", "Selected CLAP plugin does not expose a complete clap.state extension.");
+            result.stateExtensionAvailable = true;
+
+            StateWriteStorage firstStorage;
+            clap_ostream_t firstStream { &firstStorage, stateWrite };
+            if (!firstState->save(firstPlugin, &firstStream))
+                return fail("state_save", "CLAP state save() returned false for the first instance.");
+            result.stateSaved = true;
+            result.firstStateBytes = firstStorage.bytes.size();
+            result.firstStateHash = fnv1a64(firstStorage.bytes.data(), firstStorage.bytes.size());
+
+            firstPlugin->destroy(firstPlugin);
+            firstPlugin = nullptr;
+            result.firstInstanceDestroyed = true;
+
+            secondPlugin = static_cast<const clap_plugin_t*>(factory->create_plugin(factory, &host, desc->id));
+            if (secondPlugin == nullptr)
+                return fail("second_create", "CLAP factory returned a null second plugin instance.");
+            result.secondInstanceCreated = true;
+            if (secondPlugin->destroy == nullptr || secondPlugin->init == nullptr)
+                return fail("second_instance", "Second CLAP plugin instance did not expose init() and destroy().");
+            if (!secondPlugin->init(secondPlugin))
+                return fail("second_init", "Second CLAP plugin init() returned false.");
+            result.secondPluginInitialized = true;
+
+            const auto* secondState = secondPlugin->get_extension == nullptr
+                ? nullptr
+                : static_cast<const clap_plugin_state_t*>(secondPlugin->get_extension(secondPlugin, clapStateExtensionId));
+            if (secondState == nullptr || secondState->save == nullptr || secondState->load == nullptr)
+                return fail("state_extension", "Recreated CLAP instance does not expose a complete clap.state extension.");
+
+            StateReadStorage readStorage { &firstStorage.bytes, 0 };
+            clap_istream_t readStream { &readStorage, stateRead };
+            if (!secondState->load(secondPlugin, &readStream))
+                return fail("state_load", "CLAP state load() returned false for the recreated instance.");
+            result.stateLoaded = true;
+
+            if (secondPlugin->activate == nullptr || secondPlugin->deactivate == nullptr
+                || secondPlugin->start_processing == nullptr || secondPlugin->stop_processing == nullptr
+                || secondPlugin->process == nullptr)
+                return fail("second_lifecycle", "Recreated CLAP instance does not expose the complete activation/process lifecycle.");
+
+            if (!secondPlugin->activate(secondPlugin, result.sampleRate,
+                                        static_cast<std::uint32_t>(result.minFrames),
+                                        static_cast<std::uint32_t>(result.maxFrames)))
+                return fail("second_activate", "Recreated CLAP instance activate() returned false after state restore.");
+            result.secondPluginActivated = true;
+            queryCapabilities(secondPlugin, result, true);
+
+            const auto inputChannelCounts = collectAudioPortChannelCounts(secondPlugin, true);
+            const auto outputChannelCounts = collectAudioPortChannelCounts(secondPlugin, false);
+            SilentAudioBufferStorage inputBuffers;
+            SilentAudioBufferStorage outputBuffers;
+            inputBuffers.build(inputChannelCounts, static_cast<std::uint32_t>(result.processFrames));
+            outputBuffers.build(outputChannelCounts, static_cast<std::uint32_t>(result.processFrames));
+
+            clap_input_events_t inputEvents {};
+            inputEvents.size = emptyInputEventsSize;
+            inputEvents.get = emptyInputEventsGet;
+            ClapOutputEventState outputEventState;
+            clap_output_events_t outputEvents { &outputEventState, outputEventsTryPush };
+            clap_process_t process {};
+            process.steady_time = -1;
+            process.frames_count = static_cast<std::uint32_t>(result.processFrames);
+            process.audio_inputs = inputBuffers.buffers.empty() ? nullptr : inputBuffers.buffers.data();
+            process.audio_outputs = outputBuffers.buffers.empty() ? nullptr : outputBuffers.buffers.data();
+            process.audio_inputs_count = static_cast<std::uint32_t>(inputBuffers.buffers.size());
+            process.audio_outputs_count = static_cast<std::uint32_t>(outputBuffers.buffers.size());
+            process.in_events = &inputEvents;
+            process.out_events = &outputEvents;
+
+            hostState.audioThreadPhase = true;
+            if (!secondPlugin->start_processing(secondPlugin))
+            {
+                hostState.audioThreadPhase = false;
+                return fail("second_start_processing", "Recreated CLAP instance start_processing() returned false.");
+            }
+            result.secondPluginStartedProcessing = true;
+            const auto processStatus = secondPlugin->process(secondPlugin, &process);
+            result.secondPluginProcessCalled = true;
+            result.secondPluginProcessReturnedOk = isProcessStatusOk(processStatus);
+            const auto [maximumOutput, nonFiniteSamples] = outputBuffers.analyze();
+            result.maxOutputAbs = maximumOutput;
+            result.nonFiniteSampleCount = nonFiniteSamples;
+            result.finiteOutput = nonFiniteSamples == 0;
+            if (!result.secondPluginProcessReturnedOk)
+                return fail("second_process", "Recreated CLAP instance process() returned " + processStatusToString(processStatus) + ".");
+            if (!result.finiteOutput)
+                return fail("second_process_output", "Recreated CLAP instance produced non-finite output after state restore.");
+
+            secondPlugin->stop_processing(secondPlugin);
+            result.secondPluginStoppedProcessing = true;
+            hostState.audioThreadPhase = false;
+            secondPlugin->deactivate(secondPlugin);
+            result.secondPluginDeactivated = true;
+
+            StateWriteStorage secondStorage;
+            clap_ostream_t secondStream { &secondStorage, stateWrite };
+            if (!secondState->save(secondPlugin, &secondStream))
+                return fail("state_resave", "CLAP state save() returned false for the recreated instance.");
+            result.stateResaved = true;
+            result.secondStateBytes = secondStorage.bytes.size();
+            result.secondStateHash = fnv1a64(secondStorage.bytes.data(), secondStorage.bytes.size());
+            result.stateByteEquivalent = firstStorage.bytes == secondStorage.bytes;
+
+            secondPlugin->destroy(secondPlugin);
+            secondPlugin = nullptr;
+            result.secondInstanceDestroyed = true;
+            initializedEntry->deinit();
+            initializedEntry = nullptr;
+            result.entryDeinitialized = true;
+            result.restartRequested = hostState.restartRequested;
+            result.processRequested = hostState.processRequested;
+            result.callbackRequested = hostState.callbackRequested;
+            result.hostThreadCheckRequested = hostState.threadCheckRequested;
+
+            result.stage = "ok";
+            result.message = "CLAP state round-trip succeeded: save, recreate, restore, silent process, second save, and cleanup completed.";
+            result.descriptor.status = ClapPluginScanStatus::Candidate;
+            result.descriptor.statusMessage = result.message;
+            return result;
+        }
+        catch (const std::exception& e)
+        {
+            return fail("exception", e.what());
+        }
+        catch (...)
+        {
+            return fail("exception", "Unknown CLAP state round-trip validation exception.");
         }
     }
 

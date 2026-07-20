@@ -998,7 +998,7 @@ namespace mw::clap
             host.name = "Poor Man's Studio CLAP Instrument Host";
             host.vendor = "Poor Man's Studio";
             host.url = "";
-            host.version = "0.66.4";
+            host.version = "0.66.5";
             host.get_extension = hostGetExtension;
             host.request_restart = hostRequestRestart;
             host.request_process = hostRequestProcess;

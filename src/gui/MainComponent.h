@@ -593,8 +593,8 @@ namespace mw::gui
         void syncVstEffectControlsFromSelection();
         void applySelectedTrackVstEffectSlots();
         void recordVstEffectRenderStatusForTrack(int trackIndex, const juce::String& statusText);
-        void openSelectedTrackVstPluginUi();
-        void openSelectedTrackVstEffectUi(int effectSlotIndex = 0);
+        void openSelectedTrackVstPluginUi(int requestedTrackIndex = -1);
+        void openSelectedTrackVstEffectUi(int effectSlotIndex = 0, int requestedTrackIndex = -1, bool applyPendingAssignment = true);
         void renderVstInstrumentTestNoteForTrack(int trackIndex, juce::String liveEditorStateOverride = {});
         void renderVstEffectTestSampleForTrack(int trackIndex, int effectSlotIndex);
         void renderClapInstrumentTestNoteForTrack(int trackIndex, juce::String liveEditorStateOverride = {});

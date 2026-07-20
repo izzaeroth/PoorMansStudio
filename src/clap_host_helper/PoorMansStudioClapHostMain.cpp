@@ -3,6 +3,7 @@
 #include "clap/ClapPluginScanner.h"
 #include "clap/ClapPluginTypes.h"
 
+#include <charconv>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -63,23 +64,23 @@ namespace
             << "  --validate-process <plugin.clap>\n"
             << "                         Start CLAP processing, run one silent buffer block, stop, deactivate, destroy, and unload.\n"
             << "  --validate-process-json <plugin.clap>\n"
-            << "                         Validate one silent CLAP process block and print JSON.\n\n"
+            << "                         Validate one silent CLAP process block and print JSON.\n"
+            << "  --validate-state <plugin.clap>\n"
+            << "                         Save state, recreate, restore, process, resave, and clean up.\n"
+            << "  --validate-state-json <plugin.clap>\n"
+            << "                         Validate a CLAP state round trip and print JSON.\n\n"
+            << "Options for scan and validation commands:\n"
+            << "  --plugin-index <n>     Select a zero-based descriptor index (default 0).\n\n"
             << "Notes:\n"
-            << "  Scan commands remain scanner/metadata groundwork only. Each scan\n"
-            << "  command loads the CLAP binary in the helper process, reads descriptor\n"
-            << "  metadata through the CLAP ABI, and unloads it. Validate-instance\n"
-            << "  commands go one step further by creating, initializing, destroying,\n"
-            << "  and unloading\n"
-            << "  a plugin instance with a minimal no-op host. Validate-activation\n"
-            << "  commands also call activate/deactivate and safely query audio/note\n"
-            << "  port extension availability. Validate-process commands go one step\n"
-            << "  further by calling start_processing(), running one silent process()\n"
-            << "  buffer, then stopping and cleaning up. This helper still does not assign\n"
-            << "  Effect Slots, open plugin UIs, save CLAP state, or connect CLAP audio\n"
-            << "  processing to the main app render/preview paths yet.\n";
+            << "  Scan commands load the CLAP binary in the helper process, read descriptor\n"
+            << "  metadata through the CLAP ABI, and unload it. Validation commands add\n"
+            << "  instance, activation, capability, finite-output, process, and state checks.\n"
+            << "  The helper provides clap.thread-check but intentionally does not provide\n"
+            << "  clap.log. It does not assign Effect Slots, open plugin UIs, render project\n"
+            << "  audio, or connect helper processing to the main application.\n";
     }
 
-    void printDescriptorText(const mw::clap::ClapPluginDescriptor& plugin)
+    void printDescriptorText(const mw::clap::ClapPluginDescriptor& plugin, int selectedIndex = 0)
     {
         std::cout
             << "name=" << plugin.displayName() << "\n"
@@ -95,6 +96,7 @@ namespace
             << "binaryPath=" << plugin.binaryPath.string() << "\n"
             << "description=" << plugin.description << "\n"
             << "pluginCount=" << plugin.clapPluginCount << "\n"
+            << "selectedIndex=" << selectedIndex << "\n"
             << "clapVersion=" << plugin.clapVersionMajor << "." << plugin.clapVersionMinor << "." << plugin.clapVersionRevision << "\n"
             << "abiProbed=" << (plugin.abiProbed ? "true" : "false") << "\n"
             << "metadataOnly=" << (plugin.metadataOnly ? "true" : "false") << "\n"
@@ -110,7 +112,7 @@ namespace
         std::cout << "\n";
     }
 
-    void printDescriptorJson(const mw::clap::ClapPluginDescriptor& plugin)
+    void printDescriptorJson(const mw::clap::ClapPluginDescriptor& plugin, int selectedIndex = 0)
     {
         std::cout
             << "{\n"
@@ -129,6 +131,7 @@ namespace
             << "  \"binaryPath\": \"" << jsonEscape(plugin.binaryPath.string()) << "\",\n"
             << "  \"description\": \"" << jsonEscape(plugin.description) << "\",\n"
             << "  \"pluginCount\": " << plugin.clapPluginCount << ",\n"
+            << "  \"selectedIndex\": " << selectedIndex << ",\n"
             << "  \"clapVersionMajor\": " << plugin.clapVersionMajor << ",\n"
             << "  \"clapVersionMinor\": " << plugin.clapVersionMinor << ",\n"
             << "  \"clapVersionRevision\": " << plugin.clapVersionRevision << ",\n"
@@ -145,6 +148,46 @@ namespace
 
         std::cout << "]\n"
             << "}\n";
+    }
+
+    template <typename Validation>
+    void printCapabilityText(const Validation& validation)
+    {
+        std::cout
+            << "latencyExtensionAvailable=" << (validation.latencyExtensionAvailable ? "true" : "false") << "\n"
+            << "latencyValueQueried=" << (validation.latencyValueQueried ? "true" : "false") << "\n"
+            << "latencySamples=" << validation.latencySamples << "\n"
+            << "tailExtensionAvailable=" << (validation.tailExtensionAvailable ? "true" : "false") << "\n"
+            << "tailValueQueried=" << (validation.tailValueQueried ? "true" : "false") << "\n"
+            << "tailInfinite=" << (validation.tailInfinite ? "true" : "false") << "\n"
+            << "tailSamples=" << validation.tailSamples << "\n"
+            << "paramsExtensionAvailable=" << (validation.paramsExtensionAvailable ? "true" : "false") << "\n"
+            << "parameterCountQueried=" << (validation.parameterCountQueried ? "true" : "false") << "\n"
+            << "parameterCount=" << validation.parameterCount << "\n"
+            << "stateExtensionAvailable=" << (validation.stateExtensionAvailable ? "true" : "false") << "\n"
+            << "guiExtensionAvailable=" << (validation.guiExtensionAvailable ? "true" : "false") << "\n"
+            << "hostThreadCheckProvided=" << (validation.hostThreadCheckProvided ? "true" : "false") << "\n"
+            << "hostThreadCheckRequested=" << (validation.hostThreadCheckRequested ? "true" : "false") << "\n";
+    }
+
+    template <typename Validation>
+    void printCapabilityJsonFields(const Validation& validation, const char* indent)
+    {
+        std::cout
+            << indent << "\"latency_extension_available\": " << (validation.latencyExtensionAvailable ? "true" : "false") << ",\n"
+            << indent << "\"latency_value_queried\": " << (validation.latencyValueQueried ? "true" : "false") << ",\n"
+            << indent << "\"latency_samples\": " << validation.latencySamples << ",\n"
+            << indent << "\"tail_extension_available\": " << (validation.tailExtensionAvailable ? "true" : "false") << ",\n"
+            << indent << "\"tail_value_queried\": " << (validation.tailValueQueried ? "true" : "false") << ",\n"
+            << indent << "\"tail_infinite\": " << (validation.tailInfinite ? "true" : "false") << ",\n"
+            << indent << "\"tail_samples\": " << validation.tailSamples << ",\n"
+            << indent << "\"params_extension_available\": " << (validation.paramsExtensionAvailable ? "true" : "false") << ",\n"
+            << indent << "\"parameter_count_queried\": " << (validation.parameterCountQueried ? "true" : "false") << ",\n"
+            << indent << "\"parameter_count\": " << validation.parameterCount << ",\n"
+            << indent << "\"state_extension_available\": " << (validation.stateExtensionAvailable ? "true" : "false") << ",\n"
+            << indent << "\"gui_extension_available\": " << (validation.guiExtensionAvailable ? "true" : "false") << ",\n"
+            << indent << "\"host_thread_check_provided\": " << (validation.hostThreadCheckProvided ? "true" : "false") << ",\n"
+            << indent << "\"host_thread_check_requested\": " << (validation.hostThreadCheckRequested ? "true" : "false") << "\n";
     }
 
     void printValidationText(const mw::clap::ClapInstanceValidationResult& validation)
@@ -175,8 +218,10 @@ namespace
             << "entryDeinitialized=" << (validation.entryDeinitialized ? "true" : "false") << "\n"
             << "restartRequested=" << (validation.restartRequested ? "true" : "false") << "\n"
             << "processRequested=" << (validation.processRequested ? "true" : "false") << "\n"
-            << "callbackRequested=" << (validation.callbackRequested ? "true" : "false") << "\n"
-            << "features=";
+            << "callbackRequested=" << (validation.callbackRequested ? "true" : "false") << "\n";
+
+        printCapabilityText(validation);
+        std::cout << "features=";
 
         for (std::size_t i = 0; i < plugin.features.size(); ++i)
         {
@@ -234,10 +279,15 @@ namespace
             << "    \"destroyed\": " << (validation.instanceDestroyed ? "true" : "false") << ",\n"
             << "    \"entryDeinitialized\": " << (validation.entryDeinitialized ? "true" : "false") << "\n"
             << "  },\n"
+            << "  \"capabilities\": {\n";
+        printCapabilityJsonFields(validation, "    ");
+        std::cout
+            << "  },\n"
             << "  \"host_requests\": {\n"
             << "    \"restart_requested\": " << (validation.restartRequested ? "true" : "false") << ",\n"
             << "    \"process_requested\": " << (validation.processRequested ? "true" : "false") << ",\n"
-            << "    \"callback_requested\": " << (validation.callbackRequested ? "true" : "false") << "\n"
+            << "    \"callback_requested\": " << (validation.callbackRequested ? "true" : "false") << ",\n"
+            << "    \"thread_check_requested\": " << (validation.hostThreadCheckRequested ? "true" : "false") << "\n"
             << "  },\n"
             << "  \"error\": \"" << jsonEscape(validation.ok() ? std::string() : validation.message) << "\"\n"
             << "}\n";
@@ -297,8 +347,10 @@ namespace
             << "notePortsMessage=" << validation.notePortsMessage << "\n"
             << "restartRequested=" << (validation.restartRequested ? "true" : "false") << "\n"
             << "processRequested=" << (validation.processRequested ? "true" : "false") << "\n"
-            << "callbackRequested=" << (validation.callbackRequested ? "true" : "false") << "\n"
-            << "audioInputPorts=";
+            << "callbackRequested=" << (validation.callbackRequested ? "true" : "false") << "\n";
+
+        printCapabilityText(validation);
+        std::cout << "audioInputPorts=";
 
         for (std::size_t i = 0; i < validation.audioInputPorts.size(); ++i)
         {
@@ -417,12 +469,15 @@ namespace
         std::cout << ",\n      \"outputs\": ";
         printJsonStringArray(validation.noteOutputPorts);
         std::cout
-            << "\n    }\n"
+            << "\n    },\n";
+        printCapabilityJsonFields(validation, "    ");
+        std::cout
             << "  },\n"
             << "  \"host_requests\": {\n"
             << "    \"restart_requested\": " << (validation.restartRequested ? "true" : "false") << ",\n"
             << "    \"process_requested\": " << (validation.processRequested ? "true" : "false") << ",\n"
-            << "    \"callback_requested\": " << (validation.callbackRequested ? "true" : "false") << "\n"
+            << "    \"callback_requested\": " << (validation.callbackRequested ? "true" : "false") << ",\n"
+            << "    \"thread_check_requested\": " << (validation.hostThreadCheckRequested ? "true" : "false") << "\n"
             << "  },\n"
             << "  \"error\": \"" << jsonEscape(validation.ok() ? std::string() : validation.message) << "\"\n"
             << "}\n";
@@ -482,10 +537,14 @@ namespace
             << "processMessage=" << validation.processMessage << "\n"
             << "outputEventCount=" << validation.outputEventCount << "\n"
             << "maxOutputAbs=" << validation.maxOutputAbs << "\n"
+            << "finiteOutput=" << (validation.finiteOutput ? "true" : "false") << "\n"
+            << "nonFiniteSampleCount=" << validation.nonFiniteSampleCount << "\n"
             << "restartRequested=" << (validation.restartRequested ? "true" : "false") << "\n"
             << "processRequested=" << (validation.processRequested ? "true" : "false") << "\n"
-            << "callbackRequested=" << (validation.callbackRequested ? "true" : "false") << "\n"
-            << "audioInputPorts=";
+            << "callbackRequested=" << (validation.callbackRequested ? "true" : "false") << "\n";
+
+        printCapabilityText(validation);
+        std::cout << "audioInputPorts=";
 
         for (std::size_t i = 0; i < validation.audioInputPorts.size(); ++i)
         {
@@ -608,7 +667,9 @@ namespace
         std::cout << ",\n      \"outputs\": ";
         printJsonStringArray(validation.noteOutputPorts);
         std::cout
-            << "\n    }\n"
+            << "\n    },\n";
+        printCapabilityJsonFields(validation, "    ");
+        std::cout
             << "  },\n"
             << "  \"process\": {\n"
             << "    \"frames\": " << validation.processFrames << ",\n"
@@ -620,18 +681,172 @@ namespace
             << "    \"status_text\": \"" << jsonEscape(validation.processStatusText) << "\",\n"
             << "    \"message\": \"" << jsonEscape(validation.processMessage) << "\",\n"
             << "    \"output_event_count\": " << validation.outputEventCount << ",\n"
-            << "    \"max_output_abs\": " << validation.maxOutputAbs << "\n"
+            << "    \"max_output_abs\": " << validation.maxOutputAbs << ",\n"
+            << "    \"finite_output\": " << (validation.finiteOutput ? "true" : "false") << ",\n"
+            << "    \"non_finite_sample_count\": " << validation.nonFiniteSampleCount << "\n"
             << "  },\n"
             << "  \"host_requests\": {\n"
             << "    \"restart_requested\": " << (validation.restartRequested ? "true" : "false") << ",\n"
             << "    \"process_requested\": " << (validation.processRequested ? "true" : "false") << ",\n"
-            << "    \"callback_requested\": " << (validation.callbackRequested ? "true" : "false") << "\n"
+            << "    \"callback_requested\": " << (validation.callbackRequested ? "true" : "false") << ",\n"
+            << "    \"thread_check_requested\": " << (validation.hostThreadCheckRequested ? "true" : "false") << "\n"
             << "  },\n"
             << "  \"error\": \"" << jsonEscape(validation.ok() ? std::string() : validation.message) << "\"\n"
             << "}\n";
     }
 
-    int scanOne(const std::string& rawPath, bool json)
+    void printStateText(const mw::clap::ClapStateValidationResult& validation)
+    {
+        const auto& plugin = validation.descriptor;
+        std::cout
+            << "ok=" << (validation.ok() ? "true" : "false") << "\n"
+            << "stage=" << validation.stage << "\n"
+            << "message=" << validation.message << "\n"
+            << "name=" << plugin.displayName() << "\n"
+            << "vendor=" << plugin.vendor << "\n"
+            << "version=" << plugin.version << "\n"
+            << "uid=" << plugin.uid << "\n"
+            << "kind=" << mw::clap::clapPluginKindToString(plugin.detectedKind) << "\n"
+            << "pluginPath=" << plugin.pluginPath.string() << "\n"
+            << "binaryPath=" << plugin.binaryPath.string() << "\n"
+            << "pluginCount=" << validation.pluginCount << "\n"
+            << "selectedIndex=" << validation.selectedIndex << "\n"
+            << "sampleRate=" << validation.sampleRate << "\n"
+            << "minFrames=" << validation.minFrames << "\n"
+            << "maxFrames=" << validation.maxFrames << "\n"
+            << "processFrames=" << validation.processFrames << "\n"
+            << "loadedLibrary=" << (validation.loadedLibrary ? "true" : "false") << "\n"
+            << "foundEntry=" << (validation.foundEntry ? "true" : "false") << "\n"
+            << "entryInitialized=" << (validation.entryInitialized ? "true" : "false") << "\n"
+            << "foundFactory=" << (validation.foundFactory ? "true" : "false") << "\n"
+            << "foundDescriptor=" << (validation.foundDescriptor ? "true" : "false") << "\n"
+            << "firstInstanceCreated=" << (validation.firstInstanceCreated ? "true" : "false") << "\n"
+            << "firstPluginInitialized=" << (validation.firstPluginInitialized ? "true" : "false") << "\n"
+            << "stateSaved=" << (validation.stateSaved ? "true" : "false") << "\n"
+            << "firstInstanceDestroyed=" << (validation.firstInstanceDestroyed ? "true" : "false") << "\n"
+            << "secondInstanceCreated=" << (validation.secondInstanceCreated ? "true" : "false") << "\n"
+            << "secondPluginInitialized=" << (validation.secondPluginInitialized ? "true" : "false") << "\n"
+            << "stateLoaded=" << (validation.stateLoaded ? "true" : "false") << "\n"
+            << "secondPluginActivated=" << (validation.secondPluginActivated ? "true" : "false") << "\n"
+            << "secondPluginStartedProcessing=" << (validation.secondPluginStartedProcessing ? "true" : "false") << "\n"
+            << "secondPluginProcessCalled=" << (validation.secondPluginProcessCalled ? "true" : "false") << "\n"
+            << "secondPluginProcessReturnedOk=" << (validation.secondPluginProcessReturnedOk ? "true" : "false") << "\n"
+            << "finiteOutput=" << (validation.finiteOutput ? "true" : "false") << "\n"
+            << "nonFiniteSampleCount=" << validation.nonFiniteSampleCount << "\n"
+            << "maxOutputAbs=" << validation.maxOutputAbs << "\n"
+            << "secondPluginStoppedProcessing=" << (validation.secondPluginStoppedProcessing ? "true" : "false") << "\n"
+            << "secondPluginDeactivated=" << (validation.secondPluginDeactivated ? "true" : "false") << "\n"
+            << "stateResaved=" << (validation.stateResaved ? "true" : "false") << "\n"
+            << "stateByteEquivalent=" << (validation.stateByteEquivalent ? "true" : "false") << "\n"
+            << "firstStateBytes=" << validation.firstStateBytes << "\n"
+            << "secondStateBytes=" << validation.secondStateBytes << "\n"
+            << "firstStateHash=" << validation.firstStateHash << "\n"
+            << "secondStateHash=" << validation.secondStateHash << "\n"
+            << "secondInstanceDestroyed=" << (validation.secondInstanceDestroyed ? "true" : "false") << "\n"
+            << "entryDeinitialized=" << (validation.entryDeinitialized ? "true" : "false") << "\n"
+            << "restartRequested=" << (validation.restartRequested ? "true" : "false") << "\n"
+            << "processRequested=" << (validation.processRequested ? "true" : "false") << "\n"
+            << "callbackRequested=" << (validation.callbackRequested ? "true" : "false") << "\n";
+        printCapabilityText(validation);
+    }
+
+    void printStateJson(const mw::clap::ClapStateValidationResult& validation)
+    {
+        const auto& plugin = validation.descriptor;
+        std::cout
+            << "{\n"
+            << "  \"helper\": \"" << helperName << "\",\n"
+            << "  \"helperVersion\": \"" << jsonEscape(mw::app::appVersion) << "\",\n"
+            << "  \"ok\": " << (validation.ok() ? "true" : "false") << ",\n"
+            << "  \"path\": \"" << jsonEscape(plugin.pluginPath.string()) << "\",\n"
+            << "  \"binaryPath\": \"" << jsonEscape(plugin.binaryPath.string()) << "\",\n"
+            << "  \"stage\": \"" << jsonEscape(validation.stage) << "\",\n"
+            << "  \"message\": \"" << jsonEscape(validation.message) << "\",\n"
+            << "  \"plugin_count\": " << validation.pluginCount << ",\n"
+            << "  \"selected_index\": " << validation.selectedIndex << ",\n"
+            << "  \"activation_settings\": {\n"
+            << "    \"sample_rate\": " << validation.sampleRate << ",\n"
+            << "    \"min_frames\": " << validation.minFrames << ",\n"
+            << "    \"max_frames\": " << validation.maxFrames << ",\n"
+            << "    \"frames\": " << validation.processFrames << "\n"
+            << "  },\n"
+            << "  \"descriptor\": {\n"
+            << "    \"id\": \"" << jsonEscape(plugin.uid) << "\",\n"
+            << "    \"name\": \"" << jsonEscape(plugin.displayName()) << "\",\n"
+            << "    \"vendor\": \"" << jsonEscape(plugin.vendor) << "\",\n"
+            << "    \"version\": \"" << jsonEscape(plugin.version) << "\",\n"
+            << "    \"kind\": \"" << jsonEscape(mw::clap::clapPluginKindToString(plugin.detectedKind)) << "\",\n"
+            << "    \"status\": \"" << jsonEscape(mw::clap::clapPluginScanStatusToString(plugin.status)) << "\",\n"
+            << "    \"statusMessage\": \"" << jsonEscape(plugin.statusMessage) << "\"\n"
+            << "  },\n"
+            << "  \"instance\": {\n"
+            << "    \"loadedLibrary\": " << (validation.loadedLibrary ? "true" : "false") << ",\n"
+            << "    \"foundEntry\": " << (validation.foundEntry ? "true" : "false") << ",\n"
+            << "    \"entryInitialized\": " << (validation.entryInitialized ? "true" : "false") << ",\n"
+            << "    \"foundFactory\": " << (validation.foundFactory ? "true" : "false") << ",\n"
+            << "    \"foundDescriptor\": " << (validation.foundDescriptor ? "true" : "false") << ",\n"
+            << "    \"first_created\": " << (validation.firstInstanceCreated ? "true" : "false") << ",\n"
+            << "    \"first_initialized\": " << (validation.firstPluginInitialized ? "true" : "false") << ",\n"
+            << "    \"first_destroyed\": " << (validation.firstInstanceDestroyed ? "true" : "false") << ",\n"
+            << "    \"second_created\": " << (validation.secondInstanceCreated ? "true" : "false") << ",\n"
+            << "    \"second_initialized\": " << (validation.secondPluginInitialized ? "true" : "false") << ",\n"
+            << "    \"second_activated\": " << (validation.secondPluginActivated ? "true" : "false") << ",\n"
+            << "    \"second_startedProcessing\": " << (validation.secondPluginStartedProcessing ? "true" : "false") << ",\n"
+            << "    \"second_stoppedProcessing\": " << (validation.secondPluginStoppedProcessing ? "true" : "false") << ",\n"
+            << "    \"second_deactivated\": " << (validation.secondPluginDeactivated ? "true" : "false") << ",\n"
+            << "    \"second_destroyed\": " << (validation.secondInstanceDestroyed ? "true" : "false") << ",\n"
+            << "    \"entryDeinitialized\": " << (validation.entryDeinitialized ? "true" : "false") << "\n"
+            << "  },\n"
+            << "  \"capabilities\": {\n";
+        printCapabilityJsonFields(validation, "    ");
+        std::cout
+            << "  },\n"
+            << "  \"process\": {\n"
+            << "    \"processCalled\": " << (validation.secondPluginProcessCalled ? "true" : "false") << ",\n"
+            << "    \"processReturnedOk\": " << (validation.secondPluginProcessReturnedOk ? "true" : "false") << ",\n"
+            << "    \"finite_output\": " << (validation.finiteOutput ? "true" : "false") << ",\n"
+            << "    \"non_finite_sample_count\": " << validation.nonFiniteSampleCount << ",\n"
+            << "    \"max_output_abs\": " << validation.maxOutputAbs << "\n"
+            << "  },\n"
+            << "  \"state\": {\n"
+            << "    \"saved\": " << (validation.stateSaved ? "true" : "false") << ",\n"
+            << "    \"loaded\": " << (validation.stateLoaded ? "true" : "false") << ",\n"
+            << "    \"resaved\": " << (validation.stateResaved ? "true" : "false") << ",\n"
+            << "    \"byte_equivalent\": " << (validation.stateByteEquivalent ? "true" : "false") << ",\n"
+            << "    \"first_bytes\": " << validation.firstStateBytes << ",\n"
+            << "    \"second_bytes\": " << validation.secondStateBytes << ",\n"
+            << "    \"first_hash\": \"" << jsonEscape(validation.firstStateHash) << "\",\n"
+            << "    \"second_hash\": \"" << jsonEscape(validation.secondStateHash) << "\"\n"
+            << "  },\n"
+            << "  \"host_requests\": {\n"
+            << "    \"restart_requested\": " << (validation.restartRequested ? "true" : "false") << ",\n"
+            << "    \"process_requested\": " << (validation.processRequested ? "true" : "false") << ",\n"
+            << "    \"callback_requested\": " << (validation.callbackRequested ? "true" : "false") << ",\n"
+            << "    \"thread_check_requested\": " << (validation.hostThreadCheckRequested ? "true" : "false") << "\n"
+            << "  },\n"
+            << "  \"error\": \"" << jsonEscape(validation.ok() ? std::string() : validation.message) << "\"\n"
+            << "}\n";
+    }
+
+    bool parsePluginIndex(const std::vector<std::string>& args, int& pluginIndex)
+    {
+        pluginIndex = 0;
+        for (std::size_t i = 2; i < args.size(); ++i)
+        {
+            if (args[i] != "--plugin-index" || i + 1 >= args.size())
+                return false;
+
+            const auto& value = args[++i];
+            int parsed = 0;
+            const auto conversion = std::from_chars(value.data(), value.data() + value.size(), parsed);
+            if (conversion.ec != std::errc() || conversion.ptr != value.data() + value.size() || parsed < 0)
+                return false;
+            pluginIndex = parsed;
+        }
+        return true;
+    }
+
+    int scanOne(const std::string& rawPath, bool json, int pluginIndex)
     {
         try
         {
@@ -680,13 +895,13 @@ namespace
                 return 4;
             }
 
-            auto probe = mw::clap::ClapAbiProbe::probePluginPath(pluginPath);
+            auto probe = mw::clap::ClapAbiProbe::probePluginPath(pluginPath, pluginIndex);
             auto descriptor = probe.descriptor;
 
             if (json)
-                printDescriptorJson(descriptor);
+                printDescriptorJson(descriptor, probe.selectedIndex);
             else
-                printDescriptorText(descriptor);
+                printDescriptorText(descriptor, probe.selectedIndex);
 
             switch (descriptor.status)
             {
@@ -738,12 +953,12 @@ namespace
         }
     }
 
-    int validateOne(const std::string& rawPath, bool json)
+    int validateOne(const std::string& rawPath, bool json, int pluginIndex)
     {
         try
         {
             const auto pluginPath = std::filesystem::path(rawPath);
-            auto validation = mw::clap::ClapAbiProbe::validatePluginInstance(pluginPath);
+            auto validation = mw::clap::ClapAbiProbe::validatePluginInstance(pluginPath, pluginIndex);
 
             if (json)
                 printValidationJson(validation);
@@ -798,12 +1013,12 @@ namespace
     }
 
 
-    int validateActivationOne(const std::string& rawPath, bool json)
+    int validateActivationOne(const std::string& rawPath, bool json, int pluginIndex)
     {
         try
         {
             const auto pluginPath = std::filesystem::path(rawPath);
-            auto validation = mw::clap::ClapAbiProbe::validatePluginActivation(pluginPath);
+            auto validation = mw::clap::ClapAbiProbe::validatePluginActivation(pluginPath, pluginIndex);
 
             if (json)
                 printActivationJson(validation);
@@ -858,12 +1073,12 @@ namespace
     }
 
 
-    int validateProcessOne(const std::string& rawPath, bool json)
+    int validateProcessOne(const std::string& rawPath, bool json, int pluginIndex)
     {
         try
         {
             const auto pluginPath = std::filesystem::path(rawPath);
-            auto validation = mw::clap::ClapAbiProbe::validatePluginSilentProcess(pluginPath);
+            auto validation = mw::clap::ClapAbiProbe::validatePluginSilentProcess(pluginPath, pluginIndex);
 
             if (json)
                 printProcessJson(validation);
@@ -916,6 +1131,59 @@ namespace
             return 5;
         }
     }
+    int validateStateOne(const std::string& rawPath, bool json, int pluginIndex)
+    {
+        try
+        {
+            const auto pluginPath = std::filesystem::path(rawPath);
+            auto validation = mw::clap::ClapAbiProbe::validatePluginStateRoundTrip(pluginPath, pluginIndex);
+            if (json)
+                printStateJson(validation);
+            else
+                printStateText(validation);
+            if (validation.ok())
+                return 0;
+            return validation.descriptor.status == mw::clap::ClapPluginScanStatus::Missing ? 3 : 5;
+        }
+        catch (const std::exception& e)
+        {
+            if (json)
+            {
+                std::cout
+                    << "{\n"
+                    << "  \"helper\": \"" << helperName << "\",\n"
+                    << "  \"helperVersion\": \"" << jsonEscape(mw::app::appVersion) << "\",\n"
+                    << "  \"ok\": false,\n"
+                    << "  \"stage\": \"exception\",\n"
+                    << "  \"error\": \"" << jsonEscape(e.what()) << "\"\n"
+                    << "}\n";
+            }
+            else
+            {
+                std::cerr << "State validation failed: " << e.what() << "\n";
+            }
+            return 5;
+        }
+        catch (...)
+        {
+            if (json)
+            {
+                std::cout
+                    << "{\n"
+                    << "  \"helper\": \"" << helperName << "\",\n"
+                    << "  \"helperVersion\": \"" << jsonEscape(mw::app::appVersion) << "\",\n"
+                    << "  \"ok\": false,\n"
+                    << "  \"stage\": \"exception\",\n"
+                    << "  \"error\": \"Unknown helper exception.\"\n"
+                    << "}\n";
+            }
+            else
+            {
+                std::cerr << "State validation failed: unknown helper exception.\n";
+            }
+            return 5;
+        }
+    }
 }
 
 int main(int argc, char* argv[])
@@ -932,7 +1200,7 @@ int main(int argc, char* argv[])
 
     if (args[0] == "--version")
     {
-        std::cout << "PoorMansStudioClapHost " << mw::app::appVersionLabel << "\n";
+        std::cout << helperName << " " << mw::app::appVersionLabel << "\n";
         return 0;
     }
 
@@ -942,50 +1210,29 @@ int main(int argc, char* argv[])
         return 0;
     }
 
+    if (args.size() < 2)
+    {
+        std::cerr << args[0] << " requires a path to an outer .clap plugin file or bundle.\n";
+        return 2;
+    }
+
+    int pluginIndex = 0;
+    if (!parsePluginIndex(args, pluginIndex))
+    {
+        std::cerr << "Invalid options. Use --plugin-index followed by a non-negative integer.\n";
+        return 2;
+    }
+
     if (args[0] == "--scan" || args[0] == "--scan-json")
-    {
-        if (args.size() < 2)
-        {
-            std::cerr << args[0] << " requires a path to an outer .clap plugin file or bundle.\n";
-            return 2;
-        }
-
-        return scanOne(args[1], args[0] == "--scan-json");
-    }
-
+        return scanOne(args[1], args[0] == "--scan-json", pluginIndex);
     if (args[0] == "--validate-instance" || args[0] == "--validate-instance-json")
-    {
-        if (args.size() < 2)
-        {
-            std::cerr << args[0] << " requires a path to an outer .clap plugin file or bundle.\n";
-            return 2;
-        }
-
-        return validateOne(args[1], args[0] == "--validate-instance-json");
-    }
-
+        return validateOne(args[1], args[0] == "--validate-instance-json", pluginIndex);
     if (args[0] == "--validate-activation" || args[0] == "--validate-activation-json")
-    {
-        if (args.size() < 2)
-        {
-            std::cerr << args[0] << " requires a path to an outer .clap plugin file or bundle.\n";
-            return 2;
-        }
-
-        return validateActivationOne(args[1], args[0] == "--validate-activation-json");
-    }
-
-
+        return validateActivationOne(args[1], args[0] == "--validate-activation-json", pluginIndex);
     if (args[0] == "--validate-process" || args[0] == "--validate-process-json")
-    {
-        if (args.size() < 2)
-        {
-            std::cerr << args[0] << " requires a path to an outer .clap plugin file or bundle.\n";
-            return 2;
-        }
-
-        return validateProcessOne(args[1], args[0] == "--validate-process-json");
-    }
+        return validateProcessOne(args[1], args[0] == "--validate-process-json", pluginIndex);
+    if (args[0] == "--validate-state" || args[0] == "--validate-state-json")
+        return validateStateOne(args[1], args[0] == "--validate-state-json", pluginIndex);
 
     std::cerr << "Unknown command: " << args[0] << "\n\n";
     printHelp();

@@ -16,17 +16,31 @@ PoorMansStudioVstHost.exe --version
 PoorMansStudioVstHost.exe --ping
 PoorMansStudioVstHost.exe --scan "C:\Path\To\Plugin.vst3"
 PoorMansStudioVstHost.exe --scan-json "C:\Path\To\Plugin.vst3"
+PoorMansStudioVstHost.exe --validate-instance "C:\Path\To\Plugin.vst3"
+PoorMansStudioVstHost.exe --validate-instance-json "C:\Path\To\Plugin.vst3"
+PoorMansStudioVstHost.exe --validate-activation "C:\Path\To\Plugin.vst3"
+PoorMansStudioVstHost.exe --validate-activation-json "C:\Path\To\Plugin.vst3"
+PoorMansStudioVstHost.exe --validate-process "C:\Path\To\Plugin.vst3"
+PoorMansStudioVstHost.exe --validate-process-json "C:\Path\To\Plugin.vst3"
+PoorMansStudioVstHost.exe --validate-state "C:\Path\To\Plugin.vst3"
+PoorMansStudioVstHost.exe --validate-state-json "C:\Path\To\Plugin.vst3"
+```
+
+Validation commands also accept an optional zero-based descriptor selector:
+
+```text
+--plugin-index 1
 ```
 
 ## Current Scope
 
-The helper performs isolated inspection of one outer VST3 bundle and reports detected plugin metadata in text or JSON form. It uses the JUCE VST3 hosting/scanning foundation in a separate process so risky inspection work does not have to run inside the main application process.
+The scan commands inspect one outer VST3 bundle and report detected plugin metadata in text or JSON form. The validation commands use the same JUCE VST3 hosting path as the main application to create a selected instance, inspect buses and capabilities, prepare the application-supported instrument or effect layout, run one silent processing block with finite-sample checks, and test a disposable state save-and-restore round trip.
 
-The helper does not currently activate plugins, process audio, open plugin editors, capture plugin state, or provide live VST3 playback. Normal VST3 instruments, effects, editors, recording monitors, previews, rendering, and project playback remain hosted by the main application.
+The helper does not open plugin editors, assign project tracks or Effect Slots, modify saved project plugin state, render project audio, or provide live VST3 playback. Normal VST3 instruments, effects, editors, recording monitors, previews, rendering, and project playback remain hosted by the main application.
 
 ## Executable Size
 
-The VST3 helper links JUCE audio-processor and VST3 hosting code. Those statically linked frameworks can make the executable noticeably larger even though the helper currently exposes a compact command set. Executable size should not be treated as a direct measure of the number of supported helper commands.
+The VST3 helper statically links JUCE audio-processor and VST3 hosting code. Those frameworks can make the executable noticeably larger than the CLAP helper even when both helpers expose comparable validation commands. Executable size should not be treated as a direct measure of validation coverage.
 
 ## Runtime Files
 

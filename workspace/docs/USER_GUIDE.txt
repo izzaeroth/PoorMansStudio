@@ -423,6 +423,7 @@ Bypass | Skips processing but preserves assignment and plugin state. | Useful fo
 Open Slot | Opens the editor for that track and slot. | Only enabled when the slot has an assigned plugin and its Enable checkbox is checked; the toolbar/title context identifies track number, slot shorthand, and plugin.
 Apply Track Settings | Commits dropdown, Enable, and Bypass. | Track-level state is explicit and saved.
 Apply Changes | Captures plugin parameter state from the open editor. | Plugin UI state is separate from track-level enable/assignment.
+Default | Recreates the same VST3 or CLAP plugin as a new instance and immediately applies that default state. | Preserves the track/slot assignment, Enable/Bypass, chain order, and saved Snapshots; confirmation warns that current unapplied and applied state will be discarded.
 
 Using the same plugin in both slots
 -----------------------------------
@@ -435,6 +436,7 @@ Toolbar item | Purpose | Important detail
 --- | --- | ---
 Compact context label | Shows the target as Track #1 - S1 - Reverb. | Useful when multiple tracks or duplicate plugins are open.
 Apply Changes | Captures the current plugin state into the owning track slot. | Required after editing plugin parameters.
+Default | Reset the owning VST3 or CLAP effect to the state of a new instance. | The same slot assignment, Enable/Bypass state, chain order, and saved Snapshots remain; the editor is recreated after confirmation.
 Test Effect | Processes the bundled short WAV through this slot. | Uses the editor's owning slot, not a different track.
 Snapshot Slot 1-5 | Choose a host-side snapshot slot. | Snapshots are stored outside the project under workspace\vst3\snapshots.
 Load | Load a snapshot into the current editor and apply it. | Check the compact toolbar/title context first.
@@ -449,6 +451,7 @@ Effect chain troubleshooting checklist
 - Confirm Bypass is unchecked for that slot.
 - Click Apply Track Settings after changing dropdown, Enable, or Bypass.
 - Open the correct slot editor and click Apply Changes after changing plugin parameters.
+- Use Default only when you intend to discard the current applied state and reopen that same effect assignment at its new-instance settings; snapshots are not deleted.
 - Check the log for missing bundle, unsupported plugin, processing, or render errors.
 
 12. VST3 Plugin Manager And Instrument Hosting
@@ -482,7 +485,8 @@ Step | Action | Reason
 3 | Check status/classification in the Plugin Manager. | Avoid assigning a plugin in the wrong role.
 4 | Assign one plugin to one test track first. | Limits troubleshooting scope.
 5 | Open the editor and use Apply Changes. | Captures parameter state.
-6 | Use Test Effect or short preview before full render. | Finds failures quickly.
+6 | Test Default once on a disposable track or slot. | Confirms the same assignment reopens with new-instance settings while snapshots and track/slot ownership remain intact.
+7 | Use Test Effect or short preview before full render. | Finds failures quickly.
 
 13. SoundFont, SF3, And SFZ Workflows
 =====================================
@@ -558,7 +562,7 @@ New Project, Open Project, Start From File, and Exit discard paths should remove
 16. Settings, Themes, And Helper Bubbles
 ========================================
 
-CLAP Settings / Compatibility includes Plugin Graphics Adapter, Refresh Adapter List, Max Open CLAP Windows, Safe CLAP Plugin UI Mode, and compatibility/details text for detected graphics adapters.
+CLAP Settings / Compatibility includes Plugin Graphics Adapter, Refresh Adapter List, Max Open CLAP Windows, Safe CLAP Plugin UI Mode, and compatibility/details text for detected graphics adapters. Max Open CLAP Windows counts only CLAP instrument and effect editors and accepts values from 1 through 16.
 
 
 Helper bubbles
@@ -701,7 +705,8 @@ Preview works but final render differs | Different selected track/sequence/rende
 This index is text-only for now. A future final guide can make the Contents and Index clickable. The list below is intentionally broad so button names can be found quickly.
 Button/Menu | Where | Summary
 --- | --- | ---
-Apply Changes | VST editor toolbar | Capture plugin UI state for the editor's owning track/slot.
+Apply Changes | Plugin editor toolbar | Capture plugin UI state for the editor's owning track/slot.
+Default | Plugin editor toolbar | After confirmation, clear the owning VST3/CLAP instrument or effect state and recreate the same assignment as a new instance; saved Snapshots remain.
 Apply Project Defaults | Main window Project Defaults | Commit backend/instrument defaults for future tracks.
 Apply Track Settings | Main window Track Controls | Commit selected-track instrument, mixer, and VST effect-slot controls.
 Bypass | VST Effect slot rows | Skip a configured effect slot without clearing it.
@@ -821,7 +826,7 @@ Rendered AudioClip arrangements that should become tracks have been created with
 Enhanced AudioClip copies that should become tracks have been created with Create Enhanced Copy. | Ensures staged enhanced media can migrate into the saved project folder.
 Recorded takes have been Save / Applied or discarded. | Avoids losing a wanted take or keeping an unwanted one.
 Track settings have been applied after changes. | Ensures dropdowns, Enable, Bypass, mute/solo, and volume are saved.
-Open VST editors have had Apply Changes clicked after parameter edits. | Captures plugin state into the project.
+Open plugin editors have had Apply Changes clicked after parameter edits, or Default was intentionally used where a factory/new-instance reset was wanted. | Captures plugin state into the project or confirms that the applied state was deliberately cleared and recreated.
 Preview sounds correct. | Catches missing tools, muted tracks, wrong effect states, missing Aux arrangement clips, missing Aux source files, or unexpected track/master volume before saving/exporting.
 If exporting MP3 with cover art, Attach Album Art points to the intended image. | Ensures the selected artwork is embedded only in MP3 renders.
 
@@ -861,10 +866,14 @@ VST settings
 ------------
 Setting | Values | Notes
 --- | --- | ---
-Max open VST windows | Configured limit | Prevents too many native plugin editors from being open at once.
+Max open VST windows | 1-16 | Limits VST3 instrument and effect editors only; CLAP editor windows use their own independent setting.
 Experimental acknowledgement | OK-only prompt | Shown from VST enable/open actions to remind users of plugin risk.
 Graphics adapter preference | Compact numeric preference | Stored separately from the adapter cache list.
 Plugin classification | Instrument, Effect, Warning, Unsupported | Controls where plugins appear in assignment dropdowns.
+
+Plugin editor window limits
+---------------------------
+VST3 and CLAP editor limits are independent. A VST3 limit of 4 permits up to four VST3 instrument/effect editors, and a CLAP limit of 4 permits up to four CLAP instrument/effect editors. With both set to 4, up to eight plugin editor windows can be open in total. Each setting accepts values from 1 through 16.
 
 Render-output settings
 ----------------------

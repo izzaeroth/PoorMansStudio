@@ -2,12 +2,31 @@
 
 #include "clap/ClapPluginTypes.h"
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
 
 namespace mw::clap
 {
+    struct ClapCapabilityInspection
+    {
+        bool latencyExtensionAvailable = false;
+        bool latencyValueQueried = false;
+        bool tailExtensionAvailable = false;
+        bool tailValueQueried = false;
+        bool tailInfinite = false;
+        bool paramsExtensionAvailable = false;
+        bool parameterCountQueried = false;
+        bool stateExtensionAvailable = false;
+        bool guiExtensionAvailable = false;
+        bool hostThreadCheckProvided = true;
+        bool hostThreadCheckRequested = false;
+        std::int64_t latencySamples = -1;
+        std::int64_t tailSamples = -1;
+        int parameterCount = -1;
+    };
+
     struct ClapAbiProbeResult
     {
         bool attempted = false;
@@ -17,11 +36,12 @@ namespace mw::clap
         bool foundFactory = false;
         bool foundDescriptor = false;
         int pluginCount = 0;
+        int selectedIndex = 0;
         std::string message;
         ClapPluginDescriptor descriptor;
     };
 
-    struct ClapInstanceValidationResult
+    struct ClapInstanceValidationResult : ClapCapabilityInspection
     {
         bool attempted = false;
         bool loadedLibrary = false;
@@ -44,21 +64,13 @@ namespace mw::clap
 
         bool ok() const
         {
-            return attempted
-                && loadedLibrary
-                && foundEntry
-                && entryInitialized
-                && foundFactory
-                && foundDescriptor
-                && instanceCreated
-                && pluginInitialized
-                && instanceDestroyed
+            return attempted && loadedLibrary && foundEntry && entryInitialized && foundFactory
+                && foundDescriptor && instanceCreated && pluginInitialized && instanceDestroyed
                 && entryDeinitialized;
         }
     };
 
-
-    struct ClapActivationValidationResult
+    struct ClapActivationValidationResult : ClapCapabilityInspection
     {
         bool attempted = false;
         bool loadedLibrary = false;
@@ -98,24 +110,13 @@ namespace mw::clap
 
         bool ok() const
         {
-            return attempted
-                && loadedLibrary
-                && foundEntry
-                && entryInitialized
-                && foundFactory
-                && foundDescriptor
-                && instanceCreated
-                && pluginInitialized
-                && pluginActivated
-                && pluginDeactivated
-                && instanceDestroyed
-                && entryDeinitialized;
+            return attempted && loadedLibrary && foundEntry && entryInitialized && foundFactory
+                && foundDescriptor && instanceCreated && pluginInitialized && pluginActivated
+                && pluginDeactivated && instanceDestroyed && entryDeinitialized;
         }
     };
 
-
-
-    struct ClapProcessValidationResult
+    struct ClapProcessValidationResult : ClapCapabilityInspection
     {
         bool attempted = false;
         bool loadedLibrary = false;
@@ -138,6 +139,8 @@ namespace mw::clap
         bool callbackRequested = false;
         bool audioPortsExtensionAvailable = false;
         bool notePortsExtensionAvailable = false;
+        bool finiteOutput = true;
+        int nonFiniteSampleCount = 0;
         int audioInputPortCount = -1;
         int audioOutputPortCount = -1;
         int noteInputPortCount = -1;
@@ -169,29 +172,76 @@ namespace mw::clap
 
         bool ok() const
         {
-            return attempted
-                && loadedLibrary
-                && foundEntry
-                && entryInitialized
-                && foundFactory
-                && foundDescriptor
-                && instanceCreated
-                && pluginInitialized
-                && pluginActivated
-                && pluginStartedProcessing
-                && pluginProcessCalled
-                && pluginProcessReturnedOk
-                && pluginStoppedProcessing
-                && pluginDeactivated
-                && instanceDestroyed
+            return attempted && loadedLibrary && foundEntry && entryInitialized && foundFactory
+                && foundDescriptor && instanceCreated && pluginInitialized && pluginActivated
+                && pluginStartedProcessing && pluginProcessCalled && pluginProcessReturnedOk
+                && finiteOutput && pluginStoppedProcessing && pluginDeactivated && instanceDestroyed
                 && entryDeinitialized;
+        }
+    };
+
+    struct ClapStateValidationResult : ClapCapabilityInspection
+    {
+        bool attempted = false;
+        bool loadedLibrary = false;
+        bool foundEntry = false;
+        bool entryInitialized = false;
+        bool foundFactory = false;
+        bool foundDescriptor = false;
+        bool firstInstanceCreated = false;
+        bool firstPluginInitialized = false;
+        bool stateSaved = false;
+        bool firstInstanceDestroyed = false;
+        bool secondInstanceCreated = false;
+        bool secondPluginInitialized = false;
+        bool stateLoaded = false;
+        bool secondPluginActivated = false;
+        bool secondPluginStartedProcessing = false;
+        bool secondPluginProcessCalled = false;
+        bool secondPluginProcessReturnedOk = false;
+        bool finiteOutput = true;
+        int nonFiniteSampleCount = 0;
+        double maxOutputAbs = 0.0;
+        bool secondPluginStoppedProcessing = false;
+        bool secondPluginDeactivated = false;
+        bool stateResaved = false;
+        bool stateByteEquivalent = false;
+        bool secondInstanceDestroyed = false;
+        bool entryDeinitialized = false;
+        bool restartRequested = false;
+        bool processRequested = false;
+        bool callbackRequested = false;
+        int pluginCount = 0;
+        int selectedIndex = 0;
+        double sampleRate = 48000.0;
+        int minFrames = 1;
+        int maxFrames = 1024;
+        int processFrames = 64;
+        std::size_t firstStateBytes = 0;
+        std::size_t secondStateBytes = 0;
+        std::string firstStateHash;
+        std::string secondStateHash;
+        std::string stage;
+        std::string message;
+        ClapPluginDescriptor descriptor;
+
+        bool ok() const
+        {
+            return attempted && loadedLibrary && foundEntry && entryInitialized && foundFactory
+                && foundDescriptor && firstInstanceCreated && firstPluginInitialized && stateSaved
+                && firstInstanceDestroyed && secondInstanceCreated && secondPluginInitialized
+                && stateLoaded && secondPluginActivated && secondPluginStartedProcessing
+                && secondPluginProcessCalled && secondPluginProcessReturnedOk && finiteOutput
+                && secondPluginStoppedProcessing && secondPluginDeactivated && stateResaved
+                && secondInstanceDestroyed && entryDeinitialized;
         }
     };
 
     class ClapAbiProbe
     {
     public:
-        static ClapAbiProbeResult probePluginPath(const std::filesystem::path& outerPluginPath);
+        static ClapAbiProbeResult probePluginPath(const std::filesystem::path& outerPluginPath,
+                                                  int pluginIndex = 0);
         static ClapInstanceValidationResult validatePluginInstance(const std::filesystem::path& outerPluginPath,
                                                                    int pluginIndex = 0);
         static ClapActivationValidationResult validatePluginActivation(const std::filesystem::path& outerPluginPath,
@@ -205,5 +255,11 @@ namespace mw::clap
                                                                         int minFrames = 1,
                                                                         int maxFrames = 1024,
                                                                         int processFrames = 64);
+        static ClapStateValidationResult validatePluginStateRoundTrip(const std::filesystem::path& outerPluginPath,
+                                                                       int pluginIndex = 0,
+                                                                       double sampleRate = 48000.0,
+                                                                       int minFrames = 1,
+                                                                       int maxFrames = 1024,
+                                                                       int processFrames = 64);
     };
 }

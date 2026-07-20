@@ -44,10 +44,10 @@ Current VST3 support includes:
 - VST3 Plugin Manager with **All Plugins**, **Supported Instruments**, **Supported Effects**, and **Unsupported** filters.
 - Two-slot VST Effect chain controls in the main track inspector: choose Supported Effects for slot 1 and slot 2, enable/disable or bypass each slot, save the assignments in `.mwproj` files, and process the chain during offline preview/render paths for MIDI and AudioClip tracks.
 - Fixed effect-chain order: source track -> VST Effect 1 -> VST Effect 2 -> preview/export output. Unassigned, disabled, or bypassed slots are skipped.
-- VST editor host windows use a small toolbar under the title bar for **Apply Changes**; tiny plugin UIs get a wider minimum host size while remaining resizable.
+- VST editor host windows use a small toolbar under the title bar for **Apply Changes** and **Default**; tiny plugin UIs get a wider minimum host size while remaining resizable.
 - Manual override for plugins that are safe instruments or effect candidates but detected as unknown/unsupported.
 - One VST plugin editor window per track instrument assignment and one VST effect editor window per track/effect slot.
-- Track-owned VST editor toolbar with **Apply Changes**, **Test Instrument** for instrument editors, a compact target label such as `Track #1 - S1 - Reverb`, and **Test Effect** for effect editors.
+- Track-owned VST editor toolbar with **Apply Changes**, **Default**, **Test Instrument** for instrument editors, a compact target label such as `Track #1 - S1 - Reverb`, and **Test Effect** for effect editors. **Default** clears only the applied plugin state and recreates the same assignment as a new instance; snapshots remain available.
 - Per-track VST state save/restore so two tracks using the same plugin can keep different sounds.
 - VST state excluded from normal host-side note/edit undo-redo history.
 - VST Host Helper Status from the VST Plugins menu, backed by the helper executable.
@@ -65,8 +65,8 @@ Current CLAP support includes:
 - CLAP Plugin Manager with instrument/effect cataloging and user-facing **CLAP Instrument** / **CLAP Effect** labels.
 - CLAP Settings / Compatibility for plugin graphics adapter choice, maximum open CLAP windows, Safe CLAP Plugin UI Mode, and **Refresh Adapter List**.
 - CLAP Host Helper Status from the CLAP Plugins menu, backed by the helper foundation under `workspace/clap_host`.
-- CLAP instrument editor windows with **Apply Changes**, **Test Instrument**, snapshots, and explicit state capture.
-- CLAP effect editor windows for track Effect Slot 1 / Slot 2 with **Apply Changes**, **Test Effect**, snapshots, and explicit state capture.
+- CLAP instrument editor windows with **Apply Changes**, **Default**, **Test Instrument**, snapshots, and explicit state capture.
+- CLAP effect editor windows for track Effect Slot 1 / Slot 2 with **Apply Changes**, **Default**, **Test Effect**, snapshots, and explicit state capture.
 - Offline CLAP instrument rendering and CLAP effect processing for render/export and fallback preview paths.
 - Direct CLAP preview for compatible selected-track and multi-track CLAP projects through the live scheduler/callback bridge.
 - Guarded live CLAP Effect Slot 1 / Slot 2 routing during direct CLAP preview when the selected effects are CLAP effects.
@@ -369,7 +369,7 @@ Example summary:
 ```text
 Poor Man's Studio Build Summary
 --------------------------------
-Version:        0.66.4
+Version:        0.66.5
 Configuration:  Release
 Generator:      Visual Studio 18 2026
 Platform:       x64
@@ -658,7 +658,7 @@ source track -> VST Effect 1 -> VST Effect 2 -> preview/export
 
 Unassigned, disabled, or bypassed slots are skipped. Open Slot 1/2 is unavailable unless that slot has an assigned plugin and its Enable checkbox is checked. If both slots are enabled and assigned, slot 2 receives the output from slot 1. The old single-effect project format is read as slot 1 for compatibility.
 
-Use **Apply Track Settings** as the clear commit point for track-level effect choices: slot assignments, Enable, Bypass, mute/solo, volume, and other track controls. Use **Apply Changes** inside a VST editor only after changing plugin parameters; that editor button saves the plugin state for the owning track and slot.
+Use **Apply Track Settings** as the clear commit point for track-level effect choices: slot assignments, Enable, Bypass, mute/solo, volume, and other track controls. Use **Apply Changes** inside a plugin editor only after changing plugin parameters; that editor button saves the plugin state for the owning track and slot. Use **Default** when you want the same VST3 or CLAP instrument/effect assignment recreated at its new-instance state without removing the track or effect slot. Default discards unapplied editor changes and the applied state after confirmation, but preserves plugin identity, slot order, Enable/Bypass, and host snapshots.
 
 Imported and recorded AudioClip source media stays dry. Track effects are applied non-destructively during preview and export rather than being printed into project recording media. During offline preview/export, enabled non-bypassed slots are applied to temporary processed WAV files and those temporary files are mixed into the render without rewriting the source media. AudioClip Enhancement / Repair creates temporary previews or generated enhanced copies without overwriting the original source. New AudioClip media and selected MP3 album-art images stage in the active `workspace/temp/recordings/rec_...` session when the project is unsaved; **Save Project** moves only applied/attached staged clips into the saved project folder, while **Discard** removes the current staging session instead of leaving abandoned media for a later project.
 
@@ -688,21 +688,21 @@ The **Track Live Effects** checkbox controls monitoring only. When checked, the 
 
 ### VST Editor Host Windows
 
-Track-owned VST Instrument and VST Effect editor windows enforce a minimum host-window size while remaining resizable from the window corner. Very small plugin editors may leave extra empty host-window space, but the editor toolbar under the title bar keeps **Apply Changes** usable instead of crowding it into the title bar. VST effect toolbars use compact target wording such as `Track #1 - S1 - Reverb`; VST instrument custom title bars include the owning track, for example `Track: #1 - Lead Piano | Instrument | Plugin: Dexed`. Status feedback stays in tooltips/logs instead of a trailing status text label. The **Window** menu also includes side submenus for **VST Instrument** and **VST Effect** whenever those editor windows are open, so you can bring a specific track/slot editor to the front like the Piano Roll window list. When changing a MIDI track to a scanned VST3 instrument, **Choose scanned VST3 plugin** now opens a clear chooser dialog instead of a tiny follow-up popup.
+Track-owned VST Instrument and VST Effect editor windows enforce a minimum host-window size while remaining resizable from the window corner. Very small plugin editors may leave extra empty host-window space, but the editor toolbar under the title bar keeps **Apply Changes** and **Default** usable instead of crowding them into the title bar. VST effect toolbars use compact target wording such as `Track #1 - S1 - Reverb`; VST instrument custom title bars include the owning track, for example `Track: #1 - Lead Piano | Instrument | Plugin: Dexed`. Status feedback stays in tooltips/logs instead of a trailing status text label. The **Window** menu also includes side submenus for **VST Instrument** and **VST Effect** whenever those editor windows are open, so you can bring a specific track/slot editor to the front like the Piano Roll window list. When changing a MIDI track to a scanned VST3 instrument, **Choose scanned VST3 plugin** now opens a clear chooser dialog instead of a tiny follow-up popup.
 
-The editor toolbar also includes **Snapshot** slots. Each VST instrument and VST effect editor has five host-side snapshot slots with **Load**, **Save**, **Clear Current**, and **Clear All** buttons. Clear actions ask for confirmation before deleting snapshot files. Snapshots save the plugin state blob for the exact plugin identity and editor role outside the project under `workspace/vst3/snapshots`, so a favorite instrument or effect setting can be reused on another track or project using the same plugin. Snapshot loading is blocked when the saved snapshot does not match the current plugin/role.
+The **Default** button asks for confirmation, clears only the owning instrument or effect slot's applied plugin state, closes the old editor safely, and opens a fresh instance of the same VST3 or CLAP plugin. Track identity, plugin assignment, effect-slot position, Enable/Bypass state, and saved Snapshot files are preserved. The editor toolbar also includes **Snapshot** slots. Each VST instrument and VST effect editor has five host-side snapshot slots with **Load**, **Save**, **Clear Current**, and **Clear All** buttons. Clear actions ask for confirmation before deleting snapshot files. Snapshots save the plugin state blob for the exact plugin identity and editor role outside the project under `workspace/vst3/snapshots`, so a favorite instrument or effect setting can be reused on another track or project using the same plugin. Snapshot loading is blocked when the saved snapshot does not match the current plugin/role.
 
 ### VST Plugin Graphics Adapter
 
-Poor Man's Studio can list the graphics adapters reported by Windows for VST plugin editor windows. The default choice is **System Default / Auto**, which lets Windows and the plugin choose the rendering path.
+Poor Man's Studio can list the graphics adapters reported by Windows for VST plugin editor windows. The default choice is **System Default / Auto**, which lets Windows and the plugin choose the rendering path. **Max Open VST Windows** applies only to VST3 instrument and effect editors and can be set from 1 through 16.
 
 If multiple adapters are available, you may choose one manually. The selected adapter is a preferred graphics adapter for VST plugin editor windows, not a guarantee; some plugins, drivers, or Windows graphics settings may still choose a different rendering path. This setting does not affect audio render quality. Adapters are labeled as **Hardware** or **Software** when that information is available. Poor Man's Studio does not classify adapters as integrated or dedicated, and it does not use video memory size to make that decision. The adapter list is cached from the last manual refresh and reused on future launches; it is only replaced when you use **Refresh Adapter List** again. The cached adapter rows are stored separately in `workspace/settings/vst_graphics_adapters.txt`; the normal user preferences file keeps only the compact numeric preferred adapter option.
 
 ### CLAP Plugin Graphics Adapter And Compatibility
 
-CLAP Settings mirrors the VST3 graphics-adapter pattern where practical. The default choice is **System Default / Auto**, which lets Windows and the plugin decide. **Refresh Adapter List** updates the cached adapter list. **Max Open CLAP Windows** limits how many CLAP editor windows can be open at once, and **Safe CLAP Plugin UI Mode** is available as a compatibility option for fragile plugin editors.
+CLAP Settings mirrors the VST3 graphics-adapter pattern where practical. The default choice is **System Default / Auto**, which lets Windows and the plugin decide. **Refresh Adapter List** updates the cached adapter list. **Max Open CLAP Windows** applies only to CLAP instrument and effect editors and can be set from 1 through 16. The VST3 and CLAP limits are independent, so setting both to 4 permits up to four VST3 editors and four CLAP editors. **Safe CLAP Plugin UI Mode** is available as a compatibility option for fragile plugin editors.
 
-Open CLAP editor tweaks are not silently committed during arming or preview. Use **Apply Changes** in the CLAP editor when you want the plugin state saved to the project. **Test Instrument** captures the current open editor state for its one-off test without applying it to the project, while **Test Effect** processes the shared bundled test sample through the effect.
+Open CLAP editor tweaks are not silently committed during arming or preview. Use **Apply Changes** in the CLAP editor when you want the plugin state saved to the project. Use **Default** to recreate the same CLAP instrument or effect at its new-instance state while preserving the assignment and snapshots. **Test Instrument** captures the current open editor state for its one-off test without applying it to the project, while **Test Effect** processes the shared bundled test sample through the effect.
 
 ### Track And Master Gain Range
 

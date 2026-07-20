@@ -65,7 +65,7 @@ namespace
 {
     constexpr double kEffectSlotPreviewTailOverscanSeconds = 12.0;
     constexpr int kDefaultMaxOpenVstPluginWindows = 4;
-    constexpr int kHardMaxOpenVstPluginWindows = 12;
+    constexpr int kHardMaxOpenVstPluginWindows = 16;
     constexpr int kMinimumVstEditorHostWidth = 1020;
     constexpr int kMinimumVstEditorHostHeight = 380;
     constexpr int kMaximumVstEditorHostWidth = 4096;
@@ -1838,7 +1838,8 @@ namespace
             maxOpenPluginWindowsCombo.addItem("2", 2);
             maxOpenPluginWindowsCombo.addItem("4 - Recommended", 4);
             maxOpenPluginWindowsCombo.addItem("8", 8);
-            maxOpenPluginWindowsCombo.addItem("12 - Hard Cap", 12);
+            maxOpenPluginWindowsCombo.addItem("12", 12);
+            maxOpenPluginWindowsCombo.addItem("16 - Hard Cap", 16);
             maxOpenPluginWindowsCombo.setSelectedId(maxOpenPluginWindows, juce::dontSendNotification);
             maxOpenPluginWindowsCombo.onChange = [this]
             {
@@ -3512,6 +3513,7 @@ namespace
                 VstPluginEditorHostContent(std::unique_ptr<juce::Component> pluginEditorContentIn,
                                            juce::String targetTextIn,
                                            std::function<void()> onApplyCallbackIn,
+                                           std::function<void()> onDefaultCallbackIn,
                                            std::function<void()> onTestEffectCallbackIn = {},
                                            std::function<void(int)> onLoadSnapshotCallbackIn = {},
                                            std::function<void(int)> onSaveSnapshotCallbackIn = {},
@@ -3522,6 +3524,7 @@ namespace
                     : pluginEditorContent(std::move(pluginEditorContentIn)),
                       targetText(std::move(targetTextIn)),
                       onApplyCallback(std::move(onApplyCallbackIn)),
+                      onDefaultCallback(std::move(onDefaultCallbackIn)),
                       onTestEffectCallback(std::move(onTestEffectCallbackIn)),
                       onLoadSnapshotCallback(std::move(onLoadSnapshotCallbackIn)),
                       onSaveSnapshotCallback(std::move(onSaveSnapshotCallbackIn)),
@@ -3539,6 +3542,28 @@ namespace
                     {
                         if (onApplyCallback)
                             onApplyCallback();
+                    };
+
+                    defaultButton.setButtonText("Default");
+                    defaultButton.setTooltip("Reset this plugin to the state of a new instance. The plugin assignment and saved Snapshots are preserved.");
+                    defaultButton.onClick = [this]
+                    {
+                        if (!onDefaultCallback)
+                            return;
+
+                        juce::Component::SafePointer<VstPluginEditorHostContent> safeThis(this);
+                        juce::AlertWindow::showOkCancelBox(juce::AlertWindow::WarningIcon,
+                                                            "Reset Plugin to Default",
+                                                            "Reset " + targetText + " to the state of a new plugin instance?\n\n"
+                                                            "Current unapplied editor changes and the applied state for this track or effect slot will be discarded. Saved Snapshots will not be deleted.",
+                                                            "Reset",
+                                                            "Cancel",
+                                                            this,
+                                                            juce::ModalCallbackFunction::create([safeThis](int result)
+                                                            {
+                                                                if (safeThis != nullptr && result != 0 && safeThis->onDefaultCallback)
+                                                                    safeThis->onDefaultCallback();
+                                                            }));
                     };
 
                     if (testButtonText.isEmpty())
@@ -3626,6 +3651,10 @@ namespace
 
                     addAndMakeVisible(toolbarBackground);
                     addAndMakeVisible(applyButton);
+                    if (onDefaultCallback)
+                        addAndMakeVisible(defaultButton);
+                    else
+                        defaultButton.setVisible(false);
                     addAndMakeVisible(targetLabel);
 
                     if (onTestEffectCallback)
@@ -3670,6 +3699,7 @@ namespace
                         return;
 
                     applyButton.setTooltip(statusText);
+                    defaultButton.setTooltip(statusText);
                     loadSnapshotButton.setTooltip(statusText);
                     saveSnapshotButton.setTooltip(statusText);
                 }
@@ -3699,6 +3729,18 @@ namespace
                     auto row = toolbar.reduced(10, 6);
                     applyButton.setBounds(row.removeFromLeft(124));
                     row.removeFromLeft(8);
+
+                    if (onDefaultCallback)
+                    {
+                        defaultButton.setVisible(true);
+                        defaultButton.setBounds(row.removeFromLeft(78));
+                        row.removeFromLeft(8);
+                    }
+                    else
+                    {
+                        defaultButton.setVisible(false);
+                        defaultButton.setBounds(0, 0, 0, 0);
+                    }
 
                     if (onTestEffectCallback)
                     {
@@ -3776,6 +3818,7 @@ namespace
                 VstEditorStateProvider* stateProvider = nullptr;
                 juce::String targetText;
                 std::function<void()> onApplyCallback;
+                std::function<void()> onDefaultCallback;
                 std::function<void()> onTestEffectCallback;
                 std::function<void(int)> onLoadSnapshotCallback;
                 std::function<void(int)> onSaveSnapshotCallback;
@@ -3786,6 +3829,7 @@ namespace
 
                 juce::Label toolbarBackground;
                 juce::TextButton applyButton;
+                juce::TextButton defaultButton;
                 juce::TextButton testEffectButton;
                 juce::Label snapshotLabel;
                 juce::ComboBox snapshotCombo;
@@ -12839,12 +12883,12 @@ namespace mw::gui
         logMessage(assignmentMessage);
     }
 
-    void MainComponent::openSelectedTrackVstPluginUi()
+    void MainComponent::openSelectedTrackVstPluginUi(int requestedTrackIndex)
     {
         if (!currentProject)
             return;
 
-        const auto index = getSelectedTrackIndex();
+        const auto index = requestedTrackIndex >= 0 ? requestedTrackIndex : getSelectedTrackIndex();
         if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
         {
             logMessage("VST UI: no valid selected track.");
@@ -12860,9 +12904,11 @@ namespace mw::gui
 
         auto clapPluginPath = resolveClapPluginPath(track.getInstrument());
         const int selectedTrackBackendChoice = trackBackendCombo.getSelectedId() > 0 ? trackBackendCombo.getSelectedId() : 1;
+        const bool explicitTrackRequest = requestedTrackIndex >= 0;
         const bool wantsClapInstrument = track.getInstrument().backendType == mw::core::SampleBackendType::CLAP
-            || selectedTrackBackendChoice == 5
-            || (selectedTrackBackendChoice == 1 && appliedProjectBackendId == 4);
+            || (!explicitTrackRequest
+                && (selectedTrackBackendChoice == 5
+                    || (selectedTrackBackendChoice == 1 && appliedProjectBackendId == 4)));
 
         if (wantsClapInstrument)
         {
@@ -12954,12 +13000,12 @@ namespace mw::gui
             }
 
             const int effectiveWindowLimit = sanitizeMaxOpenVstPluginWindows(clapMaxOpenPluginWindows);
-            const int totalOpenPluginWindows = static_cast<int>(vstPluginEditorWindows.size() + clapInstrumentEditorWindows.size() + vstEffectEditorWindows.size() + clapEffectEditorWindows.size());
-            if (totalOpenPluginWindows >= effectiveWindowLimit)
+            const int totalOpenClapWindows = static_cast<int>(clapInstrumentEditorWindows.size() + clapEffectEditorWindows.size());
+            if (totalOpenClapWindows >= effectiveWindowLimit)
             {
-                const auto message = juce::String("Maximum open CLAP/plugin windows reached (")
+                const auto message = juce::String("Maximum open CLAP windows reached (")
                     + juce::String(effectiveWindowLimit)
-                    + "). Close another plugin window first, or increase the limit in CLAP Plugins > CLAP Settings.";
+                    + "). Close another CLAP plugin window first, or increase the limit in CLAP Plugins > CLAP Settings.";
                 logMessage(message);
                 juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open Plugin Instrument", message);
                 return;
@@ -13339,6 +13385,38 @@ namespace mw::gui
                     if (safeHolder != nullptr)
                         safeHolder->requestApplyCurrentChanges();
                 },
+                [this, index, safeHostContentRef]
+                {
+                    if (!currentProject || index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+                        return;
+
+                    auto& editedTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
+                    auto assignment = editedTrack.getInstrument();
+                    if (assignment.backendType != mw::core::SampleBackendType::CLAP || !assignment.vst3.hasPluginIdentity())
+                    {
+                        if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                            (*safeHostContentRef)->setToolbarStatus("Default reset failed: this track no longer has the CLAP instrument assigned.");
+                        return;
+                    }
+
+                    stopLivePlaybackBeforeProjectMutation();
+                    assignment.vst3.stateBase64.clear();
+                    editedTrack.setInstrumentAssignment(assignment);
+                    cleanupPianoRollPreviewFiles();
+                    refreshTrackManagerText();
+                    recordExternalTrackStateUpdate(index);
+                    setProjectDirty();
+
+                    if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                        (*safeHostContentRef)->setToolbarStatus("Resetting this CLAP instrument to a new instance. Saved Snapshots are unchanged.");
+                    logMessage("Reset CLAP instrument to its new-instance default state for " + getTrackDisplayName(index) + ". Saved Snapshots were preserved.");
+
+                    runAfterMouseButtonsReleased([this, index]
+                    {
+                        closeVstPluginWindowForTrack(index, "Closed the previous CLAP instrument editor after Default reset.");
+                        openSelectedTrackVstPluginUi(index);
+                    });
+                },
                 [this, index, safeHolder, safeHostContentRef]
                 {
                     juce::String liveEditorState;
@@ -13619,11 +13697,12 @@ namespace mw::gui
         }
 
         const int effectiveWindowLimit = sanitizeMaxOpenVstPluginWindows(vstMaxOpenPluginWindows);
-        if (static_cast<int>(vstPluginEditorWindows.size()) >= effectiveWindowLimit)
+        const int totalOpenVstWindows = static_cast<int>(vstPluginEditorWindows.size() + vstEffectEditorWindows.size());
+        if (totalOpenVstWindows >= effectiveWindowLimit)
         {
             const auto message = juce::String("Maximum open VST plugin windows reached (")
                 + juce::String(effectiveWindowLimit)
-                + "). Close another plugin window first, or use VST/CLAP close-window menu commands.";
+                + "). Close another VST3 plugin window first, or increase the limit in VST Plugins > VST3 Settings.";
             logMessage(message);
             juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open Plugin Instrument", message);
             return;
@@ -14095,6 +14174,38 @@ namespace mw::gui
                 if (safeHolder != nullptr)
                     safeHolder->requestApplyCurrentChanges();
             },
+            [this, index, safeHostContentRef]
+            {
+                if (!currentProject || index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+                    return;
+
+                auto& editedTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
+                auto assignment = editedTrack.getInstrument();
+                if (assignment.backendType != mw::core::SampleBackendType::VST3 || !assignment.vst3.hasPluginIdentity())
+                {
+                    if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                        (*safeHostContentRef)->setToolbarStatus("Default reset failed: this track no longer has the VST3 instrument assigned.");
+                    return;
+                }
+
+                stopLivePlaybackBeforeProjectMutation();
+                assignment.vst3.stateBase64.clear();
+                editedTrack.setInstrumentAssignment(assignment);
+                cleanupPianoRollPreviewFiles();
+                refreshTrackManagerText();
+                recordExternalTrackStateUpdate(index);
+                setProjectDirty();
+
+                if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                    (*safeHostContentRef)->setToolbarStatus("Resetting this VST3 instrument to a new instance. Saved Snapshots are unchanged.");
+                logMessage("Reset VST3 instrument to its new-instance default state for " + getTrackDisplayName(index) + ". Saved Snapshots were preserved.");
+
+                runAfterMouseButtonsReleased([this, index]
+                {
+                    closeVstPluginWindowForTrack(index, "Closed the previous VST3 instrument editor after Default reset.");
+                    openSelectedTrackVstPluginUi(index);
+                });
+            },
             [this, index, safeHolder, safeHostContentRef]
             {
                 juce::String liveEditorState;
@@ -14257,12 +14368,12 @@ namespace mw::gui
         updateOpenVstPluginButtonState();
     }
 
-    void MainComponent::openSelectedTrackVstEffectUi(int effectSlotIndex)
+    void MainComponent::openSelectedTrackVstEffectUi(int effectSlotIndex, int requestedTrackIndex, bool applyPendingAssignment)
     {
         if (!currentProject)
             return;
 
-        const auto index = getSelectedTrackIndex();
+        const auto index = requestedTrackIndex >= 0 ? requestedTrackIndex : getSelectedTrackIndex();
         if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
         {
             logMessage("Effect Slot UI: no valid selected track.");
@@ -14276,8 +14387,11 @@ namespace mw::gui
         const int effectWindowKey = index * 10 + safeEffectSlotIndex;
 
         // The effect dropdown is an assignment control, not only an enable control.
-        // Make sure a newly selected effect is written to this track before opening.
-        applySelectedTrackVstEffectSlots();
+        // Normal toolbar opens commit the selected dropdown assignment first. A Default
+        // reset reopens a known track/slot directly and must not copy controls from a
+        // different currently selected track into the owner track.
+        if (applyPendingAssignment)
+            applySelectedTrackVstEffectSlots();
 
         auto effects = track.getVstEffects();
         auto* firstSlot = &effects.ensureSlot(slotIndexSize);
@@ -14317,12 +14431,12 @@ namespace mw::gui
             }
 
             const int effectiveWindowLimit = sanitizeMaxOpenVstPluginWindows(clapMaxOpenPluginWindows);
-            const int totalOpenPluginWindows = static_cast<int>(vstPluginEditorWindows.size() + clapInstrumentEditorWindows.size() + vstEffectEditorWindows.size() + clapEffectEditorWindows.size());
-            if (totalOpenPluginWindows >= effectiveWindowLimit)
+            const int totalOpenClapWindows = static_cast<int>(clapInstrumentEditorWindows.size() + clapEffectEditorWindows.size());
+            if (totalOpenClapWindows >= effectiveWindowLimit)
             {
-                const auto message = juce::String("Maximum open CLAP/plugin windows reached (")
+                const auto message = juce::String("Maximum open CLAP windows reached (")
                     + juce::String(effectiveWindowLimit)
-                    + "). Close another plugin window first, or increase the limit in CLAP Plugins > CLAP Settings.";
+                    + "). Close another CLAP plugin window first, or increase the limit in CLAP Plugins > CLAP Settings.";
                 logMessage(message);
                 juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open Effect Slot", message);
                 return;
@@ -14709,6 +14823,45 @@ namespace mw::gui
                     if (safeHolder != nullptr)
                         safeHolder->requestApplyCurrentChanges();
                 },
+                [this, index, slotIndexSize, safeEffectSlotIndex, effectWindowKey, slotNumber, safeHostContentRef]
+                {
+                    if (!currentProject || index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+                        return;
+
+                    auto& editedTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
+                    auto effects = editedTrack.getVstEffects();
+                    auto* effectSlot = effects.slot(slotIndexSize);
+                    if (effectSlot == nullptr || effectSlot->backendType != mw::core::EffectSlotBackendType::CLAP || !effectSlot->plugin.hasPluginIdentity())
+                    {
+                        if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                            (*safeHostContentRef)->setToolbarStatus("Default reset failed: this slot no longer has the CLAP effect assigned.");
+                        return;
+                    }
+
+                    stopLivePlaybackBeforeProjectMutation();
+                    effects.ensureSlot(slotIndexSize).plugin.stateBase64.clear();
+                    editedTrack.setVstEffects(std::move(effects));
+                    cleanupPianoRollPreviewFiles();
+                    refreshTrackManagerText();
+                    recordExternalTrackStateUpdate(index);
+                    setProjectDirty();
+
+                    if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                        (*safeHostContentRef)->setToolbarStatus("Resetting this CLAP effect to a new instance. Saved Snapshots are unchanged.");
+                    logMessage("Reset CLAP Effect Slot " + juce::String(slotNumber) + " to its new-instance default state for " + getTrackDisplayName(index) + ". Saved Snapshots were preserved.");
+
+                    runAfterMouseButtonsReleased([this, index, safeEffectSlotIndex, effectWindowKey]
+                    {
+                        if (const auto found = clapEffectEditorWindows.find(effectWindowKey); found != clapEffectEditorWindows.end())
+                        {
+                            if (found->second != nullptr)
+                                found->second->setVisible(false);
+                            clapEffectEditorWindows.erase(found);
+                        }
+                        updateOpenVstPluginButtonState();
+                        openSelectedTrackVstEffectUi(safeEffectSlotIndex, index, false);
+                    });
+                },
                 [this, index, slotIndexSize]
                 {
                     renderVstEffectTestSampleForTrack(index, static_cast<int>(slotIndexSize));
@@ -14926,12 +15079,12 @@ namespace mw::gui
         }
 
         const int effectiveWindowLimit = sanitizeMaxOpenVstPluginWindows(vstMaxOpenPluginWindows);
-        const int totalOpenVstWindows = static_cast<int>(vstPluginEditorWindows.size() + clapInstrumentEditorWindows.size() + vstEffectEditorWindows.size() + clapEffectEditorWindows.size());
+        const int totalOpenVstWindows = static_cast<int>(vstPluginEditorWindows.size() + vstEffectEditorWindows.size());
         if (totalOpenVstWindows >= effectiveWindowLimit)
         {
             const auto message = juce::String("Maximum open VST plugin windows reached (")
                 + juce::String(effectiveWindowLimit)
-                + "). Close another plugin window first, or use VST/CLAP close-window menu commands.";
+                + "). Close another VST3 plugin window first, or increase the limit in VST Plugins > VST3 Settings.";
             logMessage(message);
             juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Open Effect Slot", message);
             return;
@@ -15206,6 +15359,45 @@ namespace mw::gui
             {
                 if (safeHolder != nullptr)
                     safeHolder->requestApplyCurrentChanges();
+            },
+            [this, index, slotIndexSize, safeEffectSlotIndex, effectWindowKey, slotNumber, safeHostContentRef]
+            {
+                if (!currentProject || index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+                    return;
+
+                auto& editedTrack = currentProject->getTracks()[static_cast<std::size_t>(index)];
+                auto effects = editedTrack.getVstEffects();
+                auto* effectSlot = effects.slot(slotIndexSize);
+                if (effectSlot == nullptr || effectSlot->backendType != mw::core::EffectSlotBackendType::VST3 || !effectSlot->plugin.hasPluginIdentity())
+                {
+                    if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                        (*safeHostContentRef)->setToolbarStatus("Default reset failed: this slot no longer has the VST3 effect assigned.");
+                    return;
+                }
+
+                stopLivePlaybackBeforeProjectMutation();
+                effects.ensureSlot(slotIndexSize).plugin.stateBase64.clear();
+                editedTrack.setVstEffects(std::move(effects));
+                cleanupPianoRollPreviewFiles();
+                refreshTrackManagerText();
+                recordExternalTrackStateUpdate(index);
+                setProjectDirty();
+
+                if (safeHostContentRef != nullptr && *safeHostContentRef != nullptr)
+                    (*safeHostContentRef)->setToolbarStatus("Resetting this VST3 effect to a new instance. Saved Snapshots are unchanged.");
+                logMessage("Reset VST3 Effect Slot " + juce::String(slotNumber) + " to its new-instance default state for " + getTrackDisplayName(index) + ". Saved Snapshots were preserved.");
+
+                runAfterMouseButtonsReleased([this, index, safeEffectSlotIndex, effectWindowKey]
+                {
+                    if (const auto found = vstEffectEditorWindows.find(effectWindowKey); found != vstEffectEditorWindows.end())
+                    {
+                        if (found->second != nullptr)
+                            found->second->setVisible(false);
+                        vstEffectEditorWindows.erase(found);
+                    }
+                    updateOpenVstPluginButtonState();
+                    openSelectedTrackVstEffectUi(safeEffectSlotIndex, index, false);
+                });
             },
             [this, index, slotIndexSize]
             {
