@@ -758,7 +758,7 @@ namespace mw::clap
             impl->host.name = "Poor Man's Studio CLAP Editor Host";
             impl->host.vendor = "Poor Man's Studio";
             impl->host.url = "";
-            impl->host.version = "0.66.5";
+            impl->host.version = "0.66.6";
             impl->host.get_extension = hostGetExtension;
             impl->host.request_restart = hostRequestRestart;
             impl->host.request_process = hostRequestProcess;

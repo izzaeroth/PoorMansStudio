@@ -21238,9 +21238,11 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
         if (clip.id <= 0)
             clip.id = currentProject->allocateNextAudioClipId();
 
-        if (clip.trackIndex >= 0 && clip.trackIndex < static_cast<int>(currentProject->getTracks().size()))
+        const int targetTrackIndex = clip.trackIndex;
+
+        if (targetTrackIndex >= 0 && targetTrackIndex < static_cast<int>(currentProject->getTracks().size()))
         {
-            auto& track = currentProject->getTracks()[static_cast<std::size_t>(clip.trackIndex)];
+            auto& track = currentProject->getTracks()[static_cast<std::size_t>(targetTrackIndex)];
             track.setTrackType(mw::core::TrackType::AudioClip);
             track.setInstrumentAssignment(mw::core::makeCustomAudioInstrumentAssignment());
             if (!clip.name.empty())
@@ -21252,6 +21254,14 @@ mw::core::AudioClipSavedFormat MainComponent::getSelectedAudioClipFormat() const
         normalizeEmptySequencesAfterMembershipChange();
         syncSequencesToProjectMetadata();
         refreshTrackSelector();
+
+        if (targetTrackIndex >= 0 && targetTrackIndex < static_cast<int>(currentProject->getTracks().size()))
+        {
+            const int targetTrackNumber = targetTrackIndex + 1;
+            trackManagerSelectBox.setText(juce::String(targetTrackNumber), juce::dontSendNotification);
+            trackCombo.setSelectedId(targetTrackNumber, juce::sendNotification);
+        }
+
         updateTrackSummary(*currentProject);
         refreshTrackManagerText(false);
         refreshAudioRecorderWindowStatus();
@@ -32691,6 +32701,24 @@ void MainComponent::openTrackManagerWindow()
 
         auto previewTrackFromManager = [this]
         {
+            int requestedTrackNumber = trackManagerSelectBox.getText().getIntValue();
+
+            if (currentProject)
+            {
+                const int maxTrack = static_cast<int>(currentProject->getTracks().size());
+                requestedTrackNumber = std::clamp(requestedTrackNumber > 0 ? requestedTrackNumber : 1,
+                                                  1,
+                                                  std::max(1, maxTrack));
+            }
+
+            selectTrackFromManagerPage();
+
+            if (currentProject && trackCombo.getSelectedId() != requestedTrackNumber)
+            {
+                logMessage("Preview Track: complete or cancel the pending track selection before previewing.");
+                return;
+            }
+
             previewSelectedTrackOnBackgroundThread();
         };
 

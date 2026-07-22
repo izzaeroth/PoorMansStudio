@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(PoorMansStudio VERSION 0.66.5)
+project(PoorMansStudio VERSION 0.66.6)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,7 +23,7 @@ add_subdirectory(${JUCE_DIR} external/JUCE-build)
 juce_add_gui_app(PoorMansStudio
     PRODUCT_NAME "Poor Man's Studio"
     COMPANY_NAME "PoorMansStudio"
-    VERSION "0.66.5"
+    VERSION "0.66.6"
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/resources/app_icon_512.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/resources/app_icon_256.png"
 )
@@ -120,7 +120,7 @@ target_link_libraries(PoorMansStudio PRIVATE
 juce_add_console_app(PoorMansStudioVstHost
     PRODUCT_NAME "PoorMansStudioVstHost"
     COMPANY_NAME "PoorMansStudio"
-    VERSION "0.66.5"
+    VERSION "0.66.6"
 )
 
 target_sources(PoorMansStudioVstHost PRIVATE
@@ -158,7 +158,7 @@ target_link_libraries(PoorMansStudioVstHost PRIVATE
 juce_add_console_app(PoorMansStudioClapHost
     PRODUCT_NAME "PoorMansStudioClapHost"
     COMPANY_NAME "PoorMansStudio"
-    VERSION "0.66.5"
+    VERSION "0.66.6"
 )
 
 target_sources(PoorMansStudioClapHost PRIVATE
@@ -194,7 +194,7 @@ if (WIN32)
     target_link_libraries(PoorMansStudioClapHost PRIVATE winmm)
 endif()
 
-message(STATUS "PoorMansStudio v0.66.5 configured successfully")
+message(STATUS "PoorMansStudio v0.66.6 configured successfully")
 
 
 # Copy the built executable to a stable runtime location.
