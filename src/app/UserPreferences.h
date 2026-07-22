@@ -27,6 +27,7 @@ namespace mw::app
         bool suppressSfzRenderWarning = false;
         int themePresetId = 1;
         bool helperBubblesEnabled = true;
+        bool pluginExperimentalWarningAcknowledged = false;
 
         bool vstCompatibilityWarningsEnabled = true;
         bool vstSafePluginUiMode = false;
@@ -38,10 +39,8 @@ namespace mw::app
         std::string vstPreferredPluginGpuId = "auto"; // legacy read-only fallback
         int vstMaxOpenPluginWindows = 4;
         std::string vstGraphicsProfileSummary;
-        bool vstExperimentalWarningAcknowledged = false;
 
         bool clapCompatibilityWarningsEnabled = true;
-        bool clapExperimentalWarningAcknowledged = false;
         bool clapSafePluginUiMode = false;
         int clapMaxOpenPluginWindows = 4;
     };

@@ -766,6 +766,7 @@ namespace mw::gui
         void setHelperBubblesEnabled(bool enabled);
         void setPluginCompatibilityWarningsEnabled(bool enabled);
         bool pluginCompatibilityWarningsEnabled() const;
+        void showPluginExperimentalWarningIfNeeded(bool warningsEnabled);
         void showVstExperimentalWarningIfNeeded();
         void showClapExperimentalWarningIfNeeded();
         bool selectedTrackHasAppliedVstPlugin() const;
@@ -1297,9 +1298,9 @@ namespace mw::gui
         bool vstSafePluginUiMode = false;
         int vstWarningStyleId = 1;
         int vstMaxOpenPluginWindows = 4;
-        bool vstExperimentalWarningAcknowledged = false;
+        bool pluginExperimentalWarningAcknowledged = false;
+        bool pluginExperimentalWarningWindowOpen = false;
         bool clapCompatibilityWarningsEnabled = true;
-        bool clapExperimentalWarningAcknowledged = false;
         bool clapSafePluginUiMode = false;
         int clapMaxOpenPluginWindows = 4;
         mw::vst::GraphicsProfile vstGraphicsProfile;

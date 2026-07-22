@@ -9164,9 +9164,8 @@ namespace mw::gui
         vstSafePluginUiMode = startupPreferences.vstSafePluginUiMode;
         vstWarningStyleId = startupPreferences.vstWarningStyleId;
         vstMaxOpenPluginWindows = sanitizeMaxOpenVstPluginWindows(startupPreferences.vstMaxOpenPluginWindows);
-        vstExperimentalWarningAcknowledged = startupPreferences.vstExperimentalWarningAcknowledged;
+        pluginExperimentalWarningAcknowledged = startupPreferences.pluginExperimentalWarningAcknowledged;
         clapCompatibilityWarningsEnabled = startupPreferences.clapCompatibilityWarningsEnabled;
-        clapExperimentalWarningAcknowledged = startupPreferences.clapExperimentalWarningAcknowledged;
         clapSafePluginUiMode = startupPreferences.clapSafePluginUiMode;
         clapMaxOpenPluginWindows = sanitizeMaxOpenVstPluginWindows(startupPreferences.clapMaxOpenPluginWindows);
         vstGraphicsProfile.detected = startupPreferences.vstGraphicsProfileDetected;
@@ -10173,29 +10172,28 @@ namespace mw::gui
 
 
 
-    void MainComponent::showVstExperimentalWarningIfNeeded()
+    void MainComponent::showPluginExperimentalWarningIfNeeded(bool warningsEnabled)
     {
-        if (!vstCompatibilityWarningsEnabled)
+        if (!warningsEnabled || pluginExperimentalWarningAcknowledged || pluginExperimentalWarningWindowOpen)
             return;
 
-        if (vstExperimentalWarningAcknowledged)
-            return;
-
-        auto preferences = mw::app::UserPreferencesStore::load();
-        if (preferences.vstExperimentalWarningAcknowledged)
+        const auto preferences = mw::app::UserPreferencesStore::load();
+        if (preferences.pluginExperimentalWarningAcknowledged)
         {
-            vstExperimentalWarningAcknowledged = true;
+            pluginExperimentalWarningAcknowledged = true;
             return;
         }
 
+        pluginExperimentalWarningWindowOpen = true;
         auto* warningWindow = new VstProjectDefaultDragonWarningWindow(this, [this]
         {
-            vstExperimentalWarningAcknowledged = true;
+            pluginExperimentalWarningAcknowledged = true;
+            pluginExperimentalWarningWindowOpen = false;
 
-            if (!mw::app::UserPreferencesStore::saveValue("vstExperimentalWarningAcknowledged", "1"))
-                logMessage("ERROR: Failed to save plugin experimental warning acknowledgement.");
+            if (!mw::app::UserPreferencesStore::saveValue("pluginExperimentalWarningAcknowledged", "1"))
+                logMessage("ERROR: Failed to save shared plugin experimental warning acknowledgement.");
             else
-                logMessage("Plugin experimental warning acknowledged.");
+                logMessage("VST3 and CLAP experimental warning acknowledged.");
         });
 
         applyPoorMansStudioWindowIcon(*warningWindow, PoorMansStudioWindowIcon::Caution);
@@ -10203,32 +10201,16 @@ namespace mw::gui
 
 
 
+    void MainComponent::showVstExperimentalWarningIfNeeded()
+    {
+        showPluginExperimentalWarningIfNeeded(vstCompatibilityWarningsEnabled);
+    }
+
+
+
     void MainComponent::showClapExperimentalWarningIfNeeded()
     {
-        if (!clapCompatibilityWarningsEnabled)
-            return;
-
-        if (clapExperimentalWarningAcknowledged)
-            return;
-
-        auto preferences = mw::app::UserPreferencesStore::load();
-        if (preferences.clapExperimentalWarningAcknowledged)
-        {
-            clapExperimentalWarningAcknowledged = true;
-            return;
-        }
-
-        auto* warningWindow = new VstProjectDefaultDragonWarningWindow(this, [this]
-        {
-            clapExperimentalWarningAcknowledged = true;
-
-            if (!mw::app::UserPreferencesStore::saveValue("clapExperimentalWarningAcknowledged", "1"))
-                logMessage("ERROR: Failed to save CLAP plugin experimental warning acknowledgement.");
-            else
-                logMessage("CLAP plugin experimental warning acknowledged.");
-        });
-
-        applyPoorMansStudioWindowIcon(*warningWindow, PoorMansStudioWindowIcon::Caution);
+        showPluginExperimentalWarningIfNeeded(clapCompatibilityWarningsEnabled);
     }
 
 
@@ -35303,6 +35285,7 @@ void MainComponent::renderPianoRollPreview()
         preferences.lastRenderWorkerCount = renderWorkersCombo.getSelectedId() == 100 ? 0 : renderWorkersCombo.getSelectedId();
         preferences.themePresetId = currentThemePresetId;
         preferences.helperBubblesEnabled = helperBubblesEnabled;
+        preferences.pluginExperimentalWarningAcknowledged = pluginExperimentalWarningAcknowledged;
         preferences.vstCompatibilityWarningsEnabled = vstCompatibilityWarningsEnabled;
         preferences.vstSafePluginUiMode = vstSafePluginUiMode;
         preferences.vstWarningStyleId = vstWarningStyleId;
@@ -35313,9 +35296,7 @@ void MainComponent::renderPianoRollPreview()
         preferences.vstMaxOpenPluginWindows = sanitizeMaxOpenVstPluginWindows(vstMaxOpenPluginWindows);
         preferences.vstGraphicsProfileSummary = vstGraphicsProfile.summary();
         saveGraphicsAdaptersToCacheFile(vstGraphicsProfile.adapters);
-        preferences.vstExperimentalWarningAcknowledged = vstExperimentalWarningAcknowledged;
         preferences.clapCompatibilityWarningsEnabled = clapCompatibilityWarningsEnabled;
-        preferences.clapExperimentalWarningAcknowledged = clapExperimentalWarningAcknowledged;
         preferences.clapSafePluginUiMode = clapSafePluginUiMode;
         preferences.clapMaxOpenPluginWindows = sanitizeMaxOpenVstPluginWindows(clapMaxOpenPluginWindows);
 

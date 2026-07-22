@@ -176,6 +176,7 @@ namespace mw::app
         preferences.suppressSfzRenderWarning = getInt(values, "suppressSfzRenderWarning", preferences.suppressSfzRenderWarning ? 1 : 0) != 0;
         preferences.themePresetId = getInt(values, "themePresetId", preferences.themePresetId);
         preferences.helperBubblesEnabled = getInt(values, "helperBubblesEnabled", preferences.helperBubblesEnabled ? 1 : 0) != 0;
+        preferences.pluginExperimentalWarningAcknowledged = getInt(values, "pluginExperimentalWarningAcknowledged", preferences.pluginExperimentalWarningAcknowledged ? 1 : 0) != 0;
         preferences.vstCompatibilityWarningsEnabled = getInt(values, "vstCompatibilityWarningsEnabled", preferences.vstCompatibilityWarningsEnabled ? 1 : 0) != 0;
         preferences.vstSafePluginUiMode = getInt(values, "vstSafePluginUiMode", preferences.vstSafePluginUiMode ? 1 : 0) != 0;
         preferences.vstWarningStyleId = getInt(values, "vstWarningStyleId", preferences.vstWarningStyleId);
@@ -189,9 +190,7 @@ namespace mw::app
             ? preferences.vstMaxOpenPluginWindows
             : std::clamp(loadedMaxOpenVstPluginWindows, 1, 16);
         preferences.vstGraphicsProfileSummary = getString(values, "vstGraphicsProfileSummary", preferences.vstGraphicsProfileSummary);
-        preferences.vstExperimentalWarningAcknowledged = getInt(values, "vstExperimentalWarningAcknowledged", preferences.vstExperimentalWarningAcknowledged ? 1 : 0) != 0;
         preferences.clapCompatibilityWarningsEnabled = getInt(values, "clapCompatibilityWarningsEnabled", preferences.clapCompatibilityWarningsEnabled ? 1 : 0) != 0;
-        preferences.clapExperimentalWarningAcknowledged = getInt(values, "clapExperimentalWarningAcknowledged", preferences.clapExperimentalWarningAcknowledged ? 1 : 0) != 0;
         preferences.clapSafePluginUiMode = getInt(values, "clapSafePluginUiMode", preferences.clapSafePluginUiMode ? 1 : 0) != 0;
         const int loadedMaxOpenClapPluginWindows = getInt(values, "clapMaxOpenPluginWindows", preferences.clapMaxOpenPluginWindows);
         preferences.clapMaxOpenPluginWindows = loadedMaxOpenClapPluginWindows <= 0
@@ -222,7 +221,9 @@ namespace mw::app
 
                 if (key == "lastBaseFileName"
                     || key == "vstPreferredPluginGpuId"
-                    || key == "vstGraphicsProfileAdapters")
+                    || key == "vstGraphicsProfileAdapters"
+                    || key == "vstExperimentalWarningAcknowledged"
+                    || key == "clapExperimentalWarningAcknowledged")
                     continue;
 
                 lines.push_back(line);
@@ -253,7 +254,9 @@ namespace mw::app
         {
             if (key == "lastBaseFileName"
                 || key == "vstPreferredPluginGpuId"
-                || key == "vstGraphicsProfileAdapters")
+                || key == "vstGraphicsProfileAdapters"
+                || key == "vstExperimentalWarningAcknowledged"
+                || key == "clapExperimentalWarningAcknowledged")
                 continue;
 
             if (!key.empty() && writtenKeys.find(key) == writtenKeys.end())
@@ -321,6 +324,7 @@ namespace mw::app
         file << "suppressSfzRenderWarning=" << (preferences.suppressSfzRenderWarning ? 1 : 0) << "\n";
         file << "themePresetId=" << preferences.themePresetId << "\n";
         file << "helperBubblesEnabled=" << (preferences.helperBubblesEnabled ? 1 : 0) << "\n";
+        file << "pluginExperimentalWarningAcknowledged=" << (preferences.pluginExperimentalWarningAcknowledged ? 1 : 0) << "\n";
         file << "vstCompatibilityWarningsEnabled=" << (preferences.vstCompatibilityWarningsEnabled ? 1 : 0) << "\n";
         file << "vstSafePluginUiMode=" << (preferences.vstSafePluginUiMode ? 1 : 0) << "\n";
         file << "vstWarningStyleId=" << preferences.vstWarningStyleId << "\n";
@@ -330,9 +334,7 @@ namespace mw::app
         file << "vstPreferredPluginGpuIndex=" << std::max(1, preferences.vstPreferredPluginGpuIndex) << "\n";
         file << "vstMaxOpenPluginWindows=" << std::clamp(preferences.vstMaxOpenPluginWindows, 1, 16) << "\n";
         file << "vstGraphicsProfileSummary=" << preferences.vstGraphicsProfileSummary << "\n";
-        file << "vstExperimentalWarningAcknowledged=" << (preferences.vstExperimentalWarningAcknowledged ? 1 : 0) << "\n";
         file << "clapCompatibilityWarningsEnabled=" << (preferences.clapCompatibilityWarningsEnabled ? 1 : 0) << "\n";
-        file << "clapExperimentalWarningAcknowledged=" << (preferences.clapExperimentalWarningAcknowledged ? 1 : 0) << "\n";
         file << "clapSafePluginUiMode=" << (preferences.clapSafePluginUiMode ? 1 : 0) << "\n";
         file << "clapMaxOpenPluginWindows=" << std::clamp(preferences.clapMaxOpenPluginWindows, 1, 16) << "\n";
 

@@ -4,8 +4,8 @@
 
 namespace mw::app
 {
-    inline constexpr const char* appVersion = "0.66.6";
-    inline constexpr const char* appVersionLabel = "v0.66.6";
+    inline constexpr const char* appVersion = "0.66.7";
+    inline constexpr const char* appVersionLabel = "v0.66.7";
 
     inline juce::String applicationTitle()
     {
