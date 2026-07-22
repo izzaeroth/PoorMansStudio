@@ -141,6 +141,154 @@ namespace
 
         return true;
     }
+
+    struct AudioFileMetrics
+    {
+        double sampleRate = 0.0;
+        std::int64_t lengthInSamples = 0;
+    };
+
+    std::optional<AudioFileMetrics> readAudioFileMetrics(const std::filesystem::path& wavPath)
+    {
+        if (wavPath.empty() || !std::filesystem::exists(wavPath))
+            return std::nullopt;
+
+        juce::AudioFormatManager formatManager;
+        formatManager.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(juce::File(wavPath.string())));
+        if (reader == nullptr || reader->sampleRate <= 0.0 || reader->lengthInSamples < 0)
+            return std::nullopt;
+
+        return AudioFileMetrics { reader->sampleRate, static_cast<std::int64_t>(reader->lengthInSamples) };
+    }
+
+    struct EffectChainTailTrackingSettings
+    {
+        float silenceThreshold = 1.0e-4f;
+        double silenceHoldSeconds = 0.30;
+        double tailPadSeconds = 0.05;
+        const char* policyName = "preview";
+        const char* thresholdDescription = "-80 dBFS";
+    };
+
+    EffectChainTailTrackingSettings effectChainTailTrackingSettings(mw::vst::EffectTailPolicy policy)
+    {
+        if (policy == mw::vst::EffectTailPolicy::Preview)
+            return {};
+
+        EffectChainTailTrackingSettings settings;
+        settings.silenceThreshold = 1.5848932e-5f; // Approximately -96 dBFS.
+        settings.silenceHoldSeconds = 1.0;
+        settings.tailPadSeconds = 0.15;
+        settings.policyName = "render";
+        settings.thresholdDescription = "-96 dBFS";
+        return settings;
+    }
+
+    bool trimEffectChainTail(const std::filesystem::path& wavPath,
+                             double sourceDurationSeconds,
+                             double maximumTailSeconds,
+                             mw::vst::EffectTailPolicy policy,
+                             std::string& summary,
+                             std::string& error)
+    {
+        constexpr int scanBlockSize = 32768;
+        const auto settings = effectChainTailTrackingSettings(policy);
+
+        juce::AudioFormatManager formatManager;
+        formatManager.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(juce::File(wavPath.string())));
+        if (reader == nullptr)
+        {
+            error = "Could not reopen final Effect Slot chain WAV for " + std::string(settings.policyName)
+                + " tail tracking: " + wavPath.string();
+            return false;
+        }
+
+        const int channelCount = juce::jlimit(1, 8, static_cast<int>(reader->numChannels));
+        const int sampleRate = static_cast<int>(std::max(1.0, reader->sampleRate));
+        const auto totalSamples = static_cast<std::int64_t>(reader->lengthInSamples);
+        const auto sourceSamples = std::clamp<std::int64_t>(
+            static_cast<std::int64_t>(std::llround(std::max(0.0, sourceDurationSeconds) * static_cast<double>(sampleRate))),
+            0,
+            totalSamples);
+        const auto maximumTailSamples = static_cast<std::int64_t>(
+            std::ceil(std::max(0.0, maximumTailSeconds) * static_cast<double>(sampleRate)));
+        const auto scanEndSamples = std::min<std::int64_t>(totalSamples, sourceSamples + maximumTailSamples);
+        const auto silenceHoldSamples = std::max<std::int64_t>(1, static_cast<std::int64_t>(
+            std::ceil(settings.silenceHoldSeconds * static_cast<double>(sampleRate))));
+        const auto tailPadSamples = std::max<std::int64_t>(0, static_cast<std::int64_t>(
+            std::ceil(settings.tailPadSeconds * static_cast<double>(sampleRate))));
+
+        juce::AudioBuffer<float> buffer(channelCount, scanBlockSize);
+        std::int64_t position = sourceSamples;
+        std::int64_t lastAudibleSample = sourceSamples > 0 ? sourceSamples - 1 : -1;
+        std::int64_t consecutiveSilentSamples = 0;
+        while (position < scanEndSamples)
+        {
+            const int blockSamples = static_cast<int>(std::min<std::int64_t>(scanBlockSize, scanEndSamples - position));
+            buffer.setSize(channelCount, blockSamples, false, false, true);
+            buffer.clear();
+            if (!reader->read(&buffer, 0, blockSamples, position, true, true))
+            {
+                error = "Could not read final Effect Slot chain WAV while tracking " + std::string(settings.policyName)
+                    + " tail: " + wavPath.string();
+                return false;
+            }
+
+            for (int sample = 0; sample < blockSamples; ++sample)
+            {
+                bool audible = false;
+                for (int channel = 0; channel < channelCount; ++channel)
+                {
+                    if (std::abs(buffer.getSample(channel, sample)) > settings.silenceThreshold)
+                    {
+                        audible = true;
+                        break;
+                    }
+                }
+
+                const auto absoluteSample = position + sample;
+                if (audible)
+                {
+                    lastAudibleSample = absoluteSample;
+                    consecutiveSilentSamples = 0;
+                }
+                else
+                {
+                    ++consecutiveSilentSamples;
+                }
+            }
+
+            position += blockSamples;
+        }
+
+        const bool endedInConfirmedSilence = consecutiveSilentSamples >= silenceHoldSamples;
+        reader.reset();
+
+        const auto lastAudibleKeep = endedInConfirmedSilence
+            ? (lastAudibleSample >= 0 ? lastAudibleSample + 1 + tailPadSamples : sourceSamples)
+            : scanEndSamples;
+        const auto keepSamples = std::clamp<std::int64_t>(
+            std::max<std::int64_t>(sourceSamples, lastAudibleKeep),
+            0,
+            scanEndSamples);
+        const auto trimmedSamples = std::max<std::int64_t>(0, totalSamples - keepSamples);
+
+        if (trimmedSamples > 0
+            && !rewriteWavTrimmedToSamples(wavPath, keepSamples, channelCount, sampleRate, error))
+        {
+            return false;
+        }
+
+        summary = "final chain " + std::string(settings.policyName) + " tail tracked at " + settings.thresholdDescription
+            + "; silence hold seconds: " + std::to_string(settings.silenceHoldSeconds)
+            + "; tail pad seconds: " + std::to_string(settings.tailPadSeconds)
+            + "; maximum chain tail seconds: " + std::to_string(std::max(0.0, maximumTailSeconds))
+            + "; ended in confirmed silence: " + std::string(endedInConfirmedSilence ? "yes" : "no")
+            + "; trimmed samples: " + std::to_string(trimmedSamples);
+        return true;
+    }
 }
 
 namespace mw::vst
@@ -615,7 +763,7 @@ namespace mw::vst
             std::int64_t silentTailSamples = 0;
             const auto silenceHoldSamples = static_cast<std::int64_t>(kDynamicTailSilenceHoldSeconds * static_cast<double>(sampleRate));
             const auto trimPadSamples = static_cast<std::int64_t>(kDynamicTailPadSeconds * static_cast<double>(sampleRate));
-            bool dynamicTailStoppedOnSilence = false;
+            bool dynamicTailEndedInSilence = false;
 
             try
             {
@@ -673,11 +821,7 @@ namespace mw::vst
                     tailWritten += blockSamples;
                     writtenSamples += blockSamples;
 
-                    if (silenceHoldSamples > 0 && silentTailSamples >= silenceHoldSamples)
-                    {
-                        dynamicTailStoppedOnSilence = true;
-                        break;
-                    }
+                    dynamicTailEndedInSilence = silenceHoldSamples > 0 && silentTailSamples >= silenceHoldSamples;
                 }
             }
             catch (const std::exception& ex)
@@ -735,7 +879,7 @@ namespace mw::vst
                 + "; saved state present: " + std::string(hasSavedEffectState ? "yes" : "no")
                 + "; state restored: " + std::string(load.savedStateApplied ? "yes" : "no")
                 + "; max tail overscan seconds: " + std::to_string(std::max(0.0, request.tailSeconds))
-                + "; dynamic tail stopped on silence: " + std::string(dynamicTailStoppedOnSilence ? "yes" : "no")
+                + "; dynamic tail ended in confirmed silence: " + std::string(dynamicTailEndedInSilence ? "yes" : "no")
                 + "; dynamic tail trimmed samples: " + std::to_string(trimmedSamples)
                 + "; input: " + request.inputWavPath.string()
                 + "; output: " + result.wavPath.string();
@@ -752,6 +896,15 @@ namespace mw::vst
         {
             result.cancelled = true;
             result.message = "Effect Slot chain processing cancelled before start.";
+            return result;
+        }
+
+        const auto sourceMetrics = readAudioFileMetrics(request.inputWavPath);
+        if (!sourceMetrics.has_value())
+        {
+            const auto policyName = request.tailPolicy == EffectTailPolicy::Preview ? "preview" : "render";
+            result.message = "Could not inspect Effect Slot chain source WAV for " + std::string(policyName)
+                + " tail tracking: " + request.inputWavPath.string();
             return result;
         }
 
@@ -827,6 +980,33 @@ namespace mw::vst
         {
             std::error_code ec;
             std::filesystem::remove(tempPath, ec);
+        }
+
+        if (sourceMetrics.has_value())
+        {
+            std::string trimSummary;
+            std::string trimError;
+            const auto inputDurationSeconds = sourceMetrics->sampleRate > 0.0
+                ? static_cast<double>(sourceMetrics->lengthInSamples) / sourceMetrics->sampleRate
+                : 0.0;
+            const auto sourceDurationSeconds = request.sourceContentDurationSeconds >= 0.0
+                ? std::min(request.sourceContentDurationSeconds, inputDurationSeconds)
+                : inputDurationSeconds;
+
+            if (!trimEffectChainTail(
+                    currentInputPath,
+                    sourceDurationSeconds,
+                    request.tailSeconds,
+                    request.tailPolicy,
+                    trimSummary,
+                    trimError))
+            {
+                result.message = trimError;
+                result.wavPath = currentInputPath;
+                return result;
+            }
+
+            chainLog << "; " << trimSummary;
         }
 
         result.success = true;

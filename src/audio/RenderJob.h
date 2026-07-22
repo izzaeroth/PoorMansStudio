@@ -57,6 +57,9 @@ namespace mw::audio
         int channelCount = 2;
         int renderWorkerCount = 0; // 0 = Auto
         int keepStemFilesMask = 3; // 0 = none, 1 = keep WAV stems, 2 = keep MIDI stems, 3 = keep WAV + MIDI stems
+        // Preview jobs use the tighter complete-chain and final-mix tail policy.
+        // Final render/export jobs keep the conservative render policy.
+        bool usePreviewEffectTailPolicy = false;
 
         int sfzKeySwitch = 24;
         int sfzCc1 = 100;

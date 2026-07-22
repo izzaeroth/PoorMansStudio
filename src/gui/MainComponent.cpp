@@ -63,7 +63,7 @@
 
 namespace
 {
-    constexpr double kEffectSlotPreviewTailOverscanSeconds = 12.0;
+    constexpr double kEffectSlotPreviewTailOverscanSeconds = 4.0;
     constexpr int kDefaultMaxOpenVstPluginWindows = 4;
     constexpr int kHardMaxOpenVstPluginWindows = 16;
     constexpr int kMinimumVstEditorHostWidth = 1020;
@@ -16618,6 +16618,7 @@ namespace mw::gui
         fallbackJob.baseFileName = "preview_project_mixed_live_fallback";
         fallbackJob.outputFormat = mw::audio::RenderOutputFormat::Wav;
         fallbackJob.keepStemFilesMask = 0;
+        fallbackJob.usePreviewEffectTailPolicy = true;
 
         setPianoRollPreviewNoteMapFromTracks(tracks);
         setPianoRollPreviewAudioClipMapFromClips(currentProject->getAudioClips());
@@ -17606,6 +17607,7 @@ namespace mw::gui
                     request.outputWavPath = outputPath;
                     request.blockSize = 512;
                     request.tailSeconds = kEffectSlotPreviewTailOverscanSeconds;
+                    request.tailPolicy = mw::vst::EffectTailPolicy::Preview;
                     request.effectSlotIndex = safeEffectSlotIndex;
                     request.cancelRequested = &cancelRenderRequested;
 
@@ -22724,7 +22726,10 @@ void MainComponent::openAudioRecorderWindow()
         }
 
         if (playWhenDone)
+        {
             job.keepStemFilesMask = 0;
+            job.usePreviewEffectTailPolicy = true;
+        }
 
         if (projectContainsVst3Track(job.project))
             showVstExperimentalWarningIfNeeded();
@@ -34756,6 +34761,14 @@ void MainComponent::renderPianoRollPreview()
                     effectRequest.outputWavPath = previewWavPath;
                     effectRequest.blockSize = 512;
                     effectRequest.tailSeconds = kEffectSlotPreviewTailOverscanSeconds;
+                    effectRequest.tailPolicy = mw::vst::EffectTailPolicy::Preview;
+                    std::int64_t effectSourceEndTick = 0;
+                    for (const auto& note : selectedTrack.getNotes())
+                        effectSourceEndTick = std::max(effectSourceEndTick, note.startTick + note.durationTicks);
+                    effectRequest.sourceContentDurationSeconds =
+                        static_cast<double>(effectSourceEndTick)
+                        / static_cast<double>(mw::core::Project::ticksPerQuarterNote)
+                        * 60.0 / static_cast<double>(std::max(1, previewTempoBpm));
                     effectRequest.cancelRequested = &cancelRenderRequested;
 
                     const auto effectResult = mw::vst::VstInstrumentHost::processWavWithTrackEffectChain(effectRequest);

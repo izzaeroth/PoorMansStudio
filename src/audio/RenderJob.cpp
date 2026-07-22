@@ -17,10 +17,13 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <thread>
 #include <vector>
 
@@ -80,13 +83,36 @@ namespace
         double gain = 1.0;
     };
 
-    constexpr double kEffectSlotTailOverscanSeconds = 12.0;
+    constexpr double kEffectSlotRenderTailOverscanSeconds = 12.0;
+    constexpr double kEffectSlotPreviewTailOverscanSeconds = 4.0;
+
+    double effectTailOverscanSeconds(const mw::audio::RenderJob& job)
+    {
+        return job.usePreviewEffectTailPolicy
+            ? kEffectSlotPreviewTailOverscanSeconds
+            : kEffectSlotRenderTailOverscanSeconds;
+    }
+
+    mw::vst::EffectTailPolicy effectTailPolicy(const mw::audio::RenderJob& job)
+    {
+        return job.usePreviewEffectTailPolicy
+            ? mw::vst::EffectTailPolicy::Preview
+            : mw::vst::EffectTailPolicy::Render;
+    }
     double ticksToSeconds(std::int64_t ticks, int tempoBpm)
     {
         const auto safeTempo = tempoBpm > 0 ? tempoBpm : 120;
         const auto safeTicks = std::max<std::int64_t>(0, ticks);
         const auto beats = static_cast<double>(safeTicks) / static_cast<double>(mw::core::Project::ticksPerQuarterNote);
         return beats * 60.0 / static_cast<double>(safeTempo);
+    }
+
+    double trackContentDurationSeconds(const mw::core::Track& track, int tempoBpm)
+    {
+        std::int64_t endTick = 0;
+        for (const auto& note : track.getNotes())
+            endTick = std::max<std::int64_t>(endTick, note.startTick + note.durationTicks);
+        return ticksToSeconds(endTick, tempoBpm);
     }
 
     bool hasAnyAudioClipStartOffset(const std::vector<AudioClipRenderInput>& inputs)
@@ -243,6 +269,280 @@ namespace
         if (anySolo && !track->getSolo())
             return false;
 
+        return true;
+    }
+
+    double projectContentDurationSeconds(const mw::audio::RenderJob& job)
+    {
+        const bool anySolo = std::any_of(
+            job.project.getTracks().begin(),
+            job.project.getTracks().end(),
+            [](const auto& track) { return track.getSolo(); });
+
+        double contentEndSeconds = 0.0;
+        for (const auto& track : job.project.getTracks())
+        {
+            if (track.isAudioClipTrack() || track.getMuted())
+                continue;
+            if (anySolo && !track.getSolo())
+                continue;
+
+            const auto effectiveGain = mw::audio::sanitizeMainUiGain(
+                track.getMixerSettings().volume * static_cast<float>(job.masterVolume));
+            if (effectiveGain <= 0.000001f)
+                continue;
+
+            contentEndSeconds = std::max(
+                contentEndSeconds,
+                trackContentDurationSeconds(track, job.project.getTempoBpm()));
+        }
+
+        const auto& tracks = job.project.getTracks();
+        for (const auto& clip : job.project.getAudioClips())
+        {
+            const auto* track = clip.trackIndex >= 0 && clip.trackIndex < static_cast<int>(tracks.size())
+                ? &tracks[static_cast<std::size_t>(clip.trackIndex)]
+                : nullptr;
+            if (!shouldRenderAudioClipForTrack(job, track))
+                continue;
+            const double trackVolume = track != nullptr ? static_cast<double>(track->getMixerSettings().volume) : 1.0;
+            const double clipGain = std::isfinite(static_cast<double>(clip.gain)) ? static_cast<double>(clip.gain) : 1.0;
+            const double masterVolume = std::isfinite(static_cast<double>(job.masterVolume)) ? static_cast<double>(job.masterVolume) : 1.0;
+            if (mw::audio::sanitizeMainUiGain(trackVolume * clipGain * masterVolume) <= 0.000001)
+                continue;
+
+            const auto clipStartSeconds = ticksToSeconds(clip.startTick, job.project.getTempoBpm());
+            contentEndSeconds = std::max(
+                contentEndSeconds,
+                clipStartSeconds + intendedAudioClipDurationSeconds(clip));
+        }
+
+        return contentEndSeconds;
+    }
+
+    struct FinalMixTailTrackingSettings
+    {
+        float silenceThreshold = 1.5848932e-5f; // Approximately -96 dBFS.
+        double silenceHoldSeconds = 1.0;
+        double tailPadSeconds = 0.15;
+        double maximumTailSeconds = kEffectSlotRenderTailOverscanSeconds;
+        const char* policyName = "render";
+        const char* thresholdDescription = "-96 dBFS";
+    };
+
+    FinalMixTailTrackingSettings finalMixTailTrackingSettings(const mw::audio::RenderJob& job)
+    {
+        FinalMixTailTrackingSettings settings;
+        if (!job.usePreviewEffectTailPolicy)
+            return settings;
+
+        settings.silenceThreshold = 1.0e-4f; // Approximately -80 dBFS.
+        settings.silenceHoldSeconds = 0.30;
+        settings.tailPadSeconds = 0.05;
+        settings.maximumTailSeconds = kEffectSlotPreviewTailOverscanSeconds;
+        settings.policyName = "preview";
+        settings.thresholdDescription = "-80 dBFS";
+        return settings;
+    }
+
+    std::filesystem::path temporaryFinalMixTailTrimPathFor(const std::filesystem::path& input)
+    {
+        auto temp = input;
+        temp.replace_filename(input.stem().string() + ".final.tail.trim.tmp.wav");
+        return temp;
+    }
+
+    bool rewriteFinalMixWavTrimmedToSamples(const std::filesystem::path& wavPath,
+                                             std::int64_t keepSamples,
+                                             std::string& errorMessage)
+    {
+        juce::AudioFormatManager formatManager;
+        formatManager.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(juce::File(wavPath.string())));
+        if (reader == nullptr)
+        {
+            errorMessage = "Could not reopen final mix WAV for tail trim: " + wavPath.string();
+            return false;
+        }
+
+        const auto totalSamples = static_cast<std::int64_t>(reader->lengthInSamples);
+        keepSamples = std::clamp<std::int64_t>(keepSamples, 0, totalSamples);
+        if (keepSamples >= totalSamples)
+            return true;
+
+        const int channelCount = juce::jlimit(1, 8, static_cast<int>(reader->numChannels));
+        const double sampleRate = std::max(1.0, reader->sampleRate);
+        const int bitDepth = juce::jlimit(8, 32, static_cast<int>(reader->bitsPerSample > 0 ? reader->bitsPerSample : 24));
+        const auto trimPath = temporaryFinalMixTailTrimPathFor(wavPath);
+
+        std::error_code ec;
+        if (std::filesystem::exists(trimPath, ec))
+            std::filesystem::remove(trimPath, ec);
+
+        juce::WavAudioFormat wavFormat;
+        std::unique_ptr<juce::FileOutputStream> stream(juce::File(trimPath.string()).createOutputStream());
+        if (stream == nullptr || !stream->openedOk())
+        {
+            errorMessage = "Could not create final mix tail-trim WAV: " + trimPath.string();
+            return false;
+        }
+
+        std::unique_ptr<juce::AudioFormatWriter> writer(
+            wavFormat.createWriterFor(stream.get(), sampleRate, static_cast<unsigned int>(channelCount), bitDepth, {}, 0));
+        if (writer == nullptr)
+        {
+            errorMessage = "Could not create final mix tail-trim WAV writer.";
+            return false;
+        }
+        stream.release();
+
+        constexpr int blockSize = 32768;
+        juce::AudioBuffer<float> buffer(channelCount, blockSize);
+        std::int64_t position = 0;
+        while (position < keepSamples)
+        {
+            const int blockSamples = static_cast<int>(std::min<std::int64_t>(blockSize, keepSamples - position));
+            buffer.setSize(channelCount, blockSamples, false, false, true);
+            buffer.clear();
+            if (!reader->read(&buffer, 0, blockSamples, position, true, true))
+            {
+                errorMessage = "Could not read final mix WAV while rewriting the tail trim: " + wavPath.string();
+                return false;
+            }
+            if (!writer->writeFromAudioSampleBuffer(buffer, 0, blockSamples))
+            {
+                errorMessage = "Could not write final mix WAV while applying the tail trim: " + trimPath.string();
+                return false;
+            }
+            position += blockSamples;
+        }
+
+        writer.reset();
+        reader.reset();
+
+        ec.clear();
+        std::filesystem::remove(wavPath, ec);
+        ec.clear();
+        std::filesystem::rename(trimPath, wavPath, ec);
+        if (ec)
+        {
+            const auto renameError = ec.message();
+            ec.clear();
+            std::filesystem::copy_file(trimPath, wavPath, std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec)
+            {
+                errorMessage = "Could not replace final mix WAV with tail-trimmed output: " + renameError
+                    + "; fallback copy failed: " + ec.message();
+                return false;
+            }
+            std::filesystem::remove(trimPath, ec);
+        }
+
+        return true;
+    }
+
+    bool trimFinalProjectMixTail(const mw::audio::RenderJob& job,
+                                 const std::filesystem::path& wavPath,
+                                 const mw::audio::RenderJobCallbacks& callbacks,
+                                 std::string& errorMessage)
+    {
+        const auto sourceDurationSeconds = projectContentDurationSeconds(job);
+        if (sourceDurationSeconds <= 0.0 || wavPath.empty() || !std::filesystem::exists(wavPath))
+            return true;
+
+        const auto settings = finalMixTailTrackingSettings(job);
+        juce::AudioFormatManager formatManager;
+        formatManager.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(juce::File(wavPath.string())));
+        if (reader == nullptr)
+        {
+            errorMessage = "Could not reopen final project mix WAV for " + std::string(settings.policyName)
+                + " tail tracking: " + wavPath.string();
+            return false;
+        }
+
+        const int channelCount = juce::jlimit(1, 8, static_cast<int>(reader->numChannels));
+        const int sampleRate = static_cast<int>(std::max(1.0, reader->sampleRate));
+        const auto totalSamples = static_cast<std::int64_t>(reader->lengthInSamples);
+        const auto sourceSamples = std::clamp<std::int64_t>(
+            static_cast<std::int64_t>(std::llround(sourceDurationSeconds * static_cast<double>(sampleRate))),
+            0,
+            totalSamples);
+        const auto maximumTailSamples = static_cast<std::int64_t>(
+            std::ceil(settings.maximumTailSeconds * static_cast<double>(sampleRate)));
+        const auto scanEndSamples = std::min<std::int64_t>(totalSamples, sourceSamples + maximumTailSamples);
+        const auto silenceHoldSamples = std::max<std::int64_t>(1, static_cast<std::int64_t>(
+            std::ceil(settings.silenceHoldSeconds * static_cast<double>(sampleRate))));
+        const auto tailPadSamples = std::max<std::int64_t>(0, static_cast<std::int64_t>(
+            std::ceil(settings.tailPadSeconds * static_cast<double>(sampleRate))));
+
+        constexpr int scanBlockSize = 32768;
+        juce::AudioBuffer<float> buffer(channelCount, scanBlockSize);
+        std::int64_t position = sourceSamples;
+        std::int64_t lastAudibleSample = sourceSamples > 0 ? sourceSamples - 1 : -1;
+        std::int64_t consecutiveSilentSamples = 0;
+        while (position < scanEndSamples)
+        {
+            const int blockSamples = static_cast<int>(std::min<std::int64_t>(scanBlockSize, scanEndSamples - position));
+            buffer.setSize(channelCount, blockSamples, false, false, true);
+            buffer.clear();
+            if (!reader->read(&buffer, 0, blockSamples, position, true, true))
+            {
+                errorMessage = "Could not read final project mix WAV while tracking the "
+                    + std::string(settings.policyName) + " tail: " + wavPath.string();
+                return false;
+            }
+
+            for (int sample = 0; sample < blockSamples; ++sample)
+            {
+                bool audible = false;
+                for (int channel = 0; channel < channelCount; ++channel)
+                {
+                    if (std::abs(buffer.getSample(channel, sample)) > settings.silenceThreshold)
+                    {
+                        audible = true;
+                        break;
+                    }
+                }
+
+                const auto absoluteSample = position + sample;
+                if (audible)
+                {
+                    lastAudibleSample = absoluteSample;
+                    consecutiveSilentSamples = 0;
+                }
+                else
+                {
+                    ++consecutiveSilentSamples;
+                }
+            }
+
+            position += blockSamples;
+        }
+
+        const bool endedInConfirmedSilence = consecutiveSilentSamples >= silenceHoldSamples;
+        reader.reset();
+
+        const auto lastAudibleKeep = endedInConfirmedSilence
+            ? (lastAudibleSample >= 0 ? lastAudibleSample + 1 + tailPadSamples : sourceSamples)
+            : scanEndSamples;
+        const auto keepSamples = std::clamp<std::int64_t>(
+            std::max<std::int64_t>(sourceSamples, lastAudibleKeep),
+            0,
+            scanEndSamples);
+        const auto trimmedSamples = std::max<std::int64_t>(0, totalSamples - keepSamples);
+
+        if (trimmedSamples > 0 && !rewriteFinalMixWavTrimmedToSamples(wavPath, keepSamples, errorMessage))
+            return false;
+
+        std::ostringstream summary;
+        summary << "Final project mix " << settings.policyName << " tail tracked at " << settings.thresholdDescription
+                << "; silence hold seconds: " << settings.silenceHoldSeconds
+                << "; tail pad seconds: " << settings.tailPadSeconds
+                << "; maximum tail seconds: " << settings.maximumTailSeconds
+                << "; ended in confirmed silence: " << (endedInConfirmedSilence ? "yes" : "no")
+                << "; trimmed samples: " << trimmedSamples;
+        log(callbacks, summary.str());
         return true;
     }
 
@@ -422,7 +722,9 @@ namespace
             effectRequest.inputWavPath = sourceWav;
             effectRequest.outputWavPath = processedWav;
             effectRequest.blockSize = 512;
-            effectRequest.tailSeconds = kEffectSlotTailOverscanSeconds;
+            effectRequest.tailSeconds = effectTailOverscanSeconds(job);
+            effectRequest.tailPolicy = effectTailPolicy(job);
+            effectRequest.sourceContentDurationSeconds = intendedDurationSeconds;
             effectRequest.cancelRequested = &cancelRequested;
 
             const auto effectResult = mw::vst::VstInstrumentHost::processWavWithTrackEffectChain(effectRequest);
@@ -443,7 +745,7 @@ namespace
                 log(callbacks, sourceKindTitle + " AudioClip Effect Slot tail preservation enabled: processed clip was not capped back to the trimmed source duration, so plugin tail/length extension can remain audible.");
             }
 
-            inputs.push_back({ processedWav, startOffsetSeconds, intendedDurationSeconds + kEffectSlotTailOverscanSeconds, renderGain });
+            inputs.push_back({ processedWav, startOffsetSeconds, intendedDurationSeconds + effectTailOverscanSeconds(job), renderGain });
             log(callbacks, sourceKindTitle + " AudioClip Effect Slot processed for track: " + track->getName() + " -> " + processedWav.string());
             ++clipIndex;
         }
@@ -1067,7 +1369,11 @@ namespace
             effectRequest.inputWavPath = task.stemWav;
             effectRequest.outputWavPath = task.stemWav;
             effectRequest.blockSize = 512;
-            effectRequest.tailSeconds = kEffectSlotTailOverscanSeconds;
+            effectRequest.tailSeconds = effectTailOverscanSeconds(job);
+            effectRequest.tailPolicy = effectTailPolicy(job);
+            effectRequest.sourceContentDurationSeconds = trackContentDurationSeconds(
+                renderedTrack,
+                task.stemProject.getTempoBpm());
             effectRequest.cancelRequested = &cancelRequested;
 
             const auto effectResult = mw::vst::VstInstrumentHost::processWavWithTrackEffectChain(effectRequest);
@@ -1329,6 +1635,14 @@ namespace mw::audio
 
             log(callbacks, "Mixed WAV: " + result.wavPath.string());
 
+            std::string finalMixTailError;
+            if (!trimFinalProjectMixTail(job, result.wavPath, callbacks, finalMixTailError))
+            {
+                result.message = finalMixTailError;
+                log(callbacks, "ERROR: " + result.message);
+                return result;
+            }
+
             const auto requestedEncodedFormat = toEncodedFormat(job.outputFormat);
 
             if (requestedEncodedFormat == mw::audio::EncodedAudioFormat::Wav && job.channelCount == 2)
@@ -1466,6 +1780,14 @@ namespace mw::audio
 
             log(callbacks, "Prepared AudioClip WAV: " + result.wavPath.string());
 
+            std::string finalMixTailError;
+            if (!trimFinalProjectMixTail(job, result.wavPath, callbacks, finalMixTailError))
+            {
+                result.message = finalMixTailError;
+                log(callbacks, "ERROR: " + result.message);
+                return result;
+            }
+
             if (isCancelled(cancelRequested, callbacks))
             {
                 result.cancelled = true;
@@ -1601,6 +1923,14 @@ namespace mw::audio
         if (isCancelled(cancelRequested, callbacks))
         {
             result.cancelled = true;
+            return result;
+        }
+
+        std::string finalMixTailError;
+        if (!trimFinalProjectMixTail(job, result.wavPath, callbacks, finalMixTailError))
+        {
+            result.message = finalMixTailError;
+            log(callbacks, "ERROR: " + result.message);
             return result;
         }
 

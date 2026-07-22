@@ -45,6 +45,12 @@ namespace mw::vst
         std::filesystem::path wavPath;
     };
 
+    enum class EffectTailPolicy
+    {
+        Render,
+        Preview
+    };
+
     struct VstEffectProcessRequest
     {
         mw::core::Track track;
@@ -52,6 +58,12 @@ namespace mw::vst
         std::filesystem::path outputWavPath;
         int blockSize = 512;
         double tailSeconds = 2.0;
+        EffectTailPolicy tailPolicy = EffectTailPolicy::Render;
+        // Negative uses the complete input WAV duration. Callers may provide
+        // the musical/source-content ending so renderer-added silence is
+        // included in complete-chain tail tracking instead of being treated
+        // as source audio.
+        double sourceContentDurationSeconds = -1.0;
         // -1 means process every enabled effect slot in order. 0/1 processes
         // one slot only, which is useful for Test Effect from an editor window.
         int effectSlotIndex = -1;

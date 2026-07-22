@@ -892,7 +892,7 @@ namespace mw::clap
             host.name = "Poor Man's Studio CLAP Effect Host";
             host.vendor = "Poor Man's Studio";
             host.url = "";
-            host.version = "0.66.7";
+            host.version = "0.66.8";
             host.get_extension = hostGetExtension;
             host.request_restart = hostRequestRestart;
             host.request_process = hostRequestProcess;
@@ -975,7 +975,7 @@ namespace mw::clap
             std::int64_t silentTailSamples = 0;
             const auto silenceHoldSamples = static_cast<std::int64_t>(kDynamicTailSilenceHoldSeconds * static_cast<double>(sampleRate));
             const auto trimPadSamples = static_cast<std::int64_t>(kDynamicTailPadSeconds * static_cast<double>(sampleRate));
-            bool dynamicTailStoppedOnSilence = false;
+            bool dynamicTailEndedInSilence = false;
 
             auto processOneBlock = [&](int blockSamples, bool tailBlock) -> bool
             {
@@ -1062,11 +1062,7 @@ namespace mw::clap
                     return fail("CLAP effect tail process() returned " + result.processStatusText + ".");
                 tailWritten += blockSamples;
 
-                if (silenceHoldSamples > 0 && silentTailSamples >= silenceHoldSamples)
-                {
-                    dynamicTailStoppedOnSilence = true;
-                    break;
-                }
+                dynamicTailEndedInSilence = silenceHoldSamples > 0 && silentTailSamples >= silenceHoldSamples;
             }
 
             writer.reset();
@@ -1114,7 +1110,7 @@ namespace mw::clap
                 + "; blocks: " + std::to_string(result.processedBlocks)
                 + "; last process status: " + result.processStatusText
                 + "; max tail overscan seconds: " + std::to_string(std::max(0.0, request.tailSeconds))
-                + "; dynamic tail stopped on silence: " + std::string(dynamicTailStoppedOnSilence ? "yes" : "no")
+                + "; dynamic tail ended in confirmed silence: " + std::string(dynamicTailEndedInSilence ? "yes" : "no")
                 + "; dynamic tail trimmed samples: " + std::to_string(trimmedSamples)
                 + "; host restart requested: " + std::string(hostState.restartRequested ? "yes" : "no")
                 + "; host process requested: " + std::string(hostState.processRequested ? "yes" : "no")
