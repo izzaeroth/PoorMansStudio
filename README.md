@@ -4,7 +4,7 @@
 
 It is intentionally practical: bring in MIDI or score material, clean up tracks, organize sections, assign instruments, preview ideas quickly, and render usable audio or MIDI output from a self-contained workspace. It has just enough DAW energy to be useful, without trying to become a spaceship cockpit.
 
-*Currently working on bringing in actual music hardware support. I do not have a MIDI device or other equipment, so my testing is simulation only for now.*
+*Currently working on bringing in actual music hardware support. Some inputs do actually work, but I do not have a MIDI device or other equipment, so my testing is simulation only for now.*
 
 
 ## Quick Feature Tour
