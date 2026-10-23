@@ -21,7 +21,7 @@ namespace mw::core
     struct ProjectMetadata
     {
         std::string projectFormatName = "MusicWorkstationProject";
-        int projectFormatVersion = 9;
+        int projectFormatVersion = 22;
     };
 
     struct ProjectSequenceMetadata
@@ -161,6 +161,171 @@ namespace mw::core
                     while (!seen.insert(id).second);
                     track.setStableId(id);
                 }
+            }
+
+            std::unordered_set<StableId> seenControllerEventIds;
+            for (auto& track : tracks)
+            {
+                if (track.isAudioClipTrack())
+                {
+                    track.clearMidiControllerEvents();
+                    continue;
+                }
+
+                for (auto& event : track.getMidiControllerEvents())
+                {
+                    auto eventId = event.stableId;
+                    if (eventId == 0 || !seenControllerEventIds.insert(eventId).second)
+                    {
+                        do
+                        {
+                            eventId = allocateStableId();
+                        }
+                        while (!seenControllerEventIds.insert(eventId).second);
+                        event.stableId = eventId;
+                    }
+                }
+                std::sort(track.getMidiControllerEvents().begin(), track.getMidiControllerEvents().end(), midiControllerEventOrder);
+            }
+
+            std::unordered_set<StableId> seenPitchBendEventIds;
+            for (auto& track : tracks)
+            {
+                if (track.isAudioClipTrack())
+                {
+                    track.clearMidiPitchBendEvents();
+                    continue;
+                }
+
+                for (auto& event : track.getMidiPitchBendEvents())
+                {
+                    auto eventId = event.stableId;
+                    if (eventId == 0 || !seenPitchBendEventIds.insert(eventId).second)
+                    {
+                        do
+                        {
+                            eventId = allocateStableId();
+                        }
+                        while (!seenPitchBendEventIds.insert(eventId).second);
+                        event.stableId = eventId;
+                    }
+                }
+                std::sort(track.getMidiPitchBendEvents().begin(), track.getMidiPitchBendEvents().end(), midiPitchBendEventOrder);
+            }
+
+            std::unordered_set<StableId> seenProgramChangeEventIds;
+            for (auto& track : tracks)
+            {
+                if (track.isAudioClipTrack())
+                {
+                    track.clearMidiProgramChangeEvents();
+                    continue;
+                }
+
+                for (auto& event : track.getMidiProgramChangeEvents())
+                {
+                    auto eventId = event.stableId;
+                    if (eventId == 0 || !seenProgramChangeEventIds.insert(eventId).second)
+                    {
+                        do
+                        {
+                            eventId = allocateStableId();
+                        }
+                        while (!seenProgramChangeEventIds.insert(eventId).second);
+                        event.stableId = eventId;
+                    }
+                }
+                std::sort(track.getMidiProgramChangeEvents().begin(), track.getMidiProgramChangeEvents().end(), midiProgramChangeEventOrder);
+            }
+
+            std::unordered_set<StableId> seenChannelPressureEventIds;
+            for (auto& track : tracks)
+            {
+                if (track.isAudioClipTrack())
+                {
+                    track.clearMidiChannelPressureEvents();
+                    continue;
+                }
+
+                for (auto& event : track.getMidiChannelPressureEvents())
+                {
+                    auto eventId = event.stableId;
+                    if (eventId == 0 || !seenChannelPressureEventIds.insert(eventId).second)
+                    {
+                        do { eventId = allocateStableId(); } while (!seenChannelPressureEventIds.insert(eventId).second);
+                        event.stableId = eventId;
+                    }
+                }
+                std::sort(track.getMidiChannelPressureEvents().begin(), track.getMidiChannelPressureEvents().end(), midiChannelPressureEventOrder);
+            }
+
+            std::unordered_set<StableId> seenPolyPressureEventIds;
+            for (auto& track : tracks)
+            {
+                if (track.isAudioClipTrack())
+                {
+                    track.clearMidiPolyPressureEvents();
+                    continue;
+                }
+
+                for (auto& event : track.getMidiPolyPressureEvents())
+                {
+                    auto eventId = event.stableId;
+                    if (eventId == 0 || !seenPolyPressureEventIds.insert(eventId).second)
+                    {
+                        do { eventId = allocateStableId(); } while (!seenPolyPressureEventIds.insert(eventId).second);
+                        event.stableId = eventId;
+                    }
+                }
+                std::sort(track.getMidiPolyPressureEvents().begin(), track.getMidiPolyPressureEvents().end(), midiPolyPressureEventOrder);
+            }
+
+            std::unordered_set<StableId> seen14BitEventIds;
+            for (auto& track : tracks)
+            {
+                if (track.isAudioClipTrack()) { track.clearMidi14BitControllerEvents(); continue; }
+                for (auto& event : track.getMidi14BitControllerEvents())
+                {
+                    auto eventId = event.stableId;
+                    if (eventId == 0 || !seen14BitEventIds.insert(eventId).second)
+                    {
+                        do { eventId = allocateStableId(); } while (!seen14BitEventIds.insert(eventId).second);
+                        event.stableId = eventId;
+                    }
+                }
+                std::sort(track.getMidi14BitControllerEvents().begin(), track.getMidi14BitControllerEvents().end(), midi14BitControllerEventOrder);
+            }
+
+            std::unordered_set<StableId> seenRpnEventIds;
+            for (auto& track : tracks)
+            {
+                if (track.isAudioClipTrack()) { track.clearMidiRpnEvents(); continue; }
+                for (auto& event : track.getMidiRpnEvents())
+                {
+                    auto eventId = event.stableId;
+                    if (eventId == 0 || !seenRpnEventIds.insert(eventId).second)
+                    {
+                        do { eventId = allocateStableId(); } while (!seenRpnEventIds.insert(eventId).second);
+                        event.stableId = eventId;
+                    }
+                }
+                std::sort(track.getMidiRpnEvents().begin(), track.getMidiRpnEvents().end(), midiRpnEventOrder);
+            }
+
+            std::unordered_set<StableId> seenNrpnEventIds;
+            for (auto& track : tracks)
+            {
+                if (track.isAudioClipTrack()) { track.clearMidiNrpnEvents(); continue; }
+                for (auto& event : track.getMidiNrpnEvents())
+                {
+                    auto eventId = event.stableId;
+                    if (eventId == 0 || !seenNrpnEventIds.insert(eventId).second)
+                    {
+                        do { eventId = allocateStableId(); } while (!seenNrpnEventIds.insert(eventId).second);
+                        event.stableId = eventId;
+                    }
+                }
+                std::sort(track.getMidiNrpnEvents().begin(), track.getMidiNrpnEvents().end(), midiNrpnEventOrder);
             }
         }
 

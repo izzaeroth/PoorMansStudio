@@ -1,4 +1,5 @@
 #include "clap/ClapLiveDirectPreviewEngine.h"
+#include "midi/LiveMidiNoteQueue.h"
 #include "audio/GainLimits.h"
 
 #include <algorithm>
@@ -20,6 +21,9 @@ namespace mw::clap
         constexpr int kMaximumOutputChannels = 32;
         constexpr int kMaximumConsecutiveBusyBlocks = 200;
         constexpr int kMaximumPluginOutputChannels = 64;
+        constexpr int kMaximumQueuedLiveMidiEventsPerBlock = 128;
+        constexpr int kMaximumPanicNoteOffEvents = 16 * 128;
+        constexpr int kMaximumLiveMidiEventsPerBlock = kMaximumQueuedLiveMidiEventsPerBlock + kMaximumPanicNoteOffEvents;
 
         bool hasValidPluginOutputBuffer(int expectedFrames,
                                         int outputFrames,
@@ -56,15 +60,32 @@ namespace mw::clap
             tracks.reserve(requestsIn.size());
             for (auto& request : requestsIn)
             {
-                if (request.session == nullptr || request.sessionProcessMutex == nullptr || request.notes.empty())
+                if (request.session == nullptr || request.sessionProcessMutex == nullptr
+                    || (!request.liveMidiInput && request.notes.empty() && request.controllers.empty() && request.pitchBends.empty() && request.programChanges.empty() && request.channelPressures.empty() && request.polyPressures.empty() && request.controller14Bits.empty() && request.rpns.empty() && request.nrpns.empty()))
                     continue;
 
                 TrackState track;
                 track.session = request.session;
                 track.sessionMutex = request.sessionProcessMutex;
                 track.notes = std::move(request.notes);
+                track.controllers = std::move(request.controllers);
+                track.pitchBends = std::move(request.pitchBends);
+                track.programChanges = std::move(request.programChanges);
+                track.channelPressures = std::move(request.channelPressures);
+                track.polyPressures = std::move(request.polyPressures);
+                track.controller14Bits = std::move(request.controller14Bits);
+                track.rpns = std::move(request.rpns);
+                track.nrpns = std::move(request.nrpns);
                 track.config = std::move(request.config);
                 track.outputGain = mw::audio::sanitizeMainUiGain(request.outputGain);
+                track.liveMidiInput = request.liveMidiInput;
+                if (track.liveMidiInput)
+                    track.liveMidiRequest.noteEvents.reserve(static_cast<std::size_t>(kMaximumLiveMidiEventsPerBlock));
+                    track.liveMidiRequest.controllerEvents.reserve(static_cast<std::size_t>(kMaximumLiveMidiEventsPerBlock));
+                    track.liveMidiRequest.pitchBendEvents.reserve(static_cast<std::size_t>(kMaximumLiveMidiEventsPerBlock));
+                    track.liveMidiRequest.programChangeEvents.reserve(static_cast<std::size_t>(kMaximumLiveMidiEventsPerBlock));
+                    track.liveMidiRequest.channelPressureEvents.reserve(static_cast<std::size_t>(kMaximumLiveMidiEventsPerBlock));
+                    track.liveMidiRequest.polyPressureEvents.reserve(static_cast<std::size_t>(kMaximumLiveMidiEventsPerBlock));
                 if (track.config.trackIndex < 0)
                     track.config.trackIndex = request.trackIndex;
                 if (track.config.trackName.empty())
@@ -189,6 +210,27 @@ namespace mw::clap
         int getScheduledEvents() const noexcept { return scheduledEvents.load(); }
         int getMaxEventsPerBlock() const noexcept { return maxEventsPerBlock.load(); }
         int getLiveEffectSlotCount() const noexcept { return liveEffectSlotCount.load(); }
+        bool isLiveMidiInput() const noexcept
+        {
+            for (const auto& track : tracks)
+                if (track.liveMidiInput)
+                    return true;
+            return false;
+        }
+        bool submitLiveMidiMessage(const juce::MidiMessage& message) noexcept
+        {
+            if (!isLiveMidiInput())
+                return false;
+            const bool queued = liveMidiQueue.push(message);
+            if (!queued && (message.isNoteOn() || message.isNoteOff()))
+                liveMidiPanicRequested.store(true, std::memory_order_release);
+            return queued;
+        }
+        void requestLiveMidiPanic() noexcept
+        {
+            if (isLiveMidiInput())
+                liveMidiPanicRequested.store(true, std::memory_order_release);
+        }
         int getProcessedEffectBlocks() const noexcept { return processedEffectBlocks.load(); }
         int getSkippedEffectBlocks() const noexcept { return skippedEffectBlocks.load(); }
         int getConsecutiveBusyBlockLimit() const noexcept { return consecutiveBusyBlockLimit.load(); }
@@ -229,10 +271,20 @@ namespace mw::clap
             ClapLiveInstrumentSession* session = nullptr;
             std::mutex* sessionMutex = nullptr;
             std::vector<ClapLivePlaybackNote> notes;
+            std::vector<ClapLivePlaybackControllerEvent> controllers;
+            std::vector<ClapLivePlaybackPitchBendEvent> pitchBends;
+            std::vector<ClapLivePlaybackProgramChangeEvent> programChanges;
+            std::vector<ClapLivePlaybackChannelPressureEvent> channelPressures;
+            std::vector<ClapLivePlaybackPolyPressureEvent> polyPressures;
+            std::vector<ClapLivePlayback14BitControllerEvent> controller14Bits;
+            std::vector<ClapLivePlaybackRpnEvent> rpns;
+            std::vector<ClapLivePlaybackNrpnEvent> nrpns;
             ClapLiveCallbackBridgeConfig config;
             ClapLiveCallbackBridge bridge;
             std::vector<EffectState> effects;
             float outputGain = 1.0f;
+            bool liveMidiInput = false;
+            ClapLiveProcessRequest liveMidiRequest;
             std::array<std::array<int, 128>, 16> activeNoteDepths {};
             int consecutiveSkippedBlocks = 0;
             bool prepared = false;
@@ -352,23 +404,35 @@ namespace mw::clap
                 track.config.scheduler.sampleRate = deviceSampleRate;
                 track.config.scheduler.blockSize = deviceBlockSize;
                 track.config.outputChannelCount = requestedOutputChannels;
-                track.bridge.prepare(track.notes, track.config);
-                track.prepared = track.bridge.isPrepared();
-                track.finished = !track.prepared || track.bridge.isFinished();
                 track.failed = false;
                 track.consecutiveSkippedBlocks = 0;
                 clearActiveNotes(track);
 
-                const auto state = track.bridge.state();
-                if (track.prepared)
+                if (track.liveMidiInput)
                 {
+                    track.prepared = true;
+                    track.finished = false;
                     ++preparedTrackCount;
                     if (firstTrackIndex < 0)
-                        firstTrackIndex = state.trackIndex;
-                    aggregateScheduledEvents += state.totalScheduledEvents;
-                    aggregateMaxEventsPerBlock += state.maxEventsPerBlock;
+                        firstTrackIndex = track.config.trackIndex;
                     aggregateLiveEffectSlots += static_cast<int>(track.effects.size());
-                    aggregateTotalSamples = std::max<std::int64_t>(aggregateTotalSamples, state.totalSamples);
+                }
+                else
+                {
+                    track.bridge.prepare(track.notes, track.controllers, track.pitchBends, track.programChanges, track.channelPressures, track.polyPressures, track.controller14Bits, track.rpns, track.nrpns, track.config);
+                    track.prepared = track.bridge.isPrepared();
+                    track.finished = !track.prepared || track.bridge.isFinished();
+                    const auto state = track.bridge.state();
+                    if (track.prepared)
+                    {
+                        ++preparedTrackCount;
+                        if (firstTrackIndex < 0)
+                            firstTrackIndex = state.trackIndex;
+                        aggregateScheduledEvents += state.totalScheduledEvents;
+                        aggregateMaxEventsPerBlock += state.maxEventsPerBlock;
+                        aggregateLiveEffectSlots += static_cast<int>(track.effects.size());
+                        aggregateTotalSamples = std::max<std::int64_t>(aggregateTotalSamples, state.totalSamples);
+                    }
                 }
             }
 
@@ -574,7 +638,7 @@ namespace mw::clap
                 if (!track.prepared || track.failed)
                     continue;
 
-                if (track.finished || track.bridge.isFinished())
+                if (track.finished || (!track.liveMidiInput && track.bridge.isFinished()))
                 {
                     track.finished = true;
                     continue;
@@ -601,13 +665,102 @@ namespace mw::clap
 
                 track.consecutiveSkippedBlocks = 0;
 
-                const auto& request = track.bridge.nextRequest();
-                if (request.frameCount <= 0)
+                const ClapLiveProcessRequest* processRequest = nullptr;
+                bool panicThisBlock = false;
+                int panicNoteOffCount = 0;
+                if (track.liveMidiInput)
                 {
-                    track.finished = true;
-                    continue;
+                    auto& liveRequest = track.liveMidiRequest;
+                    liveRequest.frameCount = numSamples;
+                    liveRequest.noteEvents.clear();
+                    liveRequest.controllerEvents.clear();
+                    liveRequest.pitchBendEvents.clear();
+                    liveRequest.programChangeEvents.clear();
+                    liveRequest.channelPressureEvents.clear();
+                    liveRequest.polyPressureEvents.clear();
+                    std::array<mw::midi::LiveMidiNoteEvent, kMaximumQueuedLiveMidiEventsPerBlock> queuedEvents {};
+                    const int eventCount = liveMidiQueue.pop(queuedEvents.data(), static_cast<int>(queuedEvents.size()));
+                    for (int index = 0; index < eventCount; ++index)
+                    {
+                    const auto& queued = queuedEvents[static_cast<std::size_t>(index)];
+                    if (queued.type == mw::midi::LiveMidiEventType::Controller)
+                    {
+                        ClapLiveControllerEvent event;
+                        event.frameOffset = 0; event.midiChannel = queued.channel;
+                        event.controller = queued.controller; event.value = queued.controllerValue;
+                        liveRequest.controllerEvents.push_back(event);
+                    }
+                    else if (queued.type == mw::midi::LiveMidiEventType::PitchBend)
+                    {
+                        ClapLivePitchBendEvent event;
+                        event.frameOffset = 0; event.midiChannel = queued.channel; event.value = queued.pitchBendValue;
+                        liveRequest.pitchBendEvents.push_back(event);
+                    }
+                    else if (queued.type == mw::midi::LiveMidiEventType::ProgramChange)
+                    {
+                        ClapLiveProgramChangeEvent event;
+                        event.frameOffset = 0; event.midiChannel = queued.channel; event.program = queued.program;
+                        liveRequest.programChangeEvents.push_back(event);
+                    }
+                    else if (queued.type == mw::midi::LiveMidiEventType::ChannelPressure)
+                    {
+                        ClapLiveChannelPressureEvent event;
+                        event.frameOffset = 0; event.midiChannel = queued.channel; event.pressure = queued.channelPressure;
+                        liveRequest.channelPressureEvents.push_back(event);
+                    }
+                    else if (queued.type == mw::midi::LiveMidiEventType::PolyPressure)
+                    {
+                        ClapLivePolyPressureEvent event;
+                        event.frameOffset = 0; event.midiChannel = queued.channel; event.noteNumber = queued.key; event.pressure = queued.polyPressure;
+                        liveRequest.polyPressureEvents.push_back(event);
+                    }
+                    else
+                    {
+                        ClapLiveNoteEvent event;
+                        event.type = queued.type == mw::midi::LiveMidiEventType::NoteOn
+                            ? ClapLiveNoteEventType::NoteOn
+                            : ClapLiveNoteEventType::NoteOff;
+                        event.frameOffset = 0; event.key = queued.key; event.velocity = queued.velocity; event.midiChannel = queued.channel;
+                        liveRequest.noteEvents.push_back(event);
+                    }
+                    }
+
+                    panicThisBlock = liveMidiPanicRequested.exchange(false, std::memory_order_acq_rel);
+                    if (panicThisBlock)
+                    {
+                        for (int channel = 0; channel < 16; ++channel)
+                        {
+                            for (int key = 0; key < 128; ++key)
+                            {
+                                const auto depth = track.activeNoteDepths[static_cast<std::size_t>(channel)][static_cast<std::size_t>(key)];
+                                if (depth <= 0)
+                                    continue;
+
+                                ClapLiveNoteEvent event;
+                                event.type = ClapLiveNoteEventType::NoteOff;
+                                event.frameOffset = 0;
+                                event.key = key;
+                                event.velocity = 0;
+                                event.midiChannel = channel + 1;
+                                liveRequest.noteEvents.push_back(event);
+                                ++panicNoteOffCount;
+                            }
+                        }
+                    }
+                    processRequest = &liveRequest;
+                }
+                else
+                {
+                    const auto& scheduledRequest = track.bridge.nextRequest();
+                    if (scheduledRequest.frameCount <= 0)
+                    {
+                        track.finished = true;
+                        continue;
+                    }
+                    processRequest = &scheduledRequest;
                 }
 
+                const auto& request = *processRequest;
                 auto result = track.session->processBlock(request);
                 if (!result.success)
                 {
@@ -620,6 +773,11 @@ namespace mw::clap
                 }
 
                 updateActiveNotesFromRequest(track, request);
+                if (panicThisBlock)
+                {
+                    emergencyNoteOffsSubmitted.fetch_add(panicNoteOffCount);
+                    clearActiveNotes(track);
+                }
 
                 auto blockAudio = std::move(result.interleavedAudio);
                 auto outputChannels = result.outputChannelCount;
@@ -659,8 +817,8 @@ namespace mw::clap
                 }
 
                 anyTrackProcessedThisBlock = true;
-                eventsThisCallback += static_cast<int>(request.noteEvents.size());
-                if (track.bridge.isFinished())
+                eventsThisCallback += static_cast<int>(request.noteEvents.size() + request.controllerEvents.size() + request.programChangeEvents.size() + request.pitchBendEvents.size() + request.channelPressureEvents.size() + request.polyPressureEvents.size());
+                if (!track.liveMidiInput && track.bridge.isFinished())
                     track.finished = true;
             }
 
@@ -681,7 +839,8 @@ namespace mw::clap
             bool allPreparedTracksFinished = true;
             for (const auto& track : tracks)
             {
-                if (track.prepared && !track.finished && !track.bridge.isFinished())
+                if (track.prepared && !track.finished
+                    && (track.liveMidiInput || !track.bridge.isFinished()))
                 {
                     allPreparedTracksFinished = false;
                     break;
@@ -705,6 +864,8 @@ namespace mw::clap
 
         std::vector<TrackState> tracks;
         std::vector<AudioSourceState> audioSources;
+        mw::midi::LiveMidiNoteQueue liveMidiQueue;
+        std::atomic<bool> liveMidiPanicRequested { false };
         int requestedOutputChannels = 2;
         bool prepared = false;
         std::atomic<bool> finished { false };
@@ -734,7 +895,10 @@ namespace mw::clap
         juce::String lastMessage;
     };
 
-    ClapLiveDirectPreviewEngine::ClapLiveDirectPreviewEngine() = default;
+    ClapLiveDirectPreviewEngine::ClapLiveDirectPreviewEngine(mw::audio::ApplicationAudioService& audioService)
+        : audioService_(audioService)
+    {
+    }
 
     double ClapLiveDirectPreviewStartResult::durationSeconds() const noexcept
     {
@@ -871,6 +1035,7 @@ namespace mw::clap
         auto callback = std::make_unique<DirectPreviewAudioCallback>(std::move(tracks), std::move(audioSources), result.outputChannelCount);
 
         result.trackIndex = callback->getTrackIndex();
+        const bool liveMidiInput = callback->isLiveMidiInput();
         result.trackCount = callback->getTrackCount();
         result.audioSourceCount = callback->getAudioSourceCount();
         result.sampleRate = callback->getSampleRate();
@@ -889,22 +1054,22 @@ namespace mw::clap
         result.totalSamples = callback->getTotalSamples();
 
         if ((result.trackCount <= 0 && result.audioSourceCount <= 0)
-            || (result.trackCount > 0 && result.scheduledEvents <= 0)
-            || result.totalSamples <= 0)
+            || (!liveMidiInput && result.trackCount > 0 && result.scheduledEvents <= 0)
+            || (!liveMidiInput && result.totalSamples <= 0))
         {
             result.errorMessage = "No live CLAP tracks or rendered audio sources produced playable content.";
             return result;
         }
 
-        const auto initError = deviceManager_.initialise(0, result.outputChannelCount, nullptr, true);
-        if (initError.isNotEmpty())
+        const auto owner = liveMidiInput
+            ? mw::audio::ApplicationAudioPlaybackOwner::LiveMidiMonitoring
+            : mw::audio::ApplicationAudioPlaybackOwner::ClapLiveSelectedTrackPreview;
+        const auto activation = audioService_.activateOutputCallback(owner, callback.get());
+        if (!activation.success)
         {
-            result.errorMessage = "Direct audio device did not open. " + initError;
-            deviceManager_.closeAudioDevice();
+            result.errorMessage = "Direct audio device did not open. " + activation.message;
             return result;
         }
-
-        deviceManager_.addAudioCallback(callback.get());
 
         // The audio callback may have re-prepared against the actual device rate/block size.
         result.trackIndex = callback->getTrackIndex();
@@ -925,7 +1090,9 @@ namespace mw::clap
         result.currentSample = callback->getCurrentSample();
         result.totalSamples = callback->getTotalSamples();
         result.started = true;
-        if (result.audioSourceCount > 0 && result.trackCount > 0)
+        if (liveMidiInput)
+            result.message = "CLAP live MIDI monitoring is using the direct audio callback path.";
+        else if (result.audioSourceCount > 0 && result.trackCount > 0)
             result.message = "Hybrid project preview is mixing live CLAP tracks with prepared rendered sources through one audio callback.";
         else if (result.trackCount > 1)
             result.message = "Direct multi-track CLAP project preview is using the audio callback path. Rendered preview remains available as fallback.";
@@ -940,6 +1107,7 @@ namespace mw::clap
         result.message << " Busy-block watchdog and stop note-off flush are enabled.";
 
         activeTrackIndex_ = result.trackIndex;
+        activeOwner_ = owner;
         active_ = true;
         callback_ = std::move(callback);
         return result;
@@ -947,13 +1115,14 @@ namespace mw::clap
 
     ClapLiveDirectPreviewStopSummary ClapLiveDirectPreviewEngine::stop()
     {
+        const std::scoped_lock callbackLock(callbackAccessMutex_);
         ClapLiveDirectPreviewStopSummary summary;
         summary.wasActive = active_ || callback_ != nullptr;
         summary.trackIndex = activeTrackIndex_;
 
         if (callback_ != nullptr)
         {
-            deviceManager_.removeAudioCallback(callback_.get());
+            audioService_.deactivateOutputCallback(activeOwner_, callback_.get());
             callback_->flushActiveNotesForStop();
 
             summary.hadFailure = callback_->hasFailed();
@@ -980,14 +1149,10 @@ namespace mw::clap
             summary.lastMessage = callback_->getLastMessage();
 
             callback_.reset();
-            deviceManager_.closeAudioDevice();
-        }
-        else if (active_)
-        {
-            deviceManager_.closeAudioDevice();
         }
 
         activeTrackIndex_ = -1;
+        activeOwner_ = mw::audio::ApplicationAudioPlaybackOwner::None;
         active_ = false;
         return summary;
     }
@@ -1036,5 +1201,18 @@ namespace mw::clap
     int ClapLiveDirectPreviewEngine::activeTrackIndex() const noexcept
     {
         return activeTrackIndex_;
+    }
+
+    bool ClapLiveDirectPreviewEngine::submitLiveMidiMessage(const juce::MidiMessage& message) noexcept
+    {
+        const std::scoped_lock callbackLock(callbackAccessMutex_);
+        return callback_ != nullptr && callback_->submitLiveMidiMessage(message);
+    }
+
+    void ClapLiveDirectPreviewEngine::requestLiveMidiPanic() noexcept
+    {
+        const std::scoped_lock callbackLock(callbackAccessMutex_);
+        if (callback_ != nullptr)
+            callback_->requestLiveMidiPanic();
     }
 }

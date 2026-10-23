@@ -1,5 +1,7 @@
 #pragma once
 
+#include "audio/ApplicationAudioService.h"
+
 #include "clap/ClapLiveCallbackBridge.h"
 #include "clap/ClapLiveEffectSession.h"
 #include "clap/ClapLiveInstrumentSession.h"
@@ -31,9 +33,18 @@ namespace mw::clap
         ClapLiveInstrumentSession* session = nullptr;
         std::mutex* sessionProcessMutex = nullptr;
         std::vector<ClapLivePlaybackNote> notes;
+        std::vector<ClapLivePlaybackControllerEvent> controllers;
+        std::vector<ClapLivePlaybackPitchBendEvent> pitchBends;
+        std::vector<ClapLivePlaybackProgramChangeEvent> programChanges;
+        std::vector<ClapLivePlaybackChannelPressureEvent> channelPressures;
+        std::vector<ClapLivePlaybackPolyPressureEvent> polyPressures;
+        std::vector<ClapLivePlayback14BitControllerEvent> controller14Bits;
+        std::vector<ClapLivePlaybackRpnEvent> rpns;
+        std::vector<ClapLivePlaybackNrpnEvent> nrpns;
         ClapLiveCallbackBridgeConfig config;
         std::vector<ClapLiveDirectPreviewEffectRequest> effects;
         float outputGain = 1.0f;
+        bool liveMidiInput = false;
     };
 
 
@@ -146,7 +157,7 @@ namespace mw::clap
     class ClapLiveDirectPreviewEngine final
     {
     public:
-        ClapLiveDirectPreviewEngine();
+        explicit ClapLiveDirectPreviewEngine(mw::audio::ApplicationAudioService& audioService);
         ~ClapLiveDirectPreviewEngine();
 
         ClapLiveDirectPreviewEngine(const ClapLiveDirectPreviewEngine&) = delete;
@@ -169,13 +180,17 @@ namespace mw::clap
 
         bool isActive() const noexcept;
         int activeTrackIndex() const noexcept;
+        bool submitLiveMidiMessage(const juce::MidiMessage& message) noexcept;
+        void requestLiveMidiPanic() noexcept;
 
     private:
         class DirectPreviewAudioCallback;
 
-        juce::AudioDeviceManager deviceManager_;
+        mw::audio::ApplicationAudioService& audioService_;
         std::unique_ptr<DirectPreviewAudioCallback> callback_;
+        mutable std::mutex callbackAccessMutex_;
         int activeTrackIndex_ = -1;
         bool active_ = false;
+        mw::audio::ApplicationAudioPlaybackOwner activeOwner_ = mw::audio::ApplicationAudioPlaybackOwner::None;
     };
 }

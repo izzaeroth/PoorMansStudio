@@ -20,9 +20,18 @@ namespace mw::vst
         std::unique_ptr<VstLiveInstrumentSession> session;
         std::mutex processMutex;
         std::vector<mw::clap::ClapLivePlaybackNote> notes;
+        std::vector<mw::clap::ClapLivePlaybackControllerEvent> controllers;
+        std::vector<mw::clap::ClapLivePlaybackPitchBendEvent> pitchBends;
+        std::vector<mw::clap::ClapLivePlaybackProgramChangeEvent> programChanges;
+        std::vector<mw::clap::ClapLivePlaybackChannelPressureEvent> channelPressures;
+        std::vector<mw::clap::ClapLivePlaybackPolyPressureEvent> polyPressures;
+        std::vector<mw::clap::ClapLivePlayback14BitControllerEvent> controller14Bits;
+        std::vector<mw::clap::ClapLivePlaybackRpnEvent> rpns;
+        std::vector<mw::clap::ClapLivePlaybackNrpnEvent> nrpns;
         mw::clap::ClapLiveCallbackBridgeConfig bridgeConfig;
         std::vector<std::unique_ptr<EffectSlot>> effects;
         float outputGain = 1.0f;
+        bool liveMidiInput = false;
     };
 
     VstLiveTrackSessionManager::VstLiveTrackSessionManager() = default;
@@ -40,7 +49,8 @@ namespace mw::vst
         VstLiveTrackSessionPrepareResult result;
         for (auto& config : configs)
         {
-            if (config.stableTrackId == 0 || config.trackIndex < 0 || config.notes.empty())
+            if (config.stableTrackId == 0 || config.trackIndex < 0
+                || (!config.liveMidiInput && config.notes.empty() && config.controllers.empty() && config.pitchBends.empty() && config.programChanges.empty() && config.channelPressures.empty() && config.polyPressures.empty() && config.controller14Bits.empty() && config.rpns.empty() && config.nrpns.empty()))
                 continue;
 
             auto track = std::make_unique<TrackSlot>();
@@ -48,8 +58,17 @@ namespace mw::vst
             track->trackIndex = config.trackIndex;
             track->trackName = std::move(config.trackName);
             track->notes = std::move(config.notes);
+            track->controllers = std::move(config.controllers);
+            track->pitchBends = std::move(config.pitchBends);
+            track->programChanges = std::move(config.programChanges);
+            track->channelPressures = std::move(config.channelPressures);
+            track->polyPressures = std::move(config.polyPressures);
+            track->controller14Bits = std::move(config.controller14Bits);
+            track->rpns = std::move(config.rpns);
+            track->nrpns = std::move(config.nrpns);
             track->bridgeConfig = std::move(config.bridgeConfig);
             track->outputGain = config.outputGain;
+            track->liveMidiInput = config.liveMidiInput;
             track->session = std::make_unique<VstLiveInstrumentSession>();
 
             std::string openError;
@@ -135,8 +154,17 @@ namespace mw::vst
             request.session = track->session.get();
             request.sessionProcessMutex = &track->processMutex;
             request.notes = track->notes;
+            request.controllers = track->controllers;
+            request.pitchBends = track->pitchBends;
+            request.programChanges = track->programChanges;
+            request.channelPressures = track->channelPressures;
+            request.polyPressures = track->polyPressures;
+            request.controller14Bits = track->controller14Bits;
+            request.rpns = track->rpns;
+            request.nrpns = track->nrpns;
             request.config = track->bridgeConfig;
             request.outputGain = track->outputGain;
+            request.liveMidiInput = track->liveMidiInput;
             request.effects.reserve(track->effects.size());
 
             for (auto& effect : track->effects)

@@ -28,9 +28,18 @@ namespace mw::vst
         std::string trackName;
         VstLiveInstrumentSessionConfig sessionConfig;
         std::vector<mw::clap::ClapLivePlaybackNote> notes;
+        std::vector<mw::clap::ClapLivePlaybackControllerEvent> controllers;
+        std::vector<mw::clap::ClapLivePlaybackPitchBendEvent> pitchBends;
+        std::vector<mw::clap::ClapLivePlaybackProgramChangeEvent> programChanges;
+        std::vector<mw::clap::ClapLivePlaybackChannelPressureEvent> channelPressures;
+        std::vector<mw::clap::ClapLivePlaybackPolyPressureEvent> polyPressures;
+        std::vector<mw::clap::ClapLivePlayback14BitControllerEvent> controller14Bits;
+        std::vector<mw::clap::ClapLivePlaybackRpnEvent> rpns;
+        std::vector<mw::clap::ClapLivePlaybackNrpnEvent> nrpns;
         mw::clap::ClapLiveCallbackBridgeConfig bridgeConfig;
         std::vector<VstLiveManagedEffectConfig> effects;
         float outputGain = 1.0f;
+        bool liveMidiInput = false;
     };
 
     struct VstLiveTrackSessionPrepareResult

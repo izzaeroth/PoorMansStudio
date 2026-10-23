@@ -1,6 +1,7 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 
 #include "app/AppVersion.h"
+#include "audio/ApplicationAudioService.h"
 #include <functional>
 #include "BinaryData.h"
 
@@ -328,6 +329,10 @@ public:
 
     void initialise(const juce::String&) override
     {
+        // The shared JUCE audio service has application lifetime for output and recording input.
+        // A launch-time failure is retained by the service and retried when a
+        // preview owner next requests output; it does not prevent the UI opening.
+        applicationAudioService.initialiseOutput();
         splashWindow = std::make_unique<SplashWindow>();
         startTimer(3000);
     }
@@ -337,6 +342,7 @@ public:
         stopTimer();
         splashWindow = nullptr;
         mainWindow = nullptr;
+        applicationAudioService.shutdown();
     }
 
     void systemRequestedQuit() override;
@@ -351,7 +357,7 @@ private:
     class MainWindow final : public juce::DocumentWindow
     {
     public:
-        explicit MainWindow(juce::String name)
+        MainWindow(juce::String name, mw::audio::ApplicationAudioService& audioService)
             : DocumentWindow(
                 name,
                 juce::Desktop::getInstance().getDefaultLookAndFeel()
@@ -362,7 +368,7 @@ private:
             const auto mainIcon = makePoorMansStudioMainIcon();
             setIcon(mainIcon);
             applyPoorMansStudioMainCustomTitleBar(*this);
-            setContentOwned(new mw::gui::MainComponent(), true);
+            setContentOwned(new mw::gui::MainComponent(audioService), true);
             setResizable(true, true);
             centreWithSize(1250, 820);
             setVisible(true);
@@ -421,6 +427,7 @@ private:
         bool closeRequestPending = false;
     };
 
+    mw::audio::ApplicationAudioService applicationAudioService;
     std::unique_ptr<SplashWindow> splashWindow;
     std::unique_ptr<MainWindow> mainWindow;
 };
@@ -447,7 +454,7 @@ void MusicWorkstationApplication::timerCallback()
 {
     stopTimer();
     splashWindow = nullptr;
-    mainWindow = std::make_unique<MainWindow>(getApplicationName());
+    mainWindow = std::make_unique<MainWindow>(getApplicationName(), applicationAudioService);
 }
 
 START_JUCE_APPLICATION(MusicWorkstationApplication)

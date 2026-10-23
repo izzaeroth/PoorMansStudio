@@ -821,6 +821,18 @@ namespace mw::gui
         repaint();
     }
 
+    double PianoRollComponent::getPreviewPlayheadBeatNow() const noexcept
+    {
+        if (!previewPlayheadActive || previewPlayheadPaused || previewPlayheadTempoBpm <= 0.0)
+            return previewPlayheadBeat;
+
+        const auto elapsedMilliseconds = std::max(0.0,
+            juce::Time::getMillisecondCounterHiRes() - previewPlayheadStartMilliseconds);
+        const auto elapsedBeats = (elapsedMilliseconds / 1000.0) * (previewPlayheadTempoBpm / 60.0);
+        return std::min(previewPlayheadStartBeat + previewPlayheadDurationBeats,
+                        previewPlayheadStartBeat + elapsedBeats);
+    }
+
     void PianoRollComponent::timerCallback()
     {
         if (!previewPlayheadActive)

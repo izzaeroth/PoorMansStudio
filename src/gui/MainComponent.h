@@ -17,6 +17,8 @@
 #include <mutex>
 
 #include "core/Project.h"
+#include "core/TrackSelectionPolicy.h"
+#include "audio/ApplicationAudioService.h"
 #include "audio/SoundFontPresetReader.h"
 #include "audio/RenderJob.h"
 #include "audio/AudioClipRecorder.h"
@@ -32,8 +34,26 @@
 #include "clap/ClapLiveTrackSessionManager.h"
 #include "playback/PlaybackTransportCoordinator.h"
 #include "playback/MixedLiveProjectPreviewEngine.h"
+#include "midi/MidiInputCoordinator.h"
+#include "midi/MidiRecordingSession.h"
+#include "midi/MidiRecordingCountIn.h"
+#include "midi/MidiRecordingCountInPlayer.h"
+#include "midi/MidiRecordingQuantizer.h"
+#include "midi/MidiRecordingMetronome.h"
+#include "midi/MidiRecordingMetronomeAudio.h"
+#include "midi/MidiRecordingPunch.h"
+#include "midi/MidiRecordingLoop.h"
+#include "midi/MidiRecordingTakeReview.h"
+#include "midi/MidiRecordingComp.h"
 #include "gui/AudioClipEditorComponent.h"
 #include "gui/PianoRollComponent.h"
+#include "gui/MidiControllerLaneComponent.h"
+#include "gui/MidiPitchBendLaneComponent.h"
+#include "gui/MidiProgramChangeLaneComponent.h"
+#include "gui/MidiChannelPressureLaneComponent.h"
+#include "gui/MidiPolyPressureLaneComponent.h"
+#include "gui/Midi14BitControllerLaneComponent.h"
+#include "gui/MidiParameterLaneComponent.h"
 
 #include "gui/HelperBubbles.h"
 
@@ -429,7 +449,7 @@ namespace mw::gui
                                 public juce::MenuBarModel
     {
     public:
-        MainComponent();
+        explicit MainComponent(mw::audio::ApplicationAudioService& audioService);
         ~MainComponent() override;
 
         void paint(juce::Graphics& g) override;
@@ -498,6 +518,7 @@ namespace mw::gui
         void playAudioRecorderTestAndCleanup(const std::filesystem::path& testPath);
         void stopAudioRecorderTestPlaybackAndCleanup(const std::filesystem::path& testPath = {});
         void cancelAudioRecorderTestAndCleanup();
+        void stopAudioClipRecorder();
         void setAudioRecorderMicGainDb(double gainDb);
         void setAudioRecorderTrackLiveEffectEnabled(bool enabled);
         mw::audio::AudioClipRecorderLiveEffectOptions buildAudioRecorderLiveEffectOptions(int targetTrackIndex, int sourceTrackIndex);
@@ -536,6 +557,96 @@ namespace mw::gui
         void renderMidiCurrentProject();
         void showRenderSettingsWindow();
         void closeRenderSettingsWindow();
+        void openAudioSettingsWindow();
+        void closeAudioSettingsWindow();
+        void openMidiInputSettingsWindow();
+        void closeMidiInputSettingsWindow();
+        void openPendingTakeReviewsWindow();
+        void closePendingTakeReviewsWindow();
+        void refreshPendingTakeReviewsUi(mw::core::StableId preferredTrackId = 0,
+                                         mw::core::StableId preferredSessionId = 0);
+        void refreshPendingTakeReviewIndicator();
+        void resumePendingTakeReview(mw::core::StableId trackId, mw::core::StableId reviewSessionId);
+        void archivePendingTakeReview(mw::core::StableId trackId, mw::core::StableId reviewSessionId);
+        void snapshotActiveTakeReview(mw::core::StableId trackId, mw::core::StableId reviewSessionId);
+        void restoreArchivedTakeReview(mw::core::StableId trackId, mw::core::StableId reviewSessionId);
+        void requestRenameTakeReview(mw::core::StableId trackId, mw::core::StableId reviewSessionId);
+        void renameTakeReview(mw::core::StableId trackId, mw::core::StableId reviewSessionId, const juce::String& newName);
+        void saveTakeReviewMetadata(mw::core::StableId trackId, mw::core::StableId reviewSessionId,
+                                    const juce::String& tags, const juce::String& notes);
+        void requestDiscardPendingTakeReview(mw::core::StableId trackId, mw::core::StableId reviewSessionId);
+        void discardPendingTakeReview(mw::core::StableId trackId, mw::core::StableId reviewSessionId);
+        void duplicateArchivedTakeReview(mw::core::StableId trackId, mw::core::StableId reviewSessionId);
+        void requestCopyArchivedTakeReviewToTrack(mw::core::StableId trackId, mw::core::StableId reviewSessionId);
+        void copyArchivedTakeReviewToTrack(mw::core::StableId expectedProjectId,
+                                           mw::core::StableId sourceTrackId,
+                                           mw::core::StableId reviewSessionId,
+                                           mw::core::StableId destinationTrackId);
+        void requestMoveArchivedTakeReviewToTrack(mw::core::StableId trackId, mw::core::StableId reviewSessionId);
+        void moveArchivedTakeReviewToTrack(mw::core::StableId expectedProjectId,
+                                           mw::core::StableId sourceTrackId,
+                                           mw::core::StableId reviewSessionId,
+                                           mw::core::StableId destinationTrackId);
+        void requestDeleteArchivedTakeReview(mw::core::StableId trackId, mw::core::StableId reviewSessionId);
+        void deleteArchivedTakeReview(mw::core::StableId trackId, mw::core::StableId reviewSessionId);
+        void runSimulationRegressionTests();
+        bool applyMidiInputSelectionAndPersist(const mw::midi::MidiInputSelection& selection);
+        bool startLiveMidiMonitoringForSelectedTrack(const mw::midi::MidiInputSelection* requestedSelection = nullptr);
+        bool startLiveMidiMonitoringForTrack(int trackIndex, const mw::midi::MidiInputSelection* requestedSelection = nullptr);
+        void stopLiveMidiMonitoring(bool sendPanic = true);
+        void panicLiveMidiMonitoring();
+        void restartLiveMidiMonitoringForSelectedTrack();
+        void handleIncomingLiveMidiMessage(const juce::MidiMessage& message);
+        void handleMidiInputDisconnected(const juce::String& deviceName);
+        bool armSelectedTrackForMidiRecording();
+        void clearMidiRecordingArm();
+        bool startMidiRecording();
+        void stopMidiRecording(bool commitNotes = true);
+        bool undoLastMidiRecordingTake();
+        bool redoLastMidiRecordingTake();
+        void refreshMidiRecordingUi();
+        void refreshTrackAfterMidiRecordingChange(int trackIndex);
+        bool beginMidiRecordingSessionForActivePlayback();
+        bool startMidiRecordingProjectPlayback();
+        bool startMidiRecordingCountIn();
+        void completeMidiRecordingCountIn(std::uint64_t generation);
+        void cancelMidiRecordingCountIn(const juce::String& reason = {});
+        bool isMidiRecordingBusy() const noexcept;
+        double currentMidiRecordingTransportSeconds();
+        void stopMidiRecordingBackingPlayback(double preservedPositionSeconds = -1.0);
+        mw::midi::MidiRecordingPunchRegion currentMidiRecordingPunchRegion() const noexcept;
+        bool setMidiRecordingPunchPoint(bool setInPoint);
+        void clearMidiRecordingPunchRegion();
+        bool beginMidiRecordingPunchCapture(std::uint64_t generation);
+        void scheduleMidiRecordingPunchBoundary(std::uint64_t generation, bool punchOutBoundary);
+        void completeMidiRecordingPunchOut(std::uint64_t generation);
+        bool completeMidiRecordingLoopWrap(std::uint64_t generation);
+        void clearMidiRecordingLoopSession(bool preserveTakeReview = false) noexcept;
+        bool selectMidiRecordingLoopTakeReviewPass(int passNumber);
+        void auditionMidiRecordingLoopTakeReviewPass();
+        void commitMidiRecordingLoopTakeReview(bool keepAll);
+        void discardMidiRecordingLoopTakeReview();
+        bool restorePersistentMidiTakeReviewForSelectedTrack();
+        bool restorePersistentMidiTakeReviewForTrack(int trackIndex);
+        bool syncPersistentMidiTakeReviewToProject(bool markDirty);
+        void clearPersistentMidiTakeReviewForTrack(int trackIndex, bool markDirty);
+        bool ensureMidiRecordingLoopCompState();
+        void setMidiRecordingLoopCompMode(bool enabled);
+        void setMidiRecordingLoopCompGrid(int gridId);
+        void selectMidiRecordingLoopCompSegment(int segmentIndex);
+        void assignMidiRecordingLoopCompPass(int passNumber);
+        void setMidiRecordingLoopCompBoundaryNoteMode(int modeId);
+        void setMidiRecordingLoopCompCrossPassNoteMode(int modeId);
+        void setMidiRecordingSustainPedalMode(int modeId);
+        void addMidiRecordingLoopCompBoundary();
+        void removeMidiRecordingLoopCompBoundary(std::int64_t tick);
+        void auditionMidiRecordingLoopComp();
+        void commitMidiRecordingLoopComp();
+        void finalizeMidiRecordingAtSeconds(double stopSeconds, bool commitNotes, bool automaticPunchOut);
+        int findTrackIndexByStableId(mw::core::StableId stableId) const;
+        void applyAudioConfigurationAndPersist(const mw::audio::ApplicationAudioConfiguration& configuration,
+                                               bool keepAudioSettingsWindowOpen = true);
+        void stopRealtimeAudioForDeviceReconfiguration();
         void previewSelectedTrackOnBackgroundThread();
         void previewSelectedSequenceOnBackgroundThread();
         void previewCurrentProjectOnBackgroundThread();
@@ -598,7 +709,7 @@ namespace mw::gui
         void renderVstInstrumentTestNoteForTrack(int trackIndex, juce::String liveEditorStateOverride = {});
         void renderVstEffectTestSampleForTrack(int trackIndex, int effectSlotIndex);
         void renderClapInstrumentTestNoteForTrack(int trackIndex, juce::String liveEditorStateOverride = {});
-        bool startSelectedTrackVstDirectAudition(int trackIndex);
+        bool startSelectedTrackVstDirectAudition(int trackIndex, bool liveMidiInput = false);
         bool tryStartSelectedTrackVstMainTransportPreview(int trackIndex);
         void stopVstInstrumentLiveAudition(bool deleteTempFile = true);
         void beginVstDirectPreviewCompletionPolling();
@@ -607,7 +718,7 @@ namespace mw::gui
         void handleVstDirectPreviewCompletionPoll(int generation);
         void armSelectedTrackClapLiveEngineSession();
         void disarmClapLiveEngineSession(bool logIfInactive = true);
-        bool startSelectedTrackClapDirectAudition(int trackIndex);
+        bool startSelectedTrackClapDirectAudition(int trackIndex, bool liveMidiInput = false);
         bool tryStartSelectedTrackClapMainTransportPreview(int trackIndex);
         bool tryStartMixedLiveProjectPreview();
         bool startPreparedMixedLiveProjectPreview(const std::vector<int>& liveClapTrackIndices,
@@ -646,7 +757,9 @@ namespace mw::gui
         void refreshPresetListFromSelectedSoundFont();
         bool enforceProjectTrackLimit(mw::core::Project& project, const juce::String& sourceLabel);
         bool canAddAnotherTrack(const juce::String& actionLabel);
+        mw::core::TrackSelectionSnapshot captureCurrentTrackSelection() const;
         void refreshTrackSelector();
+        void refreshTrackSelector(const mw::core::TrackSelectionSnapshot& selection);
         void openTrackManagerWindow();
         bool trackPassesManagerFilter(int trackIndex) const;
         void refreshTrackManagerText(bool jumpToActiveSequence = true);
@@ -711,6 +824,22 @@ namespace mw::gui
         void removeLastNoteFromSelectedTrack();
         void openRawNotesWindow();
         void openPianoRollWindow();
+        void openMidiControllerLaneWindow();
+        void closeMidiControllerLaneWindow();
+        void openMidiPitchBendLaneWindow();
+        void closeMidiPitchBendLaneWindow();
+        void openMidiProgramChangeLaneWindow();
+        void closeMidiProgramChangeLaneWindow();
+        void openMidiChannelPressureLaneWindow();
+        void closeMidiChannelPressureLaneWindow();
+        void openMidiPolyPressureLaneWindow();
+        void closeMidiPolyPressureLaneWindow();
+        void openMidi14BitControllerLaneWindow();
+        void closeMidi14BitControllerLaneWindow();
+        void openMidiParameterLaneWindow();
+        void closeMidiParameterLaneWindow();
+        mw::core::StableId getSelectedTrackStableId() const;
+        std::int64_t getControllerLanePreviewTick() const;
         juce::String getSelectedTrackDisplayName() const;
         juce::String getTrackDisplayName(int trackIndex) const;
         void applyPianoRollSettings();
@@ -873,6 +1002,7 @@ namespace mw::gui
         juce::TextButton deletePianoRollNoteButton {"Delete Selected"};
         juce::TextButton syncPianoRollButton {"Sync Roll"};
         juce::TextButton openPianoRollButton {"Open Piano Roll"};
+        juce::TextButton midiControllerLaneButton {"Controller Lane"};
         juce::TextButton audioClipEditorButton {"AudioClip Editor"};
         juce::TextButton setBeatWindow4Button {"4"};
         juce::TextButton setBeatWindow8Button {"8"};
@@ -906,6 +1036,7 @@ namespace mw::gui
         juce::Label titleLabel;
         juce::Label renderStatusLabel;
         juce::Label renderTargetLabel;
+        juce::TextButton pendingTakeReviewsButton { "Pending Takes: 0" };
         juce::Label sequenceSelectorLabel;
         juce::TextEditor sequenceSelectorBox;
         juce::TextButton changeActiveSequenceButton { "Chg Seq" };
@@ -1085,15 +1216,26 @@ namespace mw::gui
             std::unique_ptr<juce::DocumentWindow> window;
         };
 
+        mw::audio::ApplicationAudioService& applicationAudioService;
         PianoRollComponent pianoRoll;
         std::map<int, std::unique_ptr<PianoRollEditorWindowState>> pianoRollEditorWindows;
         std::unique_ptr<juce::DocumentWindow> pianoRollWindow;
         std::unique_ptr<juce::DocumentWindow> pianoRollPreviewPlayerWindow;
+        std::unique_ptr<juce::DocumentWindow> midiControllerLaneWindow;
+        std::unique_ptr<juce::DocumentWindow> midiPitchBendLaneWindow;
+        std::unique_ptr<juce::DocumentWindow> midiProgramChangeLaneWindow;
+        std::unique_ptr<juce::DocumentWindow> midiChannelPressureLaneWindow;
+        std::unique_ptr<juce::DocumentWindow> midiPolyPressureLaneWindow;
+        std::unique_ptr<juce::DocumentWindow> midi14BitControllerLaneWindow;
+        std::unique_ptr<juce::DocumentWindow> midiParameterLaneWindow;
         std::unique_ptr<juce::DocumentWindow> rawNotesWindow;
         std::unique_ptr<juce::DocumentWindow> trackManagerWindow;
         std::unique_ptr<juce::DocumentWindow> sequencePickerWindow;
         std::unique_ptr<juce::DocumentWindow> sequenceThoughtsWindow;
         std::unique_ptr<juce::DocumentWindow> renderSettingsWindow;
+        std::unique_ptr<juce::DocumentWindow> audioSettingsWindow;
+        std::unique_ptr<juce::DocumentWindow> midiInputSettingsWindow;
+        std::unique_ptr<juce::DocumentWindow> pendingTakeReviewsWindow;
         std::unique_ptr<juce::DocumentWindow> audioRecorderWindow;
         std::unique_ptr<juce::DocumentWindow> audioClipEditorWindow;
         std::unique_ptr<juce::DocumentWindow> vstPluginManagerWindow;
@@ -1114,6 +1256,9 @@ namespace mw::gui
         std::unique_ptr<juce::Component> audioRecorderContent;
         std::unique_ptr<juce::Component> audioClipEditorContent;
         std::unique_ptr<juce::Component> renderSettingsContent;
+        std::unique_ptr<juce::Component> pendingTakeReviewsContent;
+        std::unique_ptr<juce::Component> audioSettingsContent;
+        std::unique_ptr<juce::Component> midiInputSettingsContent;
         std::unique_ptr<juce::Component> projectInfoContent;
         int pianoRollOpenTrackIndex = -1;
         int audioClipEditorOpenTrackIndex = -1;
@@ -1128,7 +1273,6 @@ namespace mw::gui
         std::vector<std::filesystem::path> generatedPreviewFiles;
         std::unique_ptr<mw::audio::AudioClipRecorder> audioClipRecorder;
         juce::AudioFormatManager audioRecorderTestFormatManager;
-        juce::AudioDeviceManager audioRecorderTestPlaybackDeviceManager;
         juce::AudioSourcePlayer audioRecorderTestSourcePlayer;
         juce::AudioTransportSource audioRecorderTestTransport;
         std::unique_ptr<juce::AudioFormatReaderSource> audioRecorderTestReaderSource;
@@ -1202,6 +1346,101 @@ namespace mw::gui
 
         mw::clap::ClapLiveDirectPreviewEngine clapLiveDirectPreviewEngine;
         mw::playback::MixedLiveProjectPreviewEngine mixedLiveProjectPreviewEngine;
+        mw::midi::MidiInputCoordinator midiInputCoordinator;
+        mw::midi::MidiRecordingSession midiRecordingSession;
+        mw::midi::MidiRecordingCountInState midiRecordingCountInState;
+        mw::midi::MidiRecordingCountInPlayer midiRecordingCountInPlayer;
+
+        struct MidiRecordingHistoryEntry
+        {
+            mw::core::StableId projectId = 0;
+            mw::core::StableId trackId = 0;
+            std::vector<mw::core::NoteEvent> notes;
+            std::vector<mw::core::MidiControllerEvent> controllerEvents;
+            std::vector<mw::core::MidiControllerEvent> expectedControllerEvents;
+            std::vector<mw::core::MidiPitchBendEvent> pitchBendEvents;
+            std::vector<mw::core::MidiPitchBendEvent> expectedPitchBendEvents;
+            std::vector<mw::core::MidiProgramChangeEvent> programChangeEvents;
+            std::vector<mw::core::MidiProgramChangeEvent> expectedProgramChangeEvents;
+            std::vector<mw::core::MidiChannelPressureEvent> channelPressureEvents;
+            std::vector<mw::core::MidiChannelPressureEvent> expectedChannelPressureEvents;
+            std::vector<mw::core::MidiPolyPressureEvent> polyPressureEvents;
+            std::vector<mw::core::MidiPolyPressureEvent> expectedPolyPressureEvents;
+            std::vector<mw::core::Midi14BitControllerEvent> controller14BitEvents;
+            std::vector<mw::core::Midi14BitControllerEvent> expectedController14BitEvents;
+            std::vector<mw::core::MidiRpnEvent> rpnEvents;
+            std::vector<mw::core::MidiRpnEvent> expectedRpnEvents;
+            std::vector<mw::core::MidiNrpnEvent> nrpnEvents;
+            std::vector<mw::core::MidiNrpnEvent> expectedNrpnEvents;
+            mw::core::PersistentMidiTakeReview pendingTakeReview;
+        };
+
+        mw::core::StableId midiRecordingArmedProjectId = 0;
+        mw::core::StableId midiRecordingArmedTrackId = 0;
+        int midiRecordingArmedTrackIndex = -1;
+        std::vector<MidiRecordingHistoryEntry> midiRecordingUndoStack;
+        std::vector<MidiRecordingHistoryEntry> midiRecordingRedoStack;
+        bool midiRecordingPlaybackPending = false;
+        bool midiRecordingOwnsProjectPlayback = false;
+        double midiRecordingRequestedStartSeconds = 0.0;
+        std::uint64_t midiRecordingFallbackTransportGeneration = 0;
+        int midiRecordingCountInBars = 0;
+        int midiRecordingQuantizeDivision = 0;
+        bool midiRecordingMetronomeEnabled = false;
+        bool midiRecordingRecordControllers = false;
+        bool midiRecordingRecordPitchBend = false;
+        bool midiRecordingRecordProgramChange = false;
+        bool midiRecordingRecordChannelPressure = false;
+        bool midiRecordingRecordPolyPressure = false;
+        bool midiRecordingRecordAdvancedParameters = false;
+        bool midiRecordingPunchEnabled = false;
+        bool midiRecordingLoopEnabled = false;
+        bool midiRecordingLoopTakeReviewEnabled = false;
+        mw::core::StableId midiRecordingPunchProjectId = 0;
+        std::int64_t midiRecordingPunchInTick = -1;
+        std::int64_t midiRecordingPunchOutTick = -1;
+        mw::midi::MidiRecordingPunchRunState midiRecordingPunchRunState;
+        mw::midi::MidiRecordingLoopRunState midiRecordingLoopRunState;
+        mw::midi::MidiRecordingLoopWrapTransaction midiRecordingLoopWrapTransaction;
+        mw::midi::MidiRecordingLoopTakeReviewState midiRecordingLoopTakeReviewState;
+        mw::midi::MidiRecordingLoopCompState midiRecordingLoopCompState;
+        std::uint64_t midiRecordingPersistentReviewGeneration = 1000000;
+        bool midiRecordingLoopCompModeEnabled = false;
+        mw::midi::MidiRecordingSustainPedalMode midiRecordingSustainPedalMode = mw::midi::MidiRecordingSustainPedalMode::Ignore;
+        int midiRecordingLoopCompSelectedSegmentIndex = 0;
+        bool midiRecordingLoopNoMidiDiagnosticMode = false;
+        std::uint16_t midiRecordingLoopSustainDownMask = 0;
+        double midiRecordingLoopPendingWrapStartedMs = -1.0;
+        int midiRecordingLoopPendingWrapPass = 0;
+        juce::String midiRecordingLoopPendingWrapBackend;
+        std::vector<mw::core::NoteEvent> midiRecordingLoopAccumulatedNotes;
+        std::vector<mw::core::PersistentMidiControllerEvent> midiRecordingLoopAccumulatedControllers;
+        std::vector<mw::core::PersistentMidiPitchBendEvent> midiRecordingLoopAccumulatedPitchBends;
+        std::vector<mw::core::PersistentMidiProgramChangeEvent> midiRecordingLoopAccumulatedProgramChanges;
+        std::vector<mw::core::PersistentMidiChannelPressureEvent> midiRecordingLoopAccumulatedChannelPressures;
+        std::vector<mw::core::PersistentMidiPolyPressureEvent> midiRecordingLoopAccumulatedPolyPressures;
+        std::vector<mw::core::PersistentMidi14BitControllerEvent> midiRecordingLoopAccumulated14BitControllers;
+        std::vector<mw::core::PersistentMidiRpnEvent> midiRecordingLoopAccumulatedRpns;
+        std::vector<mw::core::PersistentMidiNrpnEvent> midiRecordingLoopAccumulatedNrpns;
+        std::size_t midiRecordingLoopFinalizedHeldNoteCount = 0;
+        std::size_t midiRecordingLoopQuantizedStartCount = 0;
+        std::size_t midiRecordingLoopBoundaryAdjustmentCount = 0;
+        mw::midi::MidiRecordingMetronomeRunState midiRecordingMetronomeRunState;
+        std::filesystem::path midiRecordingMetronomeBasePreviewWavPath;
+        std::filesystem::path midiRecordingMetronomePreviewWavPath;
+
+        enum class LiveMidiMonitorBackend
+        {
+            None,
+            Vst3,
+            Clap
+        };
+
+        mutable std::mutex liveMidiRouteMutex;
+        bool liveMidiMonitoringActive = false;
+        LiveMidiMonitorBackend liveMidiMonitorBackend = LiveMidiMonitorBackend::None;
+        mw::core::StableId liveMidiTargetTrackId = 0;
+        int liveMidiTargetTrackIndex = -1;
         mw::playback::PlaybackTransportCoordinator playbackTransportCoordinator;
         std::uint64_t clapLiveTransportGeneration = 0;
         std::int64_t clapLiveTransportStartSample = 0;
@@ -1272,6 +1511,7 @@ namespace mw::gui
             int sequenceMapFirstIndex = 0;
             int sequenceMapStartBeat = 0;
             int sequenceMapBeatWindow = 0;
+            mw::core::TrackSelectionSnapshot trackSelection;
             juce::String label;
         };
 

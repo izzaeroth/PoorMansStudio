@@ -1,4 +1,6 @@
 #include "audio/RenderJob.h"
+#include "audio/TailPolicy.h"
+#include "audio/ProjectContentEnding.h"
 
 #include "audio/GainLimits.h"
 
@@ -101,18 +103,20 @@ namespace
     }
     double ticksToSeconds(std::int64_t ticks, int tempoBpm)
     {
-        const auto safeTempo = tempoBpm > 0 ? tempoBpm : 120;
-        const auto safeTicks = std::max<std::int64_t>(0, ticks);
-        const auto beats = static_cast<double>(safeTicks) / static_cast<double>(mw::core::Project::ticksPerQuarterNote);
-        return beats * 60.0 / static_cast<double>(safeTempo);
+        return mw::audio::contentEndingTicksToSeconds(ticks, tempoBpm);
     }
 
-    double trackContentDurationSeconds(const mw::core::Track& track, int tempoBpm)
+    std::int64_t trackContentEndTick(const mw::core::Track& track)
     {
         std::int64_t endTick = 0;
         for (const auto& note : track.getNotes())
             endTick = std::max<std::int64_t>(endTick, note.startTick + note.durationTicks);
-        return ticksToSeconds(endTick, tempoBpm);
+        return endTick;
+    }
+
+    double trackContentDurationSeconds(const mw::core::Track& track, int tempoBpm)
+    {
+        return mw::audio::contentEndingTicksToSeconds(trackContentEndTick(track), tempoBpm);
     }
 
     bool hasAnyAudioClipStartOffset(const std::vector<AudioClipRenderInput>& inputs)
@@ -274,75 +278,34 @@ namespace
 
     double projectContentDurationSeconds(const mw::audio::RenderJob& job)
     {
-        const bool anySolo = std::any_of(
-            job.project.getTracks().begin(),
-            job.project.getTracks().end(),
-            [](const auto& track) { return track.getSolo(); });
+        mw::audio::ProjectContentEndingInput input;
+        input.tempoBpm = job.project.getTempoBpm();
+        input.masterVolume = static_cast<double>(job.masterVolume);
+        input.tracks.reserve(job.project.getTracks().size());
+        input.clips.reserve(job.project.getAudioClips().size());
 
-        double contentEndSeconds = 0.0;
         for (const auto& track : job.project.getTracks())
         {
-            if (track.isAudioClipTrack() || track.getMuted())
-                continue;
-            if (anySolo && !track.getSolo())
-                continue;
-
-            const auto effectiveGain = mw::audio::sanitizeMainUiGain(
-                track.getMixerSettings().volume * static_cast<float>(job.masterVolume));
-            if (effectiveGain <= 0.000001f)
-                continue;
-
-            contentEndSeconds = std::max(
-                contentEndSeconds,
-                trackContentDurationSeconds(track, job.project.getTempoBpm()));
+            mw::audio::ContentEndingTrack endingTrack;
+            endingTrack.audioClipTrack = track.isAudioClipTrack();
+            endingTrack.muted = track.getMuted();
+            endingTrack.solo = track.getSolo();
+            endingTrack.volume = static_cast<double>(track.getMixerSettings().volume);
+            endingTrack.contentEndTick = trackContentEndTick(track);
+            input.tracks.push_back(endingTrack);
         }
 
-        const auto& tracks = job.project.getTracks();
         for (const auto& clip : job.project.getAudioClips())
         {
-            const auto* track = clip.trackIndex >= 0 && clip.trackIndex < static_cast<int>(tracks.size())
-                ? &tracks[static_cast<std::size_t>(clip.trackIndex)]
-                : nullptr;
-            if (!shouldRenderAudioClipForTrack(job, track))
-                continue;
-            const double trackVolume = track != nullptr ? static_cast<double>(track->getMixerSettings().volume) : 1.0;
-            const double clipGain = std::isfinite(static_cast<double>(clip.gain)) ? static_cast<double>(clip.gain) : 1.0;
-            const double masterVolume = std::isfinite(static_cast<double>(job.masterVolume)) ? static_cast<double>(job.masterVolume) : 1.0;
-            if (mw::audio::sanitizeMainUiGain(trackVolume * clipGain * masterVolume) <= 0.000001)
-                continue;
-
-            const auto clipStartSeconds = ticksToSeconds(clip.startTick, job.project.getTempoBpm());
-            contentEndSeconds = std::max(
-                contentEndSeconds,
-                clipStartSeconds + intendedAudioClipDurationSeconds(clip));
+            mw::audio::ContentEndingClip endingClip;
+            endingClip.trackIndex = clip.trackIndex;
+            endingClip.startTick = clip.startTick;
+            endingClip.keptDurationSeconds = intendedAudioClipDurationSeconds(clip);
+            endingClip.gain = static_cast<double>(clip.gain);
+            input.clips.push_back(endingClip);
         }
 
-        return contentEndSeconds;
-    }
-
-    struct FinalMixTailTrackingSettings
-    {
-        float silenceThreshold = 1.5848932e-5f; // Approximately -96 dBFS.
-        double silenceHoldSeconds = 1.0;
-        double tailPadSeconds = 0.15;
-        double maximumTailSeconds = kEffectSlotRenderTailOverscanSeconds;
-        const char* policyName = "render";
-        const char* thresholdDescription = "-96 dBFS";
-    };
-
-    FinalMixTailTrackingSettings finalMixTailTrackingSettings(const mw::audio::RenderJob& job)
-    {
-        FinalMixTailTrackingSettings settings;
-        if (!job.usePreviewEffectTailPolicy)
-            return settings;
-
-        settings.silenceThreshold = 1.0e-4f; // Approximately -80 dBFS.
-        settings.silenceHoldSeconds = 0.30;
-        settings.tailPadSeconds = 0.05;
-        settings.maximumTailSeconds = kEffectSlotPreviewTailOverscanSeconds;
-        settings.policyName = "preview";
-        settings.thresholdDescription = "-80 dBFS";
-        return settings;
+        return mw::audio::calculateProjectContentEndingSeconds(input);
     }
 
     std::filesystem::path temporaryFinalMixTailTrimPathFor(const std::filesystem::path& input)
@@ -450,7 +413,10 @@ namespace
         if (sourceDurationSeconds <= 0.0 || wavPath.empty() || !std::filesystem::exists(wavPath))
             return true;
 
-        const auto settings = finalMixTailTrackingSettings(job);
+        const auto policyMode = job.usePreviewEffectTailPolicy
+            ? mw::audio::TailPolicyMode::Preview
+            : mw::audio::TailPolicyMode::Render;
+        const auto settings = mw::audio::tailTrackingSettings(policyMode);
         juce::AudioFormatManager formatManager;
         formatManager.registerBasicFormats();
         std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(juce::File(wavPath.string())));
@@ -468,13 +434,9 @@ namespace
             static_cast<std::int64_t>(std::llround(sourceDurationSeconds * static_cast<double>(sampleRate))),
             0,
             totalSamples);
-        const auto maximumTailSamples = static_cast<std::int64_t>(
-            std::ceil(settings.maximumTailSeconds * static_cast<double>(sampleRate)));
-        const auto scanEndSamples = std::min<std::int64_t>(totalSamples, sourceSamples + maximumTailSamples);
-        const auto silenceHoldSamples = std::max<std::int64_t>(1, static_cast<std::int64_t>(
-            std::ceil(settings.silenceHoldSeconds * static_cast<double>(sampleRate))));
-        const auto tailPadSamples = std::max<std::int64_t>(0, static_cast<std::int64_t>(
-            std::ceil(settings.tailPadSeconds * static_cast<double>(sampleRate))));
+        const auto tailPlan = mw::audio::makeTailScanPlan(
+            totalSamples, sourceSamples, sampleRate, settings.maximumTailSeconds, policyMode);
+        const auto scanEndSamples = tailPlan.scanEndSamples;
 
         constexpr int scanBlockSize = 32768;
         juce::AudioBuffer<float> buffer(channelCount, scanBlockSize);
@@ -520,17 +482,12 @@ namespace
             position += blockSamples;
         }
 
-        const bool endedInConfirmedSilence = consecutiveSilentSamples >= silenceHoldSamples;
+        const auto tailDecision = mw::audio::finalizeTailScan(
+            tailPlan, totalSamples, lastAudibleSample, consecutiveSilentSamples);
+        const bool endedInConfirmedSilence = tailDecision.endedInConfirmedSilence;
+        const auto keepSamples = tailDecision.keepSamples;
+        const auto trimmedSamples = tailDecision.trimmedSamples;
         reader.reset();
-
-        const auto lastAudibleKeep = endedInConfirmedSilence
-            ? (lastAudibleSample >= 0 ? lastAudibleSample + 1 + tailPadSamples : sourceSamples)
-            : scanEndSamples;
-        const auto keepSamples = std::clamp<std::int64_t>(
-            std::max<std::int64_t>(sourceSamples, lastAudibleKeep),
-            0,
-            scanEndSamples);
-        const auto trimmedSamples = std::max<std::int64_t>(0, totalSamples - keepSamples);
 
         if (trimmedSamples > 0 && !rewriteFinalMixWavTrimmedToSamples(wavPath, keepSamples, errorMessage))
             return false;
@@ -1244,7 +1201,7 @@ namespace
 
         status(callbacks, "Exporting stem MIDI: " + task.trackName);
 
-        if (!mw::midi::MidiExporter::exportToFile(task.stemProject, task.stemMidi))
+        if (!mw::midi::MidiExporter::exportToFile(task.stemProject, task.stemMidi, { mw::midi::MidiExportPurpose::InternalRender }))
         {
             result.errorMessage = "Failed to export stem MIDI for track: " + task.trackName;
             return result;
@@ -1851,7 +1808,7 @@ namespace mw::audio
         }
 
         status(callbacks, "Exporting MIDI...");
-        if (!mw::midi::MidiExporter::exportToFile(renderProject, result.midiPath))
+        if (!mw::midi::MidiExporter::exportToFile(renderProject, result.midiPath, { mw::midi::MidiExportPurpose::InternalRender }))
         {
             result.message = "Failed to export MIDI.";
             log(callbacks, "ERROR: " + result.message);

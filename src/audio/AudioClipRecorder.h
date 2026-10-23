@@ -11,6 +11,7 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#include "audio/ApplicationAudioService.h"
 #include "core/InstrumentAssignment.h"
 
 namespace mw::clap
@@ -61,7 +62,7 @@ namespace mw::audio
     class AudioClipRecorder final : private juce::AudioIODeviceCallback
     {
     public:
-        AudioClipRecorder();
+        explicit AudioClipRecorder(ApplicationAudioService& audioService);
         ~AudioClipRecorder() override;
 
         AudioClipRecorderStartResult startRecording(const std::filesystem::path& outputWavPath,
@@ -108,7 +109,8 @@ namespace mw::audio
         void closeLiveEffectStages();
         void clearLiveEffectMonitor();
 
-        juce::AudioDeviceManager deviceManager;
+        ApplicationAudioService& audioService;
+        bool sharedCallbackAttached = false;
         juce::TimeSliceThread backgroundThread { "AudioClip Recorder Writer" };
         std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> threadedWriter;
         std::unique_ptr<juce::AudioBuffer<float>> scratchBuffer;
@@ -129,6 +131,7 @@ namespace mw::audio
         juce::String preferredInputDeviceName;
         double currentSampleRate = 48000.0;
         int channelCount = 1;
+        std::array<int, 2> inputChannelIndices { 0, 1 };
         int bitDepth = 24;
         int liveEffectMonitorChannels = 0;
         int effectProcessChannels = 0;

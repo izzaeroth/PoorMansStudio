@@ -52,6 +52,7 @@ namespace mw::gui
         bool isPreviewPlayheadActive() const { return previewPlayheadActive; }
         bool isPreviewPlayheadPaused() const { return previewPlayheadPaused; }
         double getPreviewPlayheadBeat() const { return previewPlayheadBeat; }
+        double getPreviewPlayheadBeatNow() const noexcept;
 
         void clearNoteSelection();
 

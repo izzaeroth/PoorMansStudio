@@ -1,5 +1,8 @@
 #pragma once
 
+#include "audio/ApplicationAudioService.h"
+#include "midi/MidiRecordingMetronome.h"
+
 #include "clap/ClapLiveDirectPreviewEngine.h"
 #include "vst/VstLiveDirectPreviewEngine.h"
 
@@ -113,7 +116,7 @@ namespace mw::playback
     class MixedLiveProjectPreviewEngine final
     {
     public:
-        MixedLiveProjectPreviewEngine();
+        explicit MixedLiveProjectPreviewEngine(mw::audio::ApplicationAudioService& audioService);
         ~MixedLiveProjectPreviewEngine();
 
         MixedLiveProjectPreviewEngine(const MixedLiveProjectPreviewEngine&) = delete;
@@ -123,17 +126,22 @@ namespace mw::playback
             std::vector<mw::clap::ClapLiveDirectPreviewTrackRequest> clapTracks,
             std::vector<mw::vst::VstLiveDirectPreviewTrackRequest> vstTracks,
             std::vector<mw::clap::ClapLiveDirectPreviewAudioSourceRequest> audioSources,
-            int outputChannelCount = 2);
+            int outputChannelCount = 2,
+            mw::midi::MidiRecordingMetronomeConfig recordingMetronome = {},
+            double recordingMetronomeProjectStartSeconds = 0.0);
 
+        void setMidiRecordingMetronomeActive(bool active) noexcept;
         MixedLiveProjectStopSummary stop();
         MixedLiveProjectStatus status() const;
         bool isActive() const noexcept;
         int activeTrackIndex() const noexcept;
+        bool submitLiveMidiMessage(mw::core::StableId trackId, const juce::MidiMessage& message) noexcept;
+        void requestLiveMidiPanic(mw::core::StableId trackId) noexcept;
 
     private:
         class MixedProjectAudioCallback;
 
-        juce::AudioDeviceManager deviceManager_;
+        mw::audio::ApplicationAudioService& audioService_;
         std::unique_ptr<MixedProjectAudioCallback> callback_;
         int activeTrackIndex_ = -1;
         bool active_ = false;

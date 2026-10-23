@@ -19,7 +19,18 @@
 #include "import_export/MusicXmlImporter.h"
 #include "import_export/MidiImporter.h"
 #include "midi/MidiExporter.h"
+#include "midi/MidiRecordingTransportSync.h"
+#include "midi/Midi14BitControllerLane.h"
+#include "midi/MidiParameterLane.h"
+#include "midi/MidiRecordingQuantizer.h"
+#include "midi/MidiRecordingMetronome.h"
+#include "midi/MidiRecordingMetronomeAudio.h"
+#include "midi/MidiRecordingControlPolicy.h"
+#include "midi/MidiRecordingPunch.h"
+#include "midi/MidiRecordingLoop.h"
+#include "midi/MidiPendingTakeReviewManager.h"
 #include "serialization/ProjectSerializer.h"
+#include "simulation/SimulationRegressionSuite.h"
 #include "clap/ClapPluginScanner.h"
 #include "clap/ClapEffectEditorHost.h"
 #include "clap/ClapInstrumentHost.h"
@@ -36,6 +47,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <initializer_list>
@@ -4551,6 +4563,1438 @@ namespace
     };
 
 
+    class AudioSettingsContent final : public juce::Component
+    {
+    public:
+        AudioSettingsContent(mw::audio::ApplicationAudioService& serviceIn,
+                             std::function<void(const mw::audio::ApplicationAudioConfiguration&)> applyCallback,
+                             std::function<void()> cancelCallback)
+            : service(serviceIn), onApply(std::move(applyCallback)), onCancel(std::move(cancelCallback))
+        {
+            titleLabel.setText("Audio Settings", juce::dontSendNotification);
+            titleLabel.setFont(juce::FontOptions(19.0f, juce::Font::bold));
+            titleLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+
+            instructionLabel.setText(
+                "Choose the shared JUCE driver, devices, device format, and recording input assignment. Applying settings stops active real-time playback or recording safely.",
+                juce::dontSendNotification);
+            instructionLabel.setJustificationType(juce::Justification::topLeft);
+            instructionLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+
+            setupLabel(driverTypeLabel, "Driver / Type:");
+            setupLabel(outputDeviceLabel, "Output Device:");
+            setupLabel(inputDeviceLabel, "Input Device:");
+            setupLabel(sampleRateLabel, "Sample Rate:");
+            setupLabel(bufferSizeLabel, "Buffer Size:");
+            setupLabel(inputModeLabel, "Recording Mode:");
+            setupLabel(inputChannelLabel, "Input Assignment:");
+
+            sampleRateCombo.setEditableText(true);
+            bufferSizeCombo.setEditableText(true);
+
+            inputModeCombo.addItem("Mono", 1);
+            inputModeCombo.addItem("Stereo adjacent pair", 2);
+
+            refreshButton.setButtonText("Refresh Devices");
+            applyButton.setButtonText("Apply / Save");
+            cancelButton.setButtonText("Cancel");
+
+            statusLabel.setJustificationType(juce::Justification::topLeft);
+            statusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+
+            driverTypeCombo.onChange = [this]
+            {
+                if (!suppressChanges)
+                    refreshOptions(driverTypeCombo.getText(), false);
+            };
+            inputModeCombo.onChange = [this]
+            {
+                if (!suppressChanges)
+                    rebuildInputAssignments();
+            };
+            refreshButton.onClick = [this] { refreshOptions(driverTypeCombo.getText(), true); };
+            applyButton.onClick = [this]
+            {
+                if (onApply)
+                    onApply(buildConfiguration());
+            };
+            cancelButton.onClick = [this]
+            {
+                if (onCancel)
+                    onCancel();
+            };
+
+            for (auto* component : std::initializer_list<juce::Component*>{
+                     &titleLabel, &instructionLabel,
+                     &driverTypeLabel, &driverTypeCombo,
+                     &outputDeviceLabel, &outputDeviceCombo,
+                     &inputDeviceLabel, &inputDeviceCombo,
+                     &sampleRateLabel, &sampleRateCombo,
+                     &bufferSizeLabel, &bufferSizeCombo,
+                     &inputModeLabel, &inputModeCombo,
+                     &inputChannelLabel, &inputChannelCombo,
+                     &statusLabel, &refreshButton, &applyButton, &cancelButton })
+            {
+                addAndMakeVisible(*component);
+            }
+
+            refreshOptions({}, true);
+            setSize(820, 510);
+        }
+
+        void refreshFromService()
+        {
+            refreshOptions({}, false);
+        }
+
+        void setResultMessage(const juce::String& message)
+        {
+            resultMessage = message;
+            updateStatusText();
+        }
+
+        void resized() override
+        {
+            auto area = getLocalBounds().reduced(14);
+            titleLabel.setBounds(area.removeFromTop(30));
+            instructionLabel.setBounds(area.removeFromTop(48));
+            area.removeFromTop(6);
+
+            auto placeRow = [&](juce::Label& label, juce::ComboBox& combo)
+            {
+                auto row = area.removeFromTop(36);
+                label.setBounds(row.removeFromLeft(150).reduced(3, 2));
+                combo.setBounds(row.reduced(3, 2));
+                area.removeFromTop(3);
+            };
+
+            placeRow(driverTypeLabel, driverTypeCombo);
+            placeRow(outputDeviceLabel, outputDeviceCombo);
+            placeRow(inputDeviceLabel, inputDeviceCombo);
+            placeRow(sampleRateLabel, sampleRateCombo);
+            placeRow(bufferSizeLabel, bufferSizeCombo);
+            placeRow(inputModeLabel, inputModeCombo);
+            placeRow(inputChannelLabel, inputChannelCombo);
+
+            area.removeFromTop(4);
+            statusLabel.setBounds(area.removeFromTop(74).reduced(3, 2));
+            auto buttons = area.removeFromBottom(38);
+            cancelButton.setBounds(buttons.removeFromRight(105).reduced(4, 2));
+            applyButton.setBounds(buttons.removeFromRight(135).reduced(4, 2));
+            refreshButton.setBounds(buttons.removeFromLeft(145).reduced(4, 2));
+        }
+
+    private:
+        static void setupLabel(juce::Label& label, const juce::String& text)
+        {
+            label.setText(text, juce::dontSendNotification);
+            label.setJustificationType(juce::Justification::centredLeft);
+            label.setColour(juce::Label::textColourId, juce::Colours::white);
+        }
+
+        static void populateNamedCombo(juce::ComboBox& combo,
+                                       const juce::StringArray& names,
+                                       const juce::String& selected,
+                                       bool includeSystemDefault)
+        {
+            combo.clear(juce::dontSendNotification);
+            int nextId = 1;
+            int selectedId = 0;
+            if (includeSystemDefault)
+            {
+                combo.addItem("System Default", nextId);
+                if (selected.isEmpty())
+                    selectedId = nextId;
+                ++nextId;
+            }
+
+            for (const auto& name : names)
+            {
+                combo.addItem(name, nextId);
+                if (name == selected)
+                    selectedId = nextId;
+                ++nextId;
+            }
+
+            if (selectedId == 0 && combo.getNumItems() > 0)
+                selectedId = 1;
+            combo.setSelectedId(selectedId, juce::dontSendNotification);
+        }
+
+        void refreshOptions(const juce::String& requestedType, bool preserveCurrentSelection)
+        {
+            const auto previousOutput = preserveCurrentSelection ? outputDeviceCombo.getText() : juce::String();
+            const auto previousInput = preserveCurrentSelection ? inputDeviceCombo.getText() : juce::String();
+            const auto previousRate = preserveCurrentSelection ? sampleRateCombo.getText() : juce::String();
+            const auto previousBuffer = preserveCurrentSelection ? bufferSizeCombo.getText() : juce::String();
+            const int previousMode = preserveCurrentSelection ? inputModeCombo.getSelectedId() : 0;
+            const int previousChannel = preserveCurrentSelection ? inputChannelCombo.getSelectedId() - 1 : -1;
+
+            options = service.getDeviceOptions(requestedType);
+            suppressChanges = true;
+
+            populateNamedCombo(driverTypeCombo,
+                               options.deviceTypeNames,
+                               requestedType.isNotEmpty() ? requestedType : options.currentConfiguration.deviceTypeName,
+                               false);
+
+            auto cleanDefaultText = [](const juce::String& text)
+            {
+                return text == "System Default" ? juce::String() : text;
+            };
+
+            const auto outputSelection = previousOutput.isNotEmpty()
+                ? cleanDefaultText(previousOutput)
+                : options.currentConfiguration.outputDeviceName;
+            const auto inputSelection = previousInput.isNotEmpty()
+                ? cleanDefaultText(previousInput)
+                : options.currentConfiguration.inputDeviceName;
+            populateNamedCombo(outputDeviceCombo, options.outputDeviceNames, outputSelection, true);
+            populateNamedCombo(inputDeviceCombo, options.inputDeviceNames, inputSelection, true);
+
+            sampleRateCombo.clear(juce::dontSendNotification);
+            int rateId = 1;
+            for (const auto rate : options.availableSampleRates)
+                sampleRateCombo.addItem(juce::String(rate, 0) + " Hz", rateId++);
+            const auto rateText = previousRate.isNotEmpty()
+                ? previousRate
+                : juce::String(options.currentConfiguration.sampleRate > 0.0 ? options.currentConfiguration.sampleRate : 48000.0, 0) + " Hz";
+            sampleRateCombo.setText(rateText, juce::dontSendNotification);
+
+            bufferSizeCombo.clear(juce::dontSendNotification);
+            int bufferId = 1;
+            for (const auto size : options.availableBufferSizes)
+                bufferSizeCombo.addItem(juce::String(size) + " samples", bufferId++);
+            const auto bufferText = previousBuffer.isNotEmpty()
+                ? previousBuffer
+                : juce::String(options.currentConfiguration.bufferSize > 0 ? options.currentConfiguration.bufferSize : 512) + " samples";
+            bufferSizeCombo.setText(bufferText, juce::dontSendNotification);
+
+            const int modeId = previousMode > 0
+                ? previousMode
+                : (options.currentConfiguration.inputMode == mw::audio::ApplicationAudioInputMode::StereoAdjacent ? 2 : 1);
+            inputModeCombo.setSelectedId(modeId, juce::dontSendNotification);
+            requestedInputChannelIndex = previousChannel >= 0
+                ? previousChannel
+                : options.currentConfiguration.inputChannelIndex;
+            rebuildInputAssignments();
+
+            suppressChanges = false;
+            updateStatusText();
+        }
+
+        void rebuildInputAssignments()
+        {
+            const bool stereo = inputModeCombo.getSelectedId() == 2;
+            const int available = options.inputChannelNames.isEmpty()
+                ? (stereo ? 16 : 16)
+                : options.inputChannelNames.size();
+            const int count = stereo ? juce::jmax(0, available - 1) : available;
+
+            inputChannelCombo.clear(juce::dontSendNotification);
+            for (int index = 0; index < count; ++index)
+            {
+                juce::String label;
+                if (stereo)
+                {
+                    label << "Input " << (index + 1) << "-" << (index + 2);
+                    if (index + 1 < options.inputChannelNames.size())
+                        label << " - " << options.inputChannelNames[index] << " / " << options.inputChannelNames[index + 1];
+                }
+                else
+                {
+                    label << "Input " << (index + 1);
+                    if (index < options.inputChannelNames.size())
+                        label << " - " << options.inputChannelNames[index];
+                }
+                inputChannelCombo.addItem(label, index + 1);
+            }
+
+            if (count <= 0)
+            {
+                inputChannelCombo.addItem(stereo ? "No adjacent stereo pair available" : "No input channel available", 1);
+                inputChannelCombo.setSelectedId(1, juce::dontSendNotification);
+                inputChannelCombo.setEnabled(false);
+            }
+            else
+            {
+                inputChannelCombo.setEnabled(true);
+                inputChannelCombo.setSelectedId(juce::jlimit(1, count, requestedInputChannelIndex + 1), juce::dontSendNotification);
+            }
+        }
+
+        mw::audio::ApplicationAudioConfiguration buildConfiguration() const
+        {
+            mw::audio::ApplicationAudioConfiguration config;
+            config.deviceTypeName = driverTypeCombo.getText().trim();
+            config.outputDeviceName = outputDeviceCombo.getText() == "System Default" ? juce::String() : outputDeviceCombo.getText().trim();
+            config.inputDeviceName = inputDeviceCombo.getText() == "System Default" ? juce::String() : inputDeviceCombo.getText().trim();
+            config.sampleRate = sampleRateCombo.getText().retainCharacters("0123456789.").getDoubleValue();
+            config.bufferSize = bufferSizeCombo.getText().retainCharacters("0123456789").getIntValue();
+            config.inputMode = inputModeCombo.getSelectedId() == 2
+                ? mw::audio::ApplicationAudioInputMode::StereoAdjacent
+                : mw::audio::ApplicationAudioInputMode::Mono;
+            config.inputChannelIndex = juce::jmax(0, inputChannelCombo.getSelectedId() - 1);
+            return config;
+        }
+
+        void updateStatusText()
+        {
+            juce::String status;
+            if (resultMessage.isNotEmpty())
+                status << resultMessage << "\n";
+            status << "Current: " << options.deviceSummary
+                   << "\nLatency: " << options.inputLatencySamples << " input / "
+                   << options.outputLatencySamples << " output samples"
+                   << " | Dropouts/XRuns: " << options.dropoutCount;
+            statusLabel.setText(status, juce::dontSendNotification);
+        }
+
+        mw::audio::ApplicationAudioService& service;
+        mw::audio::ApplicationAudioDeviceOptions options;
+        juce::Label titleLabel;
+        juce::Label instructionLabel;
+        juce::Label driverTypeLabel;
+        juce::Label outputDeviceLabel;
+        juce::Label inputDeviceLabel;
+        juce::Label sampleRateLabel;
+        juce::Label bufferSizeLabel;
+        juce::Label inputModeLabel;
+        juce::Label inputChannelLabel;
+        juce::ComboBox driverTypeCombo;
+        juce::ComboBox outputDeviceCombo;
+        juce::ComboBox inputDeviceCombo;
+        juce::ComboBox sampleRateCombo;
+        juce::ComboBox bufferSizeCombo;
+        juce::ComboBox inputModeCombo;
+        juce::ComboBox inputChannelCombo;
+        juce::Label statusLabel;
+        juce::TextButton refreshButton;
+        juce::TextButton applyButton;
+        juce::TextButton cancelButton;
+        std::function<void(const mw::audio::ApplicationAudioConfiguration&)> onApply;
+        std::function<void()> onCancel;
+        juce::String resultMessage;
+        int requestedInputChannelIndex = 0;
+        bool suppressChanges = false;
+    };
+
+
+    class MidiInputSettingsContent final : public juce::Component
+    {
+    public:
+        MidiInputSettingsContent(mw::midi::MidiInputCoordinator& coordinatorIn,
+                                 mw::midi::MidiInputSelection initialSelectionIn,
+                                 int initialCountInBarsIn,
+                                 int initialQuantizeDivisionIn,
+                                 bool initialMetronomeEnabledIn,
+                                 bool initialRecordControllersIn,
+                                 bool initialRecordPitchBendIn,
+                                 bool initialRecordProgramChangeIn,
+                                 bool initialRecordChannelPressureIn,
+                                 bool initialRecordPolyPressureIn,
+                                 bool initialRecordAdvancedParametersIn,
+                                 bool initialPunchEnabledIn,
+                                 bool initialLoopEnabledIn,
+                                 bool initialTakeReviewEnabledIn,
+                                 std::function<void(const mw::midi::MidiInputSelection&)> applyCallback,
+                                 std::function<void(int)> countInChangedCallback,
+                                 std::function<void(int)> quantizeChangedCallback,
+                                 std::function<void(bool)> metronomeChangedCallback,
+                                 std::function<void(bool)> recordControllersChangedCallback,
+                                 std::function<void(bool)> recordPitchBendChangedCallback,
+                                 std::function<void(bool)> recordProgramChangeChangedCallback,
+                                 std::function<void(bool)> recordChannelPressureChangedCallback,
+                                 std::function<void(bool)> recordPolyPressureChangedCallback,
+                                 std::function<void(bool)> recordAdvancedParametersChangedCallback,
+                                 std::function<void(bool)> punchChangedCallback,
+                                 std::function<void(bool)> loopChangedCallback,
+                                 std::function<void(bool)> takeReviewChangedCallback,
+                                 std::function<void(int)> takeReviewPassChangedCallback,
+                                 std::function<void()> auditionTakeCallback,
+                                 std::function<void()> keepSelectedTakeCallback,
+                                 std::function<void()> keepAllTakesCallback,
+                                 std::function<void()> discardTakesCallback,
+                                 std::function<void()> archiveTakesCallback,
+                                 std::function<void()> snapshotTakesCallback,
+                                 std::function<void(bool)> compModeChangedCallback,
+                                 std::function<void(int)> compGridChangedCallback,
+                                 std::function<void(int)> compSegmentChangedCallback,
+                                 std::function<void(int)> compPassChangedCallback,
+                                 std::function<void(int)> compBoundaryNoteModeChangedCallback,
+                                 std::function<void(int)> crossPassNoteModeChangedCallback,
+                                 std::function<void(int)> sustainPedalModeChangedCallback,
+                                 std::function<void()> addCompBoundaryCallback,
+                                 std::function<void(std::int64_t)> removeCompBoundaryCallback,
+                                 std::function<void()> auditionCompCallback,
+                                 std::function<void()> keepCompCallback,
+                                 std::function<void()> setPunchInCallback,
+                                 std::function<void()> setPunchOutCallback,
+                                 std::function<void()> clearPunchCallback,
+                                 std::function<void(const mw::midi::MidiInputSelection&)> startCallback,
+                                 std::function<void()> panicCallback,
+                                 std::function<void()> stopCallback,
+                                 std::function<void()> armCallback,
+                                 std::function<void()> recordCallback,
+                                 std::function<void()> stopRecordingCallback,
+                                 std::function<void()> undoTakeCallback,
+                                 std::function<void()> redoTakeCallback,
+                                 std::function<void()> closeCallback)
+            : coordinator(coordinatorIn), initialSelection(std::move(initialSelectionIn)),
+              onApply(std::move(applyCallback)), onCountInChanged(std::move(countInChangedCallback)),
+              onQuantizeChanged(std::move(quantizeChangedCallback)),
+              onMetronomeChanged(std::move(metronomeChangedCallback)),
+              onRecordControllersChanged(std::move(recordControllersChangedCallback)),
+              onRecordPitchBendChanged(std::move(recordPitchBendChangedCallback)),
+              onRecordProgramChangeChanged(std::move(recordProgramChangeChangedCallback)),
+              onRecordChannelPressureChanged(std::move(recordChannelPressureChangedCallback)),
+              onRecordPolyPressureChanged(std::move(recordPolyPressureChangedCallback)),
+              onRecordAdvancedParametersChanged(std::move(recordAdvancedParametersChangedCallback)),
+              onPunchChanged(std::move(punchChangedCallback)), onLoopChanged(std::move(loopChangedCallback)),
+              onTakeReviewChanged(std::move(takeReviewChangedCallback)),
+              onTakeReviewPassChanged(std::move(takeReviewPassChangedCallback)),
+              onAuditionTake(std::move(auditionTakeCallback)),
+              onKeepSelectedTake(std::move(keepSelectedTakeCallback)),
+              onKeepAllTakes(std::move(keepAllTakesCallback)),
+              onDiscardTakes(std::move(discardTakesCallback)),
+              onArchiveTakes(std::move(archiveTakesCallback)),
+              onSnapshotTakes(std::move(snapshotTakesCallback)),
+              onCompModeChanged(std::move(compModeChangedCallback)),
+              onCompGridChanged(std::move(compGridChangedCallback)),
+              onCompSegmentChanged(std::move(compSegmentChangedCallback)),
+              onCompPassChanged(std::move(compPassChangedCallback)),
+              onCompBoundaryNoteModeChanged(std::move(compBoundaryNoteModeChangedCallback)),
+              onCrossPassNoteModeChanged(std::move(crossPassNoteModeChangedCallback)),
+              onSustainPedalModeChanged(std::move(sustainPedalModeChangedCallback)),
+              onAddCompBoundary(std::move(addCompBoundaryCallback)),
+              onRemoveCompBoundary(std::move(removeCompBoundaryCallback)),
+              onAuditionComp(std::move(auditionCompCallback)),
+              onKeepComp(std::move(keepCompCallback)),
+              onSetPunchIn(std::move(setPunchInCallback)), onSetPunchOut(std::move(setPunchOutCallback)),
+              onClearPunch(std::move(clearPunchCallback)), onStart(std::move(startCallback)),
+              onPanic(std::move(panicCallback)), onStop(std::move(stopCallback)),
+              onArm(std::move(armCallback)), onRecord(std::move(recordCallback)),
+              onStopRecording(std::move(stopRecordingCallback)),
+              onUndoTake(std::move(undoTakeCallback)), onRedoTake(std::move(redoTakeCallback)),
+              onClose(std::move(closeCallback))
+        {
+            titleLabel.setText("MIDI Input / Live Monitor / Record", juce::dontSendNotification);
+            titleLabel.setFont(juce::FontOptions(19.0f, juce::Font::bold));
+            titleLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+
+            instructionLabel.setText(
+                "Choose one physical MIDI input. Monitor routes Note On/Off, Control Change, Pitch Bend, Program Change, Channel Pressure, and Poly Pressure to the existing VST3/CLAP instrument path. Arm Selected fixes the recording target; Record MIDI can capture notes plus opt-in CC, Pitch Bend, Program Change, Channel Pressure, and Poly Pressure at exact project ticks.",
+                juce::dontSendNotification);
+            instructionLabel.setJustificationType(juce::Justification::topLeft);
+            instructionLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+
+            setupLabel(deviceLabel, "MIDI Device:");
+            setupLabel(channelLabel, "MIDI Channel:");
+            setupLabel(countInLabel, "Count-In:");
+            setupLabel(quantizeLabel, "Quantize:");
+            setupLabel(metronomeLabel, "Metronome:");
+            setupLabel(recordControllersLabel, "Record Controllers:");
+            setupLabel(recordPitchBendLabel, "Record Pitch Bend:");
+            setupLabel(recordProgramChangeLabel, "Record Program Change:");
+            setupLabel(recordChannelPressureLabel, "Record Channel Pressure:");
+            setupLabel(recordPolyPressureLabel, "Record Poly Pressure:");
+            setupLabel(recordAdvancedParametersLabel, "Record Advanced Params:");
+            setupLabel(punchLabel, "Punch:");
+            setupLabel(loopLabel, "Loop Record:");
+            setupLabel(takeResultLabel, "Loop Takes:");
+            setupLabel(reviewModeLabel, "Review Mode:");
+            setupLabel(compGridLabel, "Comp Grid:");
+            setupLabel(compBoundaryNoteModeLabel, "Boundary Notes:");
+            setupLabel(crossPassNoteModeLabel, "Cross-Pass Notes:");
+            setupLabel(sustainPedalModeLabel, "Sustain Pedal:");
+            setupLabel(compBoundaryLabel, "Custom Split:");
+            punchRegionLabel.setJustificationType(juce::Justification::centredLeft);
+            punchRegionLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+
+            channelCombo.addItem("Omni", 1);
+            for (int channel = 1; channel <= 16; ++channel)
+                channelCombo.addItem("Channel " + juce::String(channel), channel + 1);
+            channelCombo.setSelectedId(juce::jlimit(1, 17, initialSelection.channel + 1), juce::dontSendNotification);
+
+            countInCombo.addItem("Off", 1);
+            countInCombo.addItem("1 Bar", 2);
+            countInCombo.addItem("2 Bars", 3);
+            countInCombo.setSelectedId(juce::jlimit(1, 3, initialCountInBarsIn + 1), juce::dontSendNotification);
+            countInCombo.onChange = [this]
+            {
+                if (onCountInChanged)
+                    onCountInChanged(getCountInBars());
+            };
+
+            quantizeCombo.addItem("Off", 1);
+            quantizeCombo.addItem("1/4", 2);
+            quantizeCombo.addItem("1/8", 3);
+            quantizeCombo.addItem("1/16", 4);
+            quantizeCombo.addItem("1/32", 5);
+            quantizeCombo.addItem("1/64", 6);
+            switch (mw::midi::sanitizeMidiRecordingQuantizeDivision(initialQuantizeDivisionIn))
+            {
+                case 4: quantizeCombo.setSelectedId(2, juce::dontSendNotification); break;
+                case 8: quantizeCombo.setSelectedId(3, juce::dontSendNotification); break;
+                case 16: quantizeCombo.setSelectedId(4, juce::dontSendNotification); break;
+                case 32: quantizeCombo.setSelectedId(5, juce::dontSendNotification); break;
+                case 64: quantizeCombo.setSelectedId(6, juce::dontSendNotification); break;
+                default: quantizeCombo.setSelectedId(1, juce::dontSendNotification); break;
+            }
+            quantizeCombo.onChange = [this]
+            {
+                if (onQuantizeChanged)
+                    onQuantizeChanged(getQuantizeDivision());
+            };
+
+            metronomeCombo.addItem("Off", 1);
+            metronomeCombo.addItem("On", 2);
+            metronomeCombo.setSelectedId(initialMetronomeEnabledIn ? 2 : 1, juce::dontSendNotification);
+            metronomeCombo.onChange = [this]
+            {
+                if (onMetronomeChanged)
+                    onMetronomeChanged(metronomeCombo.getSelectedId() == 2);
+            };
+
+            recordControllersCombo.addItem("Off", 1);
+            recordControllersCombo.addItem("All CC 0-127", 2);
+            recordControllersCombo.setSelectedId(initialRecordControllersIn ? 2 : 1, juce::dontSendNotification);
+            recordControllersCombo.setTooltip(mw::midi::midiRecordingRecordControllersTooltip);
+            recordControllersCombo.onChange = [this]
+            {
+                if (onRecordControllersChanged)
+                    onRecordControllersChanged(recordControllersCombo.getSelectedId() == 2);
+            };
+
+            recordPitchBendCombo.addItem("Off", 1);
+            recordPitchBendCombo.addItem("On", 2);
+            recordPitchBendCombo.setSelectedId(initialRecordPitchBendIn ? 2 : 1, juce::dontSendNotification);
+            recordPitchBendCombo.setTooltip("Record Pitch Bend captures incoming channel Pitch Bend (-8192..+8191) at exact project ticks. Off still allows live monitoring. Note Quantize and lane Snap do not change recorded bend timing.");
+            recordPitchBendCombo.onChange = [this]
+            {
+                if (onRecordPitchBendChanged)
+                    onRecordPitchBendChanged(recordPitchBendCombo.getSelectedId() == 2);
+            };
+
+            recordProgramChangeCombo.addItem("Off", 1);
+            recordProgramChangeCombo.addItem("On", 2);
+            recordProgramChangeCombo.setSelectedId(initialRecordProgramChangeIn ? 2 : 1, juce::dontSendNotification);
+            recordProgramChangeCombo.setTooltip("Record Program Change captures incoming channel Program Change 0-127 at exact project ticks. Off still allows live monitoring. Note Quantize and lane Snap do not change recorded Program timing.");
+            recordProgramChangeCombo.onChange = [this]
+            {
+                if (onRecordProgramChangeChanged)
+                    onRecordProgramChangeChanged(recordProgramChangeCombo.getSelectedId() == 2);
+            };
+
+            recordChannelPressureCombo.addItem("Off", 1);
+            recordChannelPressureCombo.addItem("On", 2);
+            recordChannelPressureCombo.setSelectedId(initialRecordChannelPressureIn ? 2 : 1, juce::dontSendNotification);
+            recordChannelPressureCombo.setTooltip("Record Channel Pressure captures incoming channel aftertouch 0-127 at exact project ticks. Off still allows live monitoring. Note Quantize and lane Snap do not change recorded pressure timing.");
+            recordChannelPressureCombo.onChange = [this]
+            {
+                if (onRecordChannelPressureChanged)
+                    onRecordChannelPressureChanged(recordChannelPressureCombo.getSelectedId() == 2);
+            };
+
+            recordPolyPressureCombo.addItem("Off", 1);
+            recordPolyPressureCombo.addItem("On", 2);
+            recordPolyPressureCombo.setSelectedId(initialRecordPolyPressureIn ? 2 : 1, juce::dontSendNotification);
+            recordPolyPressureCombo.setTooltip("Record Poly Pressure captures incoming per-key polyphonic aftertouch 0-127 at exact project ticks. Off still allows live monitoring. Note Quantize and lane Snap do not change recorded pressure timing.");
+            recordPolyPressureCombo.onChange = [this]
+            {
+                if (onRecordPolyPressureChanged)
+                    onRecordPolyPressureChanged(recordPolyPressureCombo.getSelectedId() == 2);
+            };
+
+            recordAdvancedParametersCombo.addItem("Off", 1);
+            recordAdvancedParametersCombo.addItem("On", 2);
+            recordAdvancedParametersCombo.setSelectedId(initialRecordAdvancedParametersIn ? 2 : 1, juce::dontSendNotification);
+            recordAdvancedParametersCombo.setTooltip("Record Advanced Parameters decodes complete 14-bit CC, RPN, and NRPN controller transactions at exact project ticks. Incomplete or malformed transactions remain ordinary CC when Controller recording is enabled.");
+            recordAdvancedParametersCombo.onChange = [this]
+            {
+                if (onRecordAdvancedParametersChanged)
+                    onRecordAdvancedParametersChanged(recordAdvancedParametersCombo.getSelectedId() == 2);
+            };
+
+            punchCombo.addItem("Off", 1);
+            punchCombo.addItem("On", 2);
+            punchCombo.setSelectedId(initialPunchEnabledIn ? 2 : 1, juce::dontSendNotification);
+            punchCombo.onChange = [this]
+            {
+                punchEnabled = punchCombo.getSelectedId() == 2;
+                if (onPunchChanged)
+                    onPunchChanged(punchEnabled);
+                applyRecordingControlPolicy();
+            };
+            setPunchInButton.setButtonText("Set In");
+            setPunchOutButton.setButtonText("Set Out");
+            clearPunchButton.setButtonText("Clear");
+            setPunchInButton.onClick = [this] { if (onSetPunchIn) onSetPunchIn(); };
+            setPunchOutButton.onClick = [this] { if (onSetPunchOut) onSetPunchOut(); };
+            clearPunchButton.onClick = [this] { if (onClearPunch) onClearPunch(); };
+            punchEnabled = initialPunchEnabledIn;
+
+            loopCombo.addItem("Off", 1);
+            loopCombo.addItem("On", 2);
+            loopCombo.setSelectedId(initialLoopEnabledIn ? 2 : 1, juce::dontSendNotification);
+            loopCombo.onChange = [this]
+            {
+                loopEnabled = loopCombo.getSelectedId() == 2;
+                if (onLoopChanged)
+                    onLoopChanged(loopEnabled);
+                applyRecordingControlPolicy();
+            };
+            loopEnabled = initialLoopEnabledIn;
+
+            takeResultCombo.addItem("Merge", 1);
+            takeResultCombo.addItem("Review", 2);
+            takeResultCombo.setSelectedId(initialTakeReviewEnabledIn ? 2 : 1, juce::dontSendNotification);
+            takeResultCombo.onChange = [this]
+            {
+                takeReviewEnabled = takeResultCombo.getSelectedId() == 2;
+                if (onTakeReviewChanged)
+                    onTakeReviewChanged(takeReviewEnabled);
+                applyRecordingControlPolicy();
+            };
+            takeReviewEnabled = initialTakeReviewEnabledIn;
+
+            reviewPassCombo.onChange = [this]
+            {
+                if (onTakeReviewPassChanged && reviewPassCombo.getSelectedId() > 0)
+                    onTakeReviewPassChanged(reviewPassCombo.getSelectedId());
+            };
+            auditionTakeButton.setButtonText("Audition Pass");
+            keepSelectedTakeButton.setButtonText("Keep Selected");
+            keepAllTakesButton.setButtonText("Keep All");
+            archiveTakesButton.setButtonText("Archive");
+            snapshotTakesButton.setButtonText("Snapshot");
+            discardTakesButton.setButtonText("Discard");
+            auditionTakeButton.onClick = [this] { if (onAuditionTake) onAuditionTake(); };
+            keepSelectedTakeButton.onClick = [this] { if (onKeepSelectedTake) onKeepSelectedTake(); };
+            keepAllTakesButton.onClick = [this] { if (onKeepAllTakes) onKeepAllTakes(); };
+            archiveTakesButton.onClick = [this] { if (onArchiveTakes) onArchiveTakes(); };
+            snapshotTakesButton.onClick = [this] { if (onSnapshotTakes) onSnapshotTakes(); };
+            discardTakesButton.onClick = [this] { if (onDiscardTakes) onDiscardTakes(); };
+
+            reviewModeCombo.addItem("Whole Pass", 1);
+            reviewModeCombo.addItem("Comp", 2);
+            reviewModeCombo.setSelectedId(1, juce::dontSendNotification);
+            reviewModeCombo.onChange = [this]
+            {
+                compModeEnabled = reviewModeCombo.getSelectedId() == 2;
+                if (onCompModeChanged)
+                    onCompModeChanged(compModeEnabled);
+                applyRecordingControlPolicy();
+            };
+            compGridCombo.addItem("Beat", 1);
+            compGridCombo.addItem("Bar", 2);
+            compGridCombo.addItem("Custom", 3);
+            compGridCombo.setSelectedId(1, juce::dontSendNotification);
+            compGridCombo.onChange = [this]
+            {
+                if (onCompGridChanged)
+                    onCompGridChanged(compGridCombo.getSelectedId());
+            };
+            compSegmentCombo.onChange = [this]
+            {
+                if (onCompSegmentChanged && compSegmentCombo.getSelectedId() > 0)
+                    onCompSegmentChanged(compSegmentCombo.getSelectedId() - 1);
+            };
+            compPassCombo.onChange = [this]
+            {
+                if (onCompPassChanged && compPassCombo.getSelectedId() > 0)
+                    onCompPassChanged(compPassCombo.getSelectedId());
+            };
+            compBoundaryNoteModeCombo.addItem("Cut", 1);
+            compBoundaryNoteModeCombo.addItem("Preserve Same Pass", 2);
+            compBoundaryNoteModeCombo.setSelectedId(1, juce::dontSendNotification);
+            compBoundaryNoteModeCombo.setTooltip(mw::midi::midiRecordingCompCutTooltip);
+            compBoundaryNoteModeCombo.onChange = [this]
+            {
+                compBoundaryNoteModeCombo.setTooltip(
+                    compBoundaryNoteModeCombo.getSelectedId() == 2
+                        ? mw::midi::midiRecordingCompPreserveSamePassTooltip
+                        : mw::midi::midiRecordingCompCutTooltip);
+                if (onCompBoundaryNoteModeChanged)
+                    onCompBoundaryNoteModeChanged(compBoundaryNoteModeCombo.getSelectedId());
+            };
+            crossPassNoteModeCombo.addItem("Off", 1);
+            crossPassNoteModeCombo.addItem("Bridge Exact", 2);
+            crossPassNoteModeCombo.setSelectedId(1, juce::dontSendNotification);
+            crossPassNoteModeCombo.setTooltip(mw::midi::midiRecordingCompCrossPassOffTooltip);
+            crossPassNoteModeCombo.onChange = [this]
+            {
+                crossPassNoteModeCombo.setTooltip(
+                    crossPassNoteModeCombo.getSelectedId() == 2
+                        ? mw::midi::midiRecordingCompCrossPassBridgeExactTooltip
+                        : mw::midi::midiRecordingCompCrossPassOffTooltip);
+                if (onCrossPassNoteModeChanged)
+                    onCrossPassNoteModeChanged(crossPassNoteModeCombo.getSelectedId());
+            };
+            sustainPedalModeCombo.addItem("Ignore", 1);
+            sustainPedalModeCombo.addItem("Apply CC64", 2);
+            sustainPedalModeCombo.setSelectedId(1, juce::dontSendNotification);
+            sustainPedalModeCombo.setTooltip(mw::midi::midiRecordingSustainIgnoreTooltip);
+            sustainPedalModeCombo.onChange = [this]
+            {
+                sustainPedalModeCombo.setTooltip(
+                    sustainPedalModeCombo.getSelectedId() == 2
+                        ? mw::midi::midiRecordingSustainApplyCc64Tooltip
+                        : mw::midi::midiRecordingSustainIgnoreTooltip);
+                if (onSustainPedalModeChanged)
+                    onSustainPedalModeChanged(sustainPedalModeCombo.getSelectedId());
+            };
+            addCompBoundaryButton.setButtonText("Add Boundary");
+            removeCompBoundaryButton.setButtonText("Remove Boundary");
+            addCompBoundaryButton.onClick = [this] { if (onAddCompBoundary) onAddCompBoundary(); };
+            removeCompBoundaryButton.onClick = [this]
+            {
+                const auto id = compBoundaryCombo.getSelectedId();
+                if (onRemoveCompBoundary && id > 0 && id <= static_cast<int>(compBoundaryTicks.size()))
+                    onRemoveCompBoundary(compBoundaryTicks[static_cast<std::size_t>(id - 1)]);
+            };
+            auditionCompButton.setButtonText("Audition Comp");
+            keepCompButton.setButtonText("Keep Comp");
+            auditionCompButton.onClick = [this] { if (onAuditionComp) onAuditionComp(); };
+            keepCompButton.onClick = [this] { if (onKeepComp) onKeepComp(); };
+
+            // TAKE REVIEW helper bubbles are intentionally explicit because these controls mix
+            // non-destructive audition, persisted project-state edits, and commit actions.
+            takeResultCombo.setTooltip("Loop Takes controls what happens when Loop Record stops. Merge commits all passes immediately. Review retains passes for TAKE REVIEW so you can audition, comp, keep, or discard before notes are committed.");
+            reviewModeCombo.setTooltip("Whole Pass reviews one retained pass at a time. Comp builds a result from segments assigned to different retained passes. Changing this while review is pending updates persisted project state.");
+            reviewPassCombo.setTooltip("Select the retained loop pass used for Whole Pass audition/Keep Selected and as the default assignment when rebuilding a comp grid.");
+            auditionTakeButton.setTooltip("Audition the selected whole pass through a temporary project snapshot. Sustain Pedal = Apply CC64 affects the audition result but does not modify project notes or Undo history.");
+            keepSelectedTakeButton.setTooltip("Commit only the selected retained pass to the MIDI track and clear TAKE REVIEW. Sustain Pedal = Apply CC64 is baked into effective note durations. The keep is one Undo Take / Redo Take operation.");
+            keepAllTakesButton.setTooltip("Commit every retained Review pass as one Undo Take / Redo Take operation. If Sustain Pedal = Apply CC64, each pass uses its own channel-specific CC64 history before commit; Loop Takes = Merge recording behavior itself remains unchanged.");
+            archiveTakesButton.setTooltip(mw::midi::midiTakeReviewArchiveTooltip);
+            snapshotTakesButton.setTooltip(mw::midi::midiTakeReviewSnapshotTooltip);
+            discardTakesButton.setTooltip("Discard the unresolved TAKE REVIEW state without adding MIDI notes. Persisted retained passes and comp choices are removed from the project; archived reviews remain untouched.");
+            compGridCombo.setTooltip("Choose how Comp segments are created. Beat and Bar follow the absolute project grid. Custom starts with one In-to-Out segment and uses Add/Remove Boundary for internal splits.");
+            compSegmentCombo.setTooltip("Select a Comp segment. The Segment Pass control assigns which retained pass supplies notes whose real Note On begins inside this segment.");
+            compPassCombo.setTooltip("Assign the selected Comp segment to one retained pass. This is persisted project state and marks the project dirty.");
+            compBoundaryNoteModeLabel.setTooltip(mw::midi::midiRecordingCompBoundaryNotesTooltip);
+            crossPassNoteModeLabel.setTooltip(mw::midi::midiRecordingCompCrossPassNotesTooltip);
+            sustainPedalModeLabel.setTooltip(mw::midi::midiRecordingSustainPedalTooltip);
+            compBoundaryCombo.setTooltip("Custom grid only: select an internal split that can be removed. Loop In and Out are locked and never appear as removable boundaries.");
+            addCompBoundaryButton.setTooltip("Custom grid only: add a split at the current Piano Roll Preview Player position. Both new sides inherit the prior segment pass assignment.");
+            removeCompBoundaryButton.setTooltip("Custom grid only: remove the selected internal split. The merged segment keeps the pass assigned on its left side.");
+            auditionCompButton.setTooltip("Render and play the current comp through a temporary project snapshot. Boundary Notes, Cross-Pass Notes, and Sustain Pedal rules are applied; audition does not modify live project notes or Undo history.");
+            keepCompButton.setTooltip("Commit the generated comp notes after Boundary Notes, Cross-Pass Notes, and Sustain Pedal rules are applied, clear TAKE REVIEW, and create one Undo Take / Redo Take operation.");
+
+            punchRegionLabel.setText("Punch / Loop Region: not set.", juce::dontSendNotification);
+
+            refreshButton.setButtonText("Refresh Devices");
+            applyButton.setButtonText("Apply / Save");
+            startButton.setButtonText("Start Monitor");
+            panicButton.setButtonText("Panic");
+            stopButton.setButtonText("Stop Monitor");
+            armButton.setButtonText("Arm Selected");
+            recordButton.setButtonText("Record MIDI");
+            recordButton.setTooltip("With Loop Record On and a valid In/Out region, this can also run an empty-pass backing-wrap diagnostic when no MIDI input is open; stopping that diagnostic does not change project notes or Undo history.");
+            stopRecordingButton.setButtonText("Stop Recording");
+            undoTakeButton.setButtonText("Undo Take");
+            redoTakeButton.setButtonText("Redo Take");
+            closeButton.setButtonText("Close");
+
+            statusLabel.setJustificationType(juce::Justification::topLeft);
+            statusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+            recordingLabel.setJustificationType(juce::Justification::topLeft);
+            recordingLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+            recordingLabel.setText("Recording target: not armed.", juce::dontSendNotification);
+
+            refreshButton.onClick = [this] { refreshDevices(true); };
+            applyButton.onClick = [this]
+            {
+                if (onApply)
+                    onApply(buildSelection());
+            };
+            startButton.onClick = [this]
+            {
+                if (onStart)
+                    onStart(buildSelection());
+            };
+            panicButton.onClick = [this]
+            {
+                if (onPanic)
+                    onPanic();
+            };
+            stopButton.onClick = [this]
+            {
+                if (onStop)
+                    onStop();
+            };
+            armButton.onClick = [this]
+            {
+                if (onArm)
+                    onArm();
+            };
+            recordButton.onClick = [this]
+            {
+                if (onRecord)
+                    onRecord();
+            };
+            stopRecordingButton.onClick = [this]
+            {
+                if (onStopRecording)
+                    onStopRecording();
+            };
+            undoTakeButton.onClick = [this]
+            {
+                if (onUndoTake)
+                    onUndoTake();
+            };
+            redoTakeButton.onClick = [this]
+            {
+                if (onRedoTake)
+                    onRedoTake();
+            };
+            closeButton.onClick = [this]
+            {
+                if (onClose)
+                    onClose();
+            };
+
+            for (auto* component : std::initializer_list<juce::Component*>{
+                     &titleLabel, &instructionLabel,
+                     &deviceLabel, &deviceCombo,
+                     &channelLabel, &channelCombo,
+                     &countInLabel, &countInCombo,
+                     &quantizeLabel, &quantizeCombo,
+                     &metronomeLabel, &metronomeCombo,
+                     &recordControllersLabel, &recordControllersCombo,
+                     &recordPitchBendLabel, &recordPitchBendCombo,
+                     &recordProgramChangeLabel, &recordProgramChangeCombo,
+                     &recordChannelPressureLabel, &recordChannelPressureCombo,
+                     &recordPolyPressureLabel, &recordPolyPressureCombo,
+                     &recordAdvancedParametersLabel, &recordAdvancedParametersCombo,
+                     &punchLabel, &punchCombo,
+                     &loopLabel, &loopCombo,
+                     &takeResultLabel, &takeResultCombo,
+                     &reviewModeLabel, &reviewModeCombo,
+                     &compGridLabel, &compGridCombo,
+                     &compBoundaryNoteModeLabel, &compBoundaryNoteModeCombo,
+                     &crossPassNoteModeLabel, &crossPassNoteModeCombo,
+                     &sustainPedalModeLabel, &sustainPedalModeCombo,
+                     &compBoundaryLabel, &compBoundaryCombo,
+                     &punchRegionLabel,
+                     &setPunchInButton, &setPunchOutButton, &clearPunchButton,
+                     &reviewPassCombo, &auditionTakeButton, &keepSelectedTakeButton,
+                     &keepAllTakesButton, &archiveTakesButton, &snapshotTakesButton, &discardTakesButton,
+                     &compSegmentCombo, &compPassCombo, &addCompBoundaryButton, &removeCompBoundaryButton,
+                     &auditionCompButton, &keepCompButton,
+                     &statusLabel, &recordingLabel,
+                     &refreshButton, &applyButton,
+                     &startButton, &panicButton, &stopButton,
+                     &armButton, &recordButton, &stopRecordingButton,
+                     &undoTakeButton, &redoTakeButton, &closeButton })
+            {
+                addAndMakeVisible(*component);
+            }
+
+            helperTooltipWindow = std::make_unique<mw::gui::FreshHoverTooltipWindow>(this, 2000);
+            helperTooltipWindow->setLookAndFeel(&helperTooltipLookAndFeel);
+
+            refreshDevices(false);
+            updateStatus(coordinator.statusSummary());
+            setRecordingState(juce::String{}, false, false, false, false, false, false, false, 0);
+            setSize(820, 1137);
+        }
+
+        ~MidiInputSettingsContent() override
+        {
+            if (helperTooltipWindow != nullptr)
+                helperTooltipWindow->setLookAndFeel(nullptr);
+            helperTooltipWindow.reset();
+        }
+
+        void updateStatus(const juce::String& message)
+        {
+            statusLabel.setText(message, juce::dontSendNotification);
+        }
+
+        int getCountInBars() const noexcept
+        {
+            return juce::jlimit(0, 2, countInCombo.getSelectedId() - 1);
+        }
+
+        int getQuantizeDivision() const noexcept
+        {
+            switch (quantizeCombo.getSelectedId())
+            {
+                case 2: return 4;
+                case 3: return 8;
+                case 4: return 16;
+                case 5: return 32;
+                case 6: return 64;
+                default: return 0;
+            }
+        }
+
+        void refreshFromCoordinator()
+        {
+            initialSelection = coordinator.selection();
+            refreshDevices(false);
+            channelCombo.setSelectedId(juce::jlimit(1, 17, initialSelection.channel + 1), juce::dontSendNotification);
+            updateStatus(coordinator.statusSummary());
+        }
+
+        void setPunchRegion(bool enabled,
+                            bool loopEnabledIn,
+                            bool valid,
+                            const juce::String& inText,
+                            const juce::String& outText,
+                            bool positionAvailable)
+        {
+            punchEnabled = enabled;
+            loopEnabled = loopEnabledIn;
+            punchRegionValid = valid;
+            punchPositionAvailable = positionAvailable;
+            punchCombo.setSelectedId(enabled ? 2 : 1, juce::dontSendNotification);
+            loopCombo.setSelectedId(loopEnabled ? 2 : 1, juce::dontSendNotification);
+            juce::String text = "Punch / Loop Region: In ";
+            text += inText.isNotEmpty() ? inText : juce::String("not set");
+            text += " | Out ";
+            text += outText.isNotEmpty() ? outText : juce::String("not set");
+            if (enabled && !valid)
+                text += " | Set a valid In < Out region before recording.";
+            punchRegionLabel.setText(text, juce::dontSendNotification);
+            applyRecordingControlPolicy();
+        }
+
+        void setTakeReviewState(bool active,
+                                const std::vector<int>& passNumbers,
+                                int selectedPassNumber,
+                                bool compModeEnabledIn,
+                                int compGridId,
+                                int compBoundaryNoteModeId,
+                                int crossPassNoteModeId,
+                                int sustainPedalModeId,
+                                const std::vector<mw::midi::MidiRecordingCompSegment>& compSegments,
+                                const std::vector<std::int64_t>& customBoundaries,
+                                int selectedCompSegmentIndex)
+        {
+            takeReviewActive = active;
+            compModeEnabled = active && compModeEnabledIn;
+            reviewPassCombo.clear(juce::dontSendNotification);
+            compPassCombo.clear(juce::dontSendNotification);
+            for (const auto passNumber : passNumbers)
+            {
+                reviewPassCombo.addItem("Pass " + juce::String(passNumber), passNumber);
+                compPassCombo.addItem("Pass " + juce::String(passNumber), passNumber);
+            }
+            if (active && selectedPassNumber > 0)
+                reviewPassCombo.setSelectedId(selectedPassNumber, juce::dontSendNotification);
+
+            reviewModeCombo.setSelectedId(compModeEnabled ? 2 : 1, juce::dontSendNotification);
+            compGridCombo.setSelectedId(juce::jlimit(1, 3, compGridId), juce::dontSendNotification);
+            compBoundaryNoteModeCombo.setSelectedId(juce::jlimit(1, 2, compBoundaryNoteModeId), juce::dontSendNotification);
+            crossPassNoteModeCombo.setSelectedId(juce::jlimit(1, 2, crossPassNoteModeId), juce::dontSendNotification);
+            sustainPedalModeCombo.setSelectedId(juce::jlimit(1, 2, sustainPedalModeId), juce::dontSendNotification);
+            sustainPedalModeCombo.setTooltip(
+                sustainPedalModeCombo.getSelectedId() == 2
+                    ? mw::midi::midiRecordingSustainApplyCc64Tooltip
+                    : mw::midi::midiRecordingSustainIgnoreTooltip);
+            compBoundaryNoteModeCombo.setTooltip(
+                compBoundaryNoteModeCombo.getSelectedId() == 2
+                    ? mw::midi::midiRecordingCompPreserveSamePassTooltip
+                    : mw::midi::midiRecordingCompCutTooltip);
+            crossPassNoteModeCombo.setTooltip(
+                crossPassNoteModeCombo.getSelectedId() == 2
+                    ? mw::midi::midiRecordingCompCrossPassBridgeExactTooltip
+                    : mw::midi::midiRecordingCompCrossPassOffTooltip);
+            std::int64_t priorBoundaryTick = 0;
+            const auto priorBoundaryId = compBoundaryCombo.getSelectedId();
+            if (priorBoundaryId > 0 && priorBoundaryId <= static_cast<int>(compBoundaryTicks.size()))
+                priorBoundaryTick = compBoundaryTicks[static_cast<std::size_t>(priorBoundaryId - 1)];
+            compBoundaryTicks = customBoundaries;
+            compBoundaryCombo.clear(juce::dontSendNotification);
+            for (std::size_t i = 0; i < compBoundaryTicks.size(); ++i)
+            {
+                compBoundaryCombo.addItem("Boundary " + juce::String(static_cast<int>(i + 1))
+                                              + " | tick " + juce::String(static_cast<juce::int64>(compBoundaryTicks[i])),
+                                          static_cast<int>(i + 1));
+            }
+            if (!compBoundaryTicks.empty())
+            {
+                int boundarySelectionId = 1;
+                const auto prior = std::find(compBoundaryTicks.begin(), compBoundaryTicks.end(), priorBoundaryTick);
+                if (prior != compBoundaryTicks.end())
+                    boundarySelectionId = static_cast<int>(std::distance(compBoundaryTicks.begin(), prior)) + 1;
+                compBoundaryCombo.setSelectedId(boundarySelectionId, juce::dontSendNotification);
+            }
+            compSegmentCombo.clear(juce::dontSendNotification);
+            for (std::size_t i = 0; i < compSegments.size(); ++i)
+            {
+                const auto& segment = compSegments[i];
+                juce::String label;
+                label << "Seg " << static_cast<int>(i + 1)
+                      << ": " << static_cast<juce::int64>(segment.startTick)
+                      << "-" << static_cast<juce::int64>(segment.endTick)
+                      << " | Pass " << segment.selectedPassNumber;
+                compSegmentCombo.addItem(label, static_cast<int>(i + 1));
+            }
+            if (active && !compSegments.empty())
+            {
+                const auto clampedIndex = juce::jlimit(0, static_cast<int>(compSegments.size()) - 1, selectedCompSegmentIndex);
+                compSegmentCombo.setSelectedId(clampedIndex + 1, juce::dontSendNotification);
+                compPassCombo.setSelectedId(compSegments[static_cast<std::size_t>(clampedIndex)].selectedPassNumber,
+                                            juce::dontSendNotification);
+            }
+            applyRecordingControlPolicy();
+        }
+
+        void setRecordingState(const juce::String& armedTrackName,
+                               bool recording,
+                               bool preparing,
+                               bool countingIn,
+                               bool punchPreRoll,
+                               bool liveMonitoringActive,
+                               bool canUndo,
+                               bool canRedo,
+                               int loopPassNumber)
+        {
+            recordingArmedTrackName = armedTrackName;
+            recordingControlState = mw::midi::midiRecordingControlState(recording, preparing, countingIn, punchPreRoll);
+            recordingLiveMonitoringActive = liveMonitoringActive;
+            recordingCanUndo = canUndo;
+            recordingCanRedo = canRedo;
+
+            juce::String stateText;
+            if (recordingControlState == mw::midi::MidiRecordingControlState::Recording
+                && loopEnabled && loopPassNumber > 0)
+            {
+                stateText = "LOOP RECORDING - PASS " + juce::String(loopPassNumber);
+            }
+            else if (recordingControlState == mw::midi::MidiRecordingControlState::Idle
+                && recordingArmedTrackName.isNotEmpty())
+            {
+                stateText = "ARMED";
+            }
+            else
+            {
+                stateText = mw::midi::midiRecordingControlStateLabel(recordingControlState);
+            }
+
+            juce::String text = "State: " + stateText + " | Target: ";
+            text += recordingArmedTrackName.isNotEmpty() ? recordingArmedTrackName : juce::String("not armed");
+            text += "\nOptions: Count-In: ";
+            const int countInBars = getCountInBars();
+            text += countInBars == 0 ? juce::String("Off")
+                                     : juce::String(countInBars) + (countInBars == 1 ? " Bar" : " Bars");
+            text += " | Quantize: ";
+            const int quantizeDivision = getQuantizeDivision();
+            text += quantizeDivision == 0 ? juce::String("Off")
+                                          : juce::String("1/") + juce::String(quantizeDivision);
+            text += " | Metronome: ";
+            text += metronomeCombo.getSelectedId() == 2 ? "On" : "Off";
+            text += " | Record Controllers: ";
+            text += recordControllersCombo.getSelectedId() == 2 ? "All CC 0-127" : "Off";
+            text += " | Record Pitch Bend: ";
+            text += recordPitchBendCombo.getSelectedId() == 2 ? "On" : "Off";
+            text += " | Record Program Change: ";
+            text += recordProgramChangeCombo.getSelectedId() == 2 ? "On" : "Off";
+            text += " | Record Channel Pressure: ";
+            text += recordChannelPressureCombo.getSelectedId() == 2 ? "On" : "Off";
+            text += " | Record Poly Pressure: ";
+            text += recordPolyPressureCombo.getSelectedId() == 2 ? "On" : "Off";
+            text += " | Record Advanced Parameters: ";
+            text += recordAdvancedParametersCombo.getSelectedId() == 2 ? "On" : "Off";
+            text += " | Punch: ";
+            text += punchEnabled ? "On" : "Off";
+            text += " | Loop Record: ";
+            text += loopEnabled ? "On" : "Off";
+            text += " | Loop Takes: ";
+            text += takeReviewEnabled ? "Review" : "Merge";
+            if (takeReviewActive)
+            {
+                text += " | TAKE REVIEW | Review Mode: ";
+                text += compModeEnabled ? "Comp" : "Whole Pass";
+            }
+
+            recordingLabel.setText(text, juce::dontSendNotification);
+            const bool busy = mw::midi::isMidiRecordingControlBusy(recordingControlState) || takeReviewActive;
+            recordingLabel.setColour(juce::Label::textColourId,
+                                     busy ? juce::Colours::orange
+                                          : (recordingArmedTrackName.isNotEmpty()
+                                                 ? juce::Colours::lightgreen
+                                                 : juce::Colours::lightgrey));
+            applyRecordingControlPolicy();
+        }
+
+        void applyRecordingControlPolicy()
+        {
+            mw::midi::MidiRecordingControlContext context;
+            context.state = recordingControlState;
+            context.armedTrackAvailable = recordingArmedTrackName.isNotEmpty();
+            context.midiInputOpen = coordinator.isOpen();
+            context.liveMonitoringActive = recordingLiveMonitoringActive;
+            context.deviceSelectionAvailable = !devices.isEmpty();
+            context.canUndoTake = recordingCanUndo;
+            context.canRedoTake = recordingCanRedo;
+            context.recordingConfigurationValid = (!punchEnabled && !loopEnabled) || punchRegionValid;
+            context.punchPositionAvailable = punchPositionAvailable;
+            context.allowLoopWrapTestWithoutMidi = loopEnabled && punchRegionValid;
+            const auto availability = mw::midi::makeMidiRecordingControlAvailability(context);
+
+            deviceCombo.setEnabled(availability.deviceSelectorEnabled);
+            channelCombo.setEnabled(availability.channelSelectorEnabled);
+            refreshButton.setEnabled(availability.refreshDevicesEnabled);
+            applyButton.setEnabled(availability.applySelectionEnabled);
+            startButton.setEnabled(availability.startMonitorEnabled);
+            stopButton.setEnabled(availability.stopMonitorEnabled);
+            armButton.setEnabled(availability.armSelectedEnabled);
+            recordButton.setEnabled(availability.recordMidiEnabled);
+            stopRecordingButton.setEnabled(availability.stopRecordingEnabled);
+            panicButton.setEnabled(availability.panicEnabled);
+            countInCombo.setEnabled(availability.countInEnabled);
+            quantizeCombo.setEnabled(availability.quantizeEnabled);
+            metronomeCombo.setEnabled(availability.metronomeEnabled);
+            recordControllersCombo.setEnabled(availability.metronomeEnabled);
+            recordPitchBendCombo.setEnabled(availability.metronomeEnabled);
+            recordProgramChangeCombo.setEnabled(availability.metronomeEnabled);
+            recordChannelPressureCombo.setEnabled(availability.metronomeEnabled);
+            recordPolyPressureCombo.setEnabled(availability.metronomeEnabled);
+            recordAdvancedParametersCombo.setEnabled(availability.metronomeEnabled);
+            punchCombo.setEnabled(availability.punchModeEnabled);
+            loopCombo.setEnabled(availability.loopModeEnabled);
+            takeResultCombo.setEnabled(availability.loopModeEnabled);
+            setPunchInButton.setEnabled(availability.punchSetInEnabled);
+            setPunchOutButton.setEnabled(availability.punchSetOutEnabled);
+            clearPunchButton.setEnabled(availability.punchClearEnabled);
+            undoTakeButton.setEnabled(availability.undoTakeEnabled);
+            redoTakeButton.setEnabled(availability.redoTakeEnabled);
+            closeButton.setEnabled(availability.closeEnabled);
+
+            reviewModeCombo.setEnabled(takeReviewActive);
+            reviewPassCombo.setEnabled(takeReviewActive && !compModeEnabled);
+            auditionTakeButton.setEnabled(takeReviewActive && !compModeEnabled && reviewPassCombo.getSelectedId() > 0);
+            keepSelectedTakeButton.setEnabled(takeReviewActive && !compModeEnabled && reviewPassCombo.getSelectedId() > 0);
+            keepAllTakesButton.setEnabled(takeReviewActive && !compModeEnabled);
+            archiveTakesButton.setEnabled(takeReviewActive);
+            snapshotTakesButton.setEnabled(takeReviewActive);
+            discardTakesButton.setEnabled(takeReviewActive);
+            compGridCombo.setEnabled(takeReviewActive && compModeEnabled);
+            compBoundaryNoteModeCombo.setEnabled(takeReviewActive && compModeEnabled && compSegmentCombo.getNumItems() > 0);
+            crossPassNoteModeCombo.setEnabled(takeReviewActive && compModeEnabled && compSegmentCombo.getNumItems() > 0);
+            sustainPedalModeCombo.setEnabled(takeReviewActive);
+            const bool customComp = takeReviewActive && compModeEnabled && compGridCombo.getSelectedId() == 3;
+            compBoundaryCombo.setEnabled(customComp && compBoundaryCombo.getNumItems() > 0);
+            addCompBoundaryButton.setEnabled(customComp);
+            removeCompBoundaryButton.setEnabled(customComp && compBoundaryCombo.getSelectedId() > 0);
+            compSegmentCombo.setEnabled(takeReviewActive && compModeEnabled && compSegmentCombo.getNumItems() > 0);
+            compPassCombo.setEnabled(takeReviewActive && compModeEnabled && compSegmentCombo.getSelectedId() > 0);
+            auditionCompButton.setEnabled(takeReviewActive && compModeEnabled && compSegmentCombo.getNumItems() > 0);
+            keepCompButton.setEnabled(takeReviewActive && compModeEnabled && compSegmentCombo.getNumItems() > 0);
+
+            if (takeReviewActive)
+            {
+                deviceCombo.setEnabled(false);
+                channelCombo.setEnabled(false);
+                refreshButton.setEnabled(false);
+                applyButton.setEnabled(false);
+                startButton.setEnabled(false);
+                stopButton.setEnabled(false);
+                armButton.setEnabled(false);
+                recordButton.setEnabled(false);
+                stopRecordingButton.setEnabled(false);
+                panicButton.setEnabled(false);
+                countInCombo.setEnabled(false);
+                quantizeCombo.setEnabled(false);
+                metronomeCombo.setEnabled(false);
+                recordControllersCombo.setEnabled(false);
+                recordPitchBendCombo.setEnabled(false);
+                recordProgramChangeCombo.setEnabled(false);
+                recordChannelPressureCombo.setEnabled(false);
+                recordPolyPressureCombo.setEnabled(false);
+                recordAdvancedParametersCombo.setEnabled(false);
+                punchCombo.setEnabled(false);
+                loopCombo.setEnabled(false);
+                takeResultCombo.setEnabled(false);
+                setPunchInButton.setEnabled(false);
+                setPunchOutButton.setEnabled(false);
+                clearPunchButton.setEnabled(false);
+                undoTakeButton.setEnabled(false);
+                redoTakeButton.setEnabled(recordingCanRedo);
+                closeButton.setEnabled(false);
+            }
+        }
+
+        void resized() override
+        {
+            auto area = getLocalBounds().reduced(14);
+            titleLabel.setBounds(area.removeFromTop(30));
+            instructionLabel.setBounds(area.removeFromTop(62));
+            area.removeFromTop(6);
+
+            auto placeRow = [&](juce::Label& label, juce::ComboBox& combo)
+            {
+                auto row = area.removeFromTop(38);
+                label.setBounds(row.removeFromLeft(130).reduced(3, 2));
+                combo.setBounds(row.reduced(3, 2));
+                area.removeFromTop(4);
+            };
+
+            placeRow(deviceLabel, deviceCombo);
+            placeRow(channelLabel, channelCombo);
+            placeRow(countInLabel, countInCombo);
+            placeRow(quantizeLabel, quantizeCombo);
+            placeRow(metronomeLabel, metronomeCombo);
+            placeRow(recordControllersLabel, recordControllersCombo);
+            placeRow(recordPitchBendLabel, recordPitchBendCombo);
+            placeRow(recordProgramChangeLabel, recordProgramChangeCombo);
+            placeRow(recordChannelPressureLabel, recordChannelPressureCombo);
+            placeRow(recordPolyPressureLabel, recordPolyPressureCombo);
+            placeRow(recordAdvancedParametersLabel, recordAdvancedParametersCombo);
+            placeRow(loopLabel, loopCombo);
+            placeRow(takeResultLabel, takeResultCombo);
+            placeRow(reviewModeLabel, reviewModeCombo);
+            placeRow(compGridLabel, compGridCombo);
+            placeRow(compBoundaryNoteModeLabel, compBoundaryNoteModeCombo);
+            placeRow(crossPassNoteModeLabel, crossPassNoteModeCombo);
+            placeRow(sustainPedalModeLabel, sustainPedalModeCombo);
+
+            auto punchRow = area.removeFromTop(38);
+            punchLabel.setBounds(punchRow.removeFromLeft(130).reduced(3, 2));
+            punchCombo.setBounds(punchRow.removeFromLeft(120).reduced(3, 2));
+            setPunchInButton.setBounds(punchRow.removeFromLeft(100).reduced(4, 2));
+            setPunchOutButton.setBounds(punchRow.removeFromLeft(100).reduced(4, 2));
+            clearPunchButton.setBounds(punchRow.removeFromLeft(90).reduced(4, 2));
+            area.removeFromTop(4);
+            punchRegionLabel.setBounds(area.removeFromTop(34).reduced(3, 2));
+            statusLabel.setBounds(area.removeFromTop(48).reduced(3, 2));
+            recordingLabel.setBounds(area.removeFromTop(52).reduced(3, 2));
+
+            auto reviewRow = area.removeFromTop(38);
+            reviewPassCombo.setBounds(reviewRow.removeFromLeft(115).reduced(4, 2));
+            auditionTakeButton.setBounds(reviewRow.removeFromLeft(115).reduced(4, 2));
+            keepSelectedTakeButton.setBounds(reviewRow.removeFromLeft(125).reduced(4, 2));
+            keepAllTakesButton.setBounds(reviewRow.removeFromLeft(95).reduced(4, 2));
+            archiveTakesButton.setBounds(reviewRow.removeFromLeft(85).reduced(4, 2));
+            snapshotTakesButton.setBounds(reviewRow.removeFromLeft(95).reduced(4, 2));
+            discardTakesButton.setBounds(reviewRow.removeFromLeft(85).reduced(4, 2));
+            area.removeFromTop(4);
+
+            auto compRow = area.removeFromTop(38);
+            compSegmentCombo.setBounds(compRow.removeFromLeft(300).reduced(4, 2));
+            compPassCombo.setBounds(compRow.removeFromLeft(120).reduced(4, 2));
+            auditionCompButton.setBounds(compRow.removeFromLeft(145).reduced(4, 2));
+            keepCompButton.setBounds(compRow.removeFromLeft(120).reduced(4, 2));
+            area.removeFromTop(4);
+
+            auto boundaryRow = area.removeFromTop(38);
+            compBoundaryLabel.setBounds(boundaryRow.removeFromLeft(130).reduced(3, 2));
+            compBoundaryCombo.setBounds(boundaryRow.removeFromLeft(245).reduced(4, 2));
+            addCompBoundaryButton.setBounds(boundaryRow.removeFromLeft(135).reduced(4, 2));
+            removeCompBoundaryButton.setBounds(boundaryRow.removeFromLeft(155).reduced(4, 2));
+            area.removeFromTop(4);
+
+            auto deviceButtons = area.removeFromTop(38);
+            refreshButton.setBounds(deviceButtons.removeFromLeft(145).reduced(4, 2));
+            applyButton.setBounds(deviceButtons.removeFromLeft(130).reduced(4, 2));
+            startButton.setBounds(deviceButtons.removeFromLeft(130).reduced(4, 2));
+            panicButton.setBounds(deviceButtons.removeFromLeft(85).reduced(4, 2));
+            stopButton.setBounds(deviceButtons.removeFromLeft(130).reduced(4, 2));
+
+            auto recordButtons = area.removeFromTop(38);
+            armButton.setBounds(recordButtons.removeFromLeft(130).reduced(4, 2));
+            recordButton.setBounds(recordButtons.removeFromLeft(125).reduced(4, 2));
+            stopRecordingButton.setBounds(recordButtons.removeFromLeft(145).reduced(4, 2));
+            undoTakeButton.setBounds(recordButtons.removeFromLeft(105).reduced(4, 2));
+            redoTakeButton.setBounds(recordButtons.removeFromLeft(105).reduced(4, 2));
+
+            auto bottomButtons = area.removeFromBottom(38);
+            closeButton.setBounds(bottomButtons.removeFromRight(100).reduced(4, 2));
+        }
+
+    private:
+        static void setupLabel(juce::Label& label, const juce::String& text)
+        {
+            label.setText(text, juce::dontSendNotification);
+            label.setJustificationType(juce::Justification::centredLeft);
+            label.setColour(juce::Label::textColourId, juce::Colours::white);
+        }
+
+        void refreshDevices(bool userRequested)
+        {
+            const auto previousIdentifier = buildSelection().deviceIdentifier;
+            devices = coordinator.availableDevices();
+            deviceCombo.clear(juce::dontSendNotification);
+
+            int selectedId = 0;
+            for (int index = 0; index < devices.size(); ++index)
+            {
+                const auto& device = devices.getReference(index);
+                deviceCombo.addItem(device.name, index + 1);
+                if ((initialSelection.deviceIdentifier.isNotEmpty() && device.identifier == initialSelection.deviceIdentifier)
+                    || (initialSelection.deviceIdentifier.isEmpty() && previousIdentifier.isNotEmpty() && device.identifier == previousIdentifier)
+                    || (initialSelection.deviceIdentifier.isEmpty() && previousIdentifier.isEmpty()
+                        && initialSelection.deviceName.isNotEmpty() && device.name == initialSelection.deviceName))
+                {
+                    selectedId = index + 1;
+                }
+            }
+
+            if (selectedId == 0 && !devices.isEmpty())
+                selectedId = 1;
+            deviceCombo.setSelectedId(selectedId, juce::dontSendNotification);
+
+            const bool available = !devices.isEmpty();
+            applyRecordingControlPolicy();
+            if (userRequested)
+                updateStatus(available ? ("Found " + juce::String(devices.size()) + " MIDI input device(s).")
+                                       : "No MIDI input devices are available.");
+        }
+
+        mw::midi::MidiInputSelection buildSelection() const
+        {
+            mw::midi::MidiInputSelection selection;
+            const int index = deviceCombo.getSelectedId() - 1;
+            if (index >= 0 && index < devices.size())
+            {
+                const auto& device = devices.getReference(index);
+                selection.deviceIdentifier = device.identifier;
+                selection.deviceName = device.name;
+            }
+            selection.channel = juce::jlimit(0, 16, channelCombo.getSelectedId() - 1);
+            return selection;
+        }
+
+        mw::midi::MidiInputCoordinator& coordinator;
+        mw::midi::MidiInputSelection initialSelection;
+        juce::Array<juce::MidiDeviceInfo> devices;
+        juce::Label titleLabel;
+        juce::Label instructionLabel;
+        juce::Label deviceLabel;
+        juce::Label channelLabel;
+        juce::Label countInLabel;
+        juce::Label quantizeLabel;
+        juce::Label metronomeLabel;
+        juce::Label recordControllersLabel;
+        juce::Label recordPitchBendLabel;
+        juce::Label recordProgramChangeLabel;
+        juce::Label recordChannelPressureLabel;
+        juce::Label recordPolyPressureLabel;
+        juce::Label recordAdvancedParametersLabel;
+        juce::Label punchLabel;
+        juce::Label loopLabel;
+        juce::Label takeResultLabel;
+        juce::Label reviewModeLabel;
+        juce::Label compGridLabel;
+        juce::Label compBoundaryNoteModeLabel;
+        juce::Label crossPassNoteModeLabel;
+        juce::Label sustainPedalModeLabel;
+        juce::Label compBoundaryLabel;
+        juce::Label punchRegionLabel;
+        juce::ComboBox deviceCombo;
+        juce::ComboBox channelCombo;
+        juce::ComboBox countInCombo;
+        juce::ComboBox quantizeCombo;
+        juce::ComboBox metronomeCombo;
+        juce::ComboBox recordControllersCombo;
+        juce::ComboBox recordPitchBendCombo;
+        juce::ComboBox recordProgramChangeCombo;
+        juce::ComboBox recordChannelPressureCombo;
+        juce::ComboBox recordPolyPressureCombo;
+        juce::ComboBox recordAdvancedParametersCombo;
+        juce::ComboBox punchCombo;
+        juce::ComboBox loopCombo;
+        juce::ComboBox takeResultCombo;
+        juce::ComboBox reviewModeCombo;
+        juce::ComboBox compGridCombo;
+        juce::ComboBox compBoundaryNoteModeCombo;
+        juce::ComboBox crossPassNoteModeCombo;
+        juce::ComboBox sustainPedalModeCombo;
+        juce::ComboBox compBoundaryCombo;
+        juce::ComboBox reviewPassCombo;
+        juce::ComboBox compSegmentCombo;
+        juce::ComboBox compPassCombo;
+        juce::Label statusLabel;
+        juce::Label recordingLabel;
+        juce::TextButton refreshButton;
+        juce::TextButton applyButton;
+        juce::TextButton startButton;
+        juce::TextButton panicButton;
+        juce::TextButton stopButton;
+        juce::TextButton armButton;
+        juce::TextButton recordButton;
+        juce::TextButton stopRecordingButton;
+        juce::TextButton undoTakeButton;
+        juce::TextButton redoTakeButton;
+        juce::TextButton setPunchInButton;
+        juce::TextButton setPunchOutButton;
+        juce::TextButton clearPunchButton;
+        juce::TextButton auditionTakeButton;
+        juce::TextButton keepSelectedTakeButton;
+        juce::TextButton keepAllTakesButton;
+        juce::TextButton archiveTakesButton;
+        juce::TextButton snapshotTakesButton;
+        juce::TextButton discardTakesButton;
+        juce::TextButton addCompBoundaryButton;
+        juce::TextButton removeCompBoundaryButton;
+        juce::TextButton auditionCompButton;
+        juce::TextButton keepCompButton;
+        juce::TextButton closeButton;
+        std::vector<std::int64_t> compBoundaryTicks;
+        mw::midi::MidiRecordingControlState recordingControlState = mw::midi::MidiRecordingControlState::Idle;
+        juce::String recordingArmedTrackName;
+        bool recordingLiveMonitoringActive = false;
+        bool recordingCanUndo = false;
+        bool recordingCanRedo = false;
+        bool punchEnabled = false;
+        bool loopEnabled = false;
+        bool takeReviewEnabled = false;
+        bool takeReviewActive = false;
+        bool compModeEnabled = false;
+        bool punchRegionValid = false;
+        bool punchPositionAvailable = false;
+        std::function<void(const mw::midi::MidiInputSelection&)> onApply;
+        std::function<void(int)> onCountInChanged;
+        std::function<void(int)> onQuantizeChanged;
+        std::function<void(bool)> onMetronomeChanged;
+        std::function<void(bool)> onRecordControllersChanged;
+        std::function<void(bool)> onRecordPitchBendChanged;
+        std::function<void(bool)> onRecordProgramChangeChanged;
+        std::function<void(bool)> onRecordChannelPressureChanged;
+        std::function<void(bool)> onRecordPolyPressureChanged;
+        std::function<void(bool)> onRecordAdvancedParametersChanged;
+        std::function<void(bool)> onPunchChanged;
+        std::function<void(bool)> onLoopChanged;
+        std::function<void(bool)> onTakeReviewChanged;
+        std::function<void(int)> onTakeReviewPassChanged;
+        std::function<void()> onAuditionTake;
+        std::function<void()> onKeepSelectedTake;
+        std::function<void()> onKeepAllTakes;
+        std::function<void()> onArchiveTakes;
+        std::function<void()> onSnapshotTakes;
+        std::function<void()> onDiscardTakes;
+        std::function<void(bool)> onCompModeChanged;
+        std::function<void(int)> onCompGridChanged;
+        std::function<void(int)> onCompSegmentChanged;
+        std::function<void(int)> onCompPassChanged;
+        std::function<void(int)> onCompBoundaryNoteModeChanged;
+        std::function<void(int)> onCrossPassNoteModeChanged;
+        std::function<void(int)> onSustainPedalModeChanged;
+        std::function<void()> onAddCompBoundary;
+        std::function<void(std::int64_t)> onRemoveCompBoundary;
+        std::function<void()> onAuditionComp;
+        std::function<void()> onKeepComp;
+        std::function<void()> onSetPunchIn;
+        std::function<void()> onSetPunchOut;
+        std::function<void()> onClearPunch;
+        std::function<void(const mw::midi::MidiInputSelection&)> onStart;
+        std::function<void()> onPanic;
+        std::function<void()> onStop;
+        std::function<void()> onArm;
+        std::function<void()> onRecord;
+        std::function<void()> onStopRecording;
+        std::function<void()> onUndoTake;
+        std::function<void()> onRedoTake;
+        std::function<void()> onClose;
+        mw::gui::HelperTooltipLookAndFeel helperTooltipLookAndFeel;
+        std::unique_ptr<mw::gui::FreshHoverTooltipWindow> helperTooltipWindow;
+    };
+
+
     class RenderSettingsContent final : public juce::Component
     {
     public:
@@ -6359,6 +7803,12 @@ juce::Label helpLabel;
 
             applyTimeButton.setButtonText("Apply Time");
             applyTimeButton.setTooltip("Validate the entered time and move the preview play position.");
+            // Do not let a mouse click steal TextEditor focus before onClick snapshots the typed value.
+            // The 30 Hz preview timer refreshes the field whenever it is not being edited; allowing the
+            // button to grab focus could therefore overwrite a just-entered value with the current playhead
+            // (often 00:00.000) in the small interval before the button callback ran.
+            applyTimeButton.setWantsKeyboardFocus(false);
+            applyTimeButton.setMouseClickGrabsKeyboardFocus(false);
             applyTimeButton.onClick = [this] { applyTimeFromField(); };
 
             totalTimeLabel.setText("/ 00:00.000", juce::dontSendNotification);
@@ -8491,6 +9941,478 @@ namespace mw::gui
         };
 
 
+        class PendingTakeReviewsContent final : public juce::Component
+        {
+        public:
+            using ReviewAction = std::function<void(mw::core::StableId, mw::core::StableId)>;
+            using MetadataAction = std::function<void(mw::core::StableId, mw::core::StableId,
+                                                      const juce::String&, const juce::String&)>;
+
+            PendingTakeReviewsContent(ReviewAction resumeCallback,
+                                      ReviewAction archiveCallback,
+                                      ReviewAction snapshotActiveCallback,
+                                      ReviewAction restoreCallback,
+                                      ReviewAction duplicateArchiveCallback,
+                                      ReviewAction copyToTrackCallback,
+                                      ReviewAction moveToTrackCallback,
+                                      ReviewAction renameCallback,
+                                      ReviewAction discardCallback,
+                                      ReviewAction deleteArchiveCallback,
+                                      MetadataAction saveMetadataCallback,
+                                      std::function<void()> refreshCallback,
+                                      std::function<void()> closeCallback)
+                : onResume(std::move(resumeCallback)),
+                  onArchive(std::move(archiveCallback)),
+                  onSnapshotActive(std::move(snapshotActiveCallback)),
+                  onRestore(std::move(restoreCallback)),
+                  onDuplicateArchive(std::move(duplicateArchiveCallback)),
+                  onCopyToTrack(std::move(copyToTrackCallback)),
+                  onMoveToTrack(std::move(moveToTrackCallback)),
+                  onRename(std::move(renameCallback)),
+                  onDiscard(std::move(discardCallback)),
+                  onDeleteArchive(std::move(deleteArchiveCallback)),
+                  onSaveMetadata(std::move(saveMetadataCallback)),
+                  onRefresh(std::move(refreshCallback)),
+                  onClose(std::move(closeCallback))
+            {
+                titleLabel.setText("Take Review Manager", juce::dontSendNotification);
+                titleLabel.setFont(juce::FontOptions(20.0f, juce::Font::bold));
+                titleLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+
+                instructionLabel.setText(
+                    "Named TAKE REVIEW sessions are project data. Archived reviews can be duplicated, copied, or atomically moved between MIDI tracks; Search/filter is non-destructive and Tags/Notes remain organizational only.",
+                    juce::dontSendNotification);
+                instructionLabel.setJustificationType(juce::Justification::topLeft);
+                instructionLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+
+                countLabel.setJustificationType(juce::Justification::centredLeft);
+                countLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+                countLabel.setFont(juce::FontOptions(15.0f, juce::Font::bold));
+
+                searchLabel.setText("Search:", juce::dontSendNotification);
+                searchEditor.setTextToShowWhenEmpty("track, review, tags, notes", juce::Colours::grey);
+                searchEditor.setTooltip(mw::midi::takeReviewSearchTooltip);
+                searchEditor.onTextChange = [this]
+                {
+                    const auto trackId = selectedTrackId();
+                    const auto sessionId = selectedSessionId();
+                    rebuildVisibleSummaries(trackId, sessionId, false);
+                };
+
+                showLabel.setText("Show:", juce::dontSendNotification);
+                showCombo.addItem("All", 1);
+                showCombo.addItem("Active", 2);
+                showCombo.addItem("Archived", 3);
+                showCombo.setSelectedId(1, juce::dontSendNotification);
+                showCombo.setTooltip(mw::midi::takeReviewShowFilterTooltip);
+                showCombo.onChange = [this]
+                {
+                    const auto trackId = selectedTrackId();
+                    const auto sessionId = selectedSessionId();
+                    rebuildVisibleSummaries(trackId, sessionId, false);
+                };
+
+                trackLabel.setText("Review:", juce::dontSendNotification);
+                trackLabel.setJustificationType(juce::Justification::centredLeft);
+                trackCombo.setTooltip(mw::midi::pendingTakeReviewsTrackTooltip);
+                trackCombo.onChange = [this] { updateSelectionDetails(); };
+
+                listText.setMultiLine(true);
+                listText.setReadOnly(true);
+                listText.setScrollbarsShown(true);
+                listText.setFont(juce::FontOptions(14.0f));
+                listText.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff181818));
+
+                selectedDetails.setMultiLine(true);
+                selectedDetails.setReadOnly(true);
+                selectedDetails.setScrollbarsShown(false);
+                selectedDetails.setFont(juce::FontOptions(14.0f));
+                selectedDetails.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff202020));
+
+                tagsLabel.setText("Tags:", juce::dontSendNotification);
+                tagsEditor.setTooltip(mw::midi::takeReviewTagsTooltip);
+                tagsEditor.setTextToShowWhenEmpty("comma-separated labels", juce::Colours::grey);
+                notesLabel.setText("Notes:", juce::dontSendNotification);
+                notesEditor.setMultiLine(true);
+                notesEditor.setScrollbarsShown(true);
+                notesEditor.setTooltip(mw::midi::takeReviewNotesTooltip);
+                saveMetadataButton.setTooltip(mw::midi::takeReviewSaveMetadataTooltip);
+
+                resumeButton.setTooltip(mw::midi::pendingTakeReviewsResumeTooltip);
+                archiveButton.setTooltip(mw::midi::pendingTakeReviewsArchiveTooltip);
+                snapshotActiveButton.setTooltip(mw::midi::pendingTakeReviewsSnapshotActiveTooltip);
+                restoreButton.setTooltip(mw::midi::pendingTakeReviewsRestoreTooltip);
+                duplicateArchiveButton.setTooltip(mw::midi::pendingTakeReviewsDuplicateArchiveTooltip);
+                copyToTrackButton.setTooltip(mw::midi::pendingTakeReviewsCopyToTrackTooltip);
+                moveToTrackButton.setTooltip(mw::midi::pendingTakeReviewsMoveToTrackTooltip);
+                renameButton.setTooltip(mw::midi::pendingTakeReviewsRenameTooltip);
+                discardButton.setTooltip(mw::midi::pendingTakeReviewsDiscardTooltip);
+                deleteArchiveButton.setTooltip(mw::midi::pendingTakeReviewsDeleteArchiveTooltip);
+                refreshButton.setTooltip(mw::midi::pendingTakeReviewsRefreshTooltip);
+                closeButton.setTooltip("Close the Take Review Manager. Active and Archived review sessions, Tags, and Notes remain saved in the project.");
+
+                resumeButton.onClick = [this] { invokeSelected(onResume); };
+                archiveButton.onClick = [this] { invokeSelected(onArchive); };
+                snapshotActiveButton.onClick = [this] { invokeSelected(onSnapshotActive); };
+                restoreButton.onClick = [this] { invokeSelected(onRestore); };
+                duplicateArchiveButton.onClick = [this] { invokeSelected(onDuplicateArchive); };
+                copyToTrackButton.onClick = [this] { invokeSelected(onCopyToTrack); };
+                moveToTrackButton.onClick = [this] { invokeSelected(onMoveToTrack); };
+                renameButton.onClick = [this] { invokeSelected(onRename); };
+                discardButton.onClick = [this] { invokeSelected(onDiscard); };
+                deleteArchiveButton.onClick = [this] { invokeSelected(onDeleteArchive); };
+                saveMetadataButton.onClick = [this]
+                {
+                    if (const auto* summary = selectedSummary(); summary != nullptr && onSaveMetadata)
+                        onSaveMetadata(summary->trackId, summary->reviewSessionId, tagsEditor.getText(), notesEditor.getText());
+                };
+                refreshButton.onClick = [this] { if (onRefresh) onRefresh(); };
+                closeButton.onClick = [this] { if (onClose) onClose(); };
+
+                for (auto* component : std::initializer_list<juce::Component*>{
+                         &titleLabel, &instructionLabel, &countLabel, &searchLabel, &searchEditor, &showLabel, &showCombo,
+                         &trackLabel, &trackCombo, &listText, &selectedDetails, &tagsLabel, &tagsEditor, &notesLabel, &notesEditor,
+                         &saveMetadataButton, &resumeButton, &archiveButton, &snapshotActiveButton, &restoreButton, &duplicateArchiveButton, &copyToTrackButton, &moveToTrackButton, &renameButton, &discardButton,
+                         &deleteArchiveButton, &refreshButton, &closeButton })
+                {
+                    addAndMakeVisible(*component);
+                }
+
+                helperTooltipWindow = std::make_unique<mw::gui::FreshHoverTooltipWindow>(this, 2000);
+                helperTooltipWindow->setLookAndFeel(&helperTooltipLookAndFeel);
+                setSummaries({}, 120);
+            }
+
+            ~PendingTakeReviewsContent() override
+            {
+                if (helperTooltipWindow != nullptr)
+                    helperTooltipWindow->setLookAndFeel(nullptr);
+                helperTooltipWindow.reset();
+            }
+
+            void setSummaries(std::vector<mw::midi::PendingMidiTakeReviewSummary> newSummaries,
+                              int tempoBpm,
+                              mw::core::StableId preferredTrackId = 0,
+                              mw::core::StableId preferredSessionId = 0)
+            {
+                const auto previousTrackId = preferredTrackId != 0 ? preferredTrackId : selectedTrackId();
+                const auto previousSessionId = preferredSessionId != 0 ? preferredSessionId : selectedSessionId();
+                allSummaries = std::move(newSummaries);
+                projectTempoBpm = std::max(1, tempoBpm);
+                rebuildVisibleSummaries(previousTrackId, previousSessionId,
+                                        previousTrackId == 0 && previousSessionId == 0);
+            }
+
+            mw::core::StableId selectedTrackId() const noexcept
+            {
+                const auto* summary = selectedSummary();
+                return summary != nullptr ? summary->trackId : 0;
+            }
+
+            mw::core::StableId selectedSessionId() const noexcept
+            {
+                const auto* summary = selectedSummary();
+                return summary != nullptr ? summary->reviewSessionId : 0;
+            }
+
+            void resized() override
+            {
+                auto area = getLocalBounds().reduced(16);
+                titleLabel.setBounds(area.removeFromTop(30));
+                area.removeFromTop(5);
+                instructionLabel.setBounds(area.removeFromTop(48));
+                area.removeFromTop(5);
+                countLabel.setBounds(area.removeFromTop(26));
+                area.removeFromTop(5);
+
+                auto searchRow = area.removeFromTop(34);
+                searchLabel.setBounds(searchRow.removeFromLeft(65));
+                showCombo.setBounds(searchRow.removeFromRight(130).reduced(3, 2));
+                showLabel.setBounds(searchRow.removeFromRight(55));
+                searchEditor.setBounds(searchRow.reduced(3, 2));
+                area.removeFromTop(5);
+
+                auto selectorRow = area.removeFromTop(34);
+                trackLabel.setBounds(selectorRow.removeFromLeft(65));
+                trackCombo.setBounds(selectorRow.reduced(3, 2));
+                area.removeFromTop(6);
+
+                auto bottomActions = area.removeFromBottom(40);
+                closeButton.setBounds(bottomActions.removeFromRight(85).reduced(3, 2));
+                refreshButton.setBounds(bottomActions.removeFromRight(85).reduced(3, 2));
+                deleteArchiveButton.setBounds(bottomActions.removeFromRight(125).reduced(3, 2));
+                discardButton.setBounds(bottomActions.removeFromRight(115).reduced(3, 2));
+                renameButton.setBounds(bottomActions.removeFromRight(95).reduced(3, 2));
+                area.removeFromBottom(3);
+
+                auto primaryActions = area.removeFromBottom(40);
+                saveMetadataButton.setBounds(primaryActions.removeFromRight(125).reduced(3, 2));
+                moveToTrackButton.setBounds(primaryActions.removeFromRight(130).reduced(3, 2));
+                copyToTrackButton.setBounds(primaryActions.removeFromRight(130).reduced(3, 2));
+                duplicateArchiveButton.setBounds(primaryActions.removeFromRight(135).reduced(3, 2));
+                restoreButton.setBounds(primaryActions.removeFromRight(100).reduced(3, 2));
+                snapshotActiveButton.setBounds(primaryActions.removeFromRight(125).reduced(3, 2));
+                archiveButton.setBounds(primaryActions.removeFromRight(95).reduced(3, 2));
+                resumeButton.setBounds(primaryActions.removeFromRight(95).reduced(3, 2));
+                area.removeFromBottom(6);
+
+                auto notesRow = area.removeFromBottom(78);
+                notesLabel.setBounds(notesRow.removeFromLeft(65));
+                notesEditor.setBounds(notesRow.reduced(3, 2));
+                area.removeFromBottom(4);
+                auto tagsRow = area.removeFromBottom(34);
+                tagsLabel.setBounds(tagsRow.removeFromLeft(65));
+                tagsEditor.setBounds(tagsRow.reduced(3, 2));
+                area.removeFromBottom(6);
+
+                selectedDetails.setBounds(area.removeFromBottom(104));
+                area.removeFromBottom(6);
+                listText.setBounds(area);
+            }
+
+        private:
+            mw::midi::MidiTakeReviewLibraryFilter currentFilter() const noexcept
+            {
+                if (showCombo.getSelectedId() == 2)
+                    return mw::midi::MidiTakeReviewLibraryFilter::Active;
+                if (showCombo.getSelectedId() == 3)
+                    return mw::midi::MidiTakeReviewLibraryFilter::Archived;
+                return mw::midi::MidiTakeReviewLibraryFilter::All;
+            }
+
+            const mw::midi::PendingMidiTakeReviewSummary* selectedSummary() const noexcept
+            {
+                const int index = trackCombo.getSelectedId() - 1;
+                if (index < 0 || index >= static_cast<int>(summaries.size()))
+                    return nullptr;
+                return &summaries[static_cast<std::size_t>(index)];
+            }
+
+            static juce::String tagsText(const mw::midi::PendingMidiTakeReviewSummary& summary)
+            {
+                juce::String text;
+                for (std::size_t i = 0; i < summary.reviewTags.size(); ++i)
+                {
+                    if (i > 0) text << ", ";
+                    text << juce::String(summary.reviewTags[i]);
+                }
+                return text;
+            }
+
+            void rebuildVisibleSummaries(mw::core::StableId preferredTrackId,
+                                         mw::core::StableId preferredSessionId,
+                                         bool selectFirstIfNoPreferred)
+            {
+                summaries = mw::midi::filterMidiTakeReviewSummaries(
+                    allSummaries, searchEditor.getText().toStdString(), currentFilter());
+
+                trackCombo.clear(juce::dontSendNotification);
+                int selectedItemId = 0;
+                for (int index = 0; index < static_cast<int>(summaries.size()); ++index)
+                {
+                    const auto& summary = summaries[static_cast<std::size_t>(index)];
+                    const bool archived = summary.storageState == mw::midi::MidiTakeReviewStorageState::Archived;
+                    juce::String label;
+                    label << (archived ? "[Archived] " : "[Active] ")
+                          << juce::String(summary.reviewName) << " - Track #" << (summary.trackIndex + 1)
+                          << " " << juce::String(summary.trackName);
+                    trackCombo.addItem(label, index + 1);
+                    if (summary.trackId == preferredTrackId
+                        && summary.reviewSessionId == preferredSessionId)
+                        selectedItemId = index + 1;
+                }
+                if (selectedItemId == 0 && selectFirstIfNoPreferred && !summaries.empty())
+                    selectedItemId = 1;
+                trackCombo.setSelectedId(selectedItemId, juce::dontSendNotification);
+
+                int activeCount = 0;
+                int archivedCount = 0;
+                for (const auto& summary : allSummaries)
+                    summary.storageState == mw::midi::MidiTakeReviewStorageState::Archived ? ++archivedCount : ++activeCount;
+                juce::String count;
+                count << "Active: " << activeCount << " | Archived: " << archivedCount
+                      << " | Visible: " << summaries.size();
+                countLabel.setText(count, juce::dontSendNotification);
+
+                juce::String rows;
+                if (allSummaries.empty())
+                {
+                    rows = "No Active or Archived MIDI TAKE REVIEW sessions are saved in this project.";
+                }
+                else if (summaries.empty())
+                {
+                    rows = "No Take Reviews match the current Search / Show filter.";
+                }
+                else
+                {
+                    for (const auto& summary : summaries)
+                    {
+                        const bool archived = summary.storageState == mw::midi::MidiTakeReviewStorageState::Archived;
+                        rows << (archived ? "ARCHIVED" : "ACTIVE") << " | " << juce::String(summary.reviewName)
+                             << "\n  Track #" << (summary.trackIndex + 1) << " - " << juce::String(summary.trackName)
+                             << " | " << summary.passCount << " pass" << (summary.passCount == 1 ? "" : "es")
+                             << " | " << reviewModeText(summary)
+                             << " | " << formatTime(summary.regionInTick) << " - " << formatTime(summary.regionOutTick)
+                             << " | Boundary Notes: " << boundaryModeText(summary)
+                             << " | Cross-Pass Notes: " << crossPassModeText(summary)
+                             << " | Sustain Pedal: " << sustainModeText(summary);
+                        const auto tagString = tagsText(summary);
+                        if (tagString.isNotEmpty()) rows << "\n  Tags: " << tagString;
+                        if (!summary.reviewNotes.empty()) rows << "\n  Notes: " << juce::String(summary.reviewNotes);
+                        rows << "\n\n";
+                    }
+                }
+                listText.setText(rows.trimEnd(), juce::dontSendNotification);
+                updateSelectionDetails();
+            }
+
+            void invokeSelected(const ReviewAction& action)
+            {
+                if (const auto* summary = selectedSummary(); summary != nullptr && action)
+                    action(summary->trackId, summary->reviewSessionId);
+            }
+
+            juce::String formatTime(std::int64_t tick) const
+            {
+                const auto safeTick = std::max<std::int64_t>(0, tick);
+                const double seconds = static_cast<double>(safeTick) * 60.0
+                    / (static_cast<double>(projectTempoBpm) * static_cast<double>(mw::core::Project::ticksPerQuarterNote));
+                const int totalMilliseconds = static_cast<int>(std::llround(seconds * 1000.0));
+                return juce::String::formatted("%02d:%02d.%03d", totalMilliseconds / 60000,
+                                               (totalMilliseconds / 1000) % 60,
+                                               totalMilliseconds % 1000);
+            }
+
+            static juce::String boundaryModeText(const mw::midi::PendingMidiTakeReviewSummary& summary)
+            {
+                return summary.boundaryNoteMode == mw::core::PersistentMidiCompBoundaryNoteMode::PreserveSamePass ? "Preserve Same Pass" : "Cut";
+            }
+
+            static juce::String crossPassModeText(const mw::midi::PendingMidiTakeReviewSummary& summary)
+            {
+                return summary.crossPassNoteMode == mw::core::PersistentMidiCompCrossPassNoteMode::BridgeExact
+                    ? "Bridge Exact" : "Off";
+            }
+
+            static juce::String sustainModeText(const mw::midi::PendingMidiTakeReviewSummary& summary)
+            {
+                return summary.sustainPedalMode == mw::core::PersistentMidiSustainPedalMode::ApplyCc64 ? "Apply CC64" : "Ignore";
+            }
+
+            static juce::String gridText(const mw::midi::PendingMidiTakeReviewSummary& summary)
+            {
+                switch (summary.compGrid)
+                {
+                    case mw::core::PersistentMidiCompGrid::Bar: return "Bar";
+                    case mw::core::PersistentMidiCompGrid::Custom: return "Custom";
+                    case mw::core::PersistentMidiCompGrid::Beat:
+                    default: return "Beat";
+                }
+            }
+
+            static juce::String reviewModeText(const mw::midi::PendingMidiTakeReviewSummary& summary)
+            {
+                if (summary.reviewMode == mw::core::PersistentMidiTakeReviewMode::Comp)
+                {
+                    juce::String text = "Comp / ";
+                    text += gridText(summary);
+                    text << " / " << summary.segmentCount << " segment" << (summary.segmentCount == 1 ? "" : "s");
+                    return text;
+                }
+                return "Whole Pass";
+            }
+
+            void updateSelectionDetails()
+            {
+                const auto* summary = selectedSummary();
+                const bool valid = summary != nullptr;
+                const bool archived = valid && summary->storageState == mw::midi::MidiTakeReviewStorageState::Archived;
+                resumeButton.setEnabled(valid && !archived);
+                archiveButton.setEnabled(valid && !archived);
+                snapshotActiveButton.setEnabled(valid && !archived);
+                restoreButton.setEnabled(valid && archived);
+                duplicateArchiveButton.setEnabled(valid && archived);
+                copyToTrackButton.setEnabled(valid && archived);
+                moveToTrackButton.setEnabled(valid && archived);
+                renameButton.setEnabled(valid);
+                discardButton.setEnabled(valid && !archived);
+                deleteArchiveButton.setEnabled(valid && archived);
+                saveMetadataButton.setEnabled(valid);
+                tagsEditor.setEnabled(valid);
+                notesEditor.setEnabled(valid);
+
+                if (!valid)
+                {
+                    selectedDetails.setText("Select a visible named Take Review to see its saved details.", juce::dontSendNotification);
+                    tagsEditor.setText({}, juce::dontSendNotification);
+                    notesEditor.setText({}, juce::dontSendNotification);
+                    return;
+                }
+
+                tagsEditor.setText(tagsText(*summary), juce::dontSendNotification);
+                notesEditor.setText(juce::String(summary->reviewNotes), juce::dontSendNotification);
+                juce::String text;
+                text << "Selected: " << (archived ? "Archived" : "Active") << " - " << juce::String(summary->reviewName)
+                     << "\nTrack #" << (summary->trackIndex + 1) << " - " << juce::String(summary->trackName)
+                     << " | Stable Track ID: " << juce::String(static_cast<juce::int64>(summary->trackId))
+                     << " | Review ID: " << juce::String(static_cast<juce::int64>(summary->reviewSessionId))
+                     << "\nPasses: " << summary->passCount << " | Mode: " << reviewModeText(*summary)
+                     << " | Region: " << formatTime(summary->regionInTick) << " - " << formatTime(summary->regionOutTick)
+                     << " | Boundary Notes: " << boundaryModeText(*summary)
+                     << " | Cross-Pass Notes: " << crossPassModeText(*summary)
+                     << " | Sustain Pedal: " << sustainModeText(*summary);
+                selectedDetails.setText(text, juce::dontSendNotification);
+            }
+
+            std::vector<mw::midi::PendingMidiTakeReviewSummary> allSummaries;
+            std::vector<mw::midi::PendingMidiTakeReviewSummary> summaries;
+            int projectTempoBpm = 120;
+            juce::Label titleLabel;
+            juce::Label instructionLabel;
+            juce::Label countLabel;
+            juce::Label searchLabel;
+            juce::TextEditor searchEditor;
+            juce::Label showLabel;
+            juce::ComboBox showCombo;
+            juce::Label trackLabel;
+            juce::ComboBox trackCombo;
+            juce::TextEditor listText;
+            juce::TextEditor selectedDetails;
+            juce::Label tagsLabel;
+            juce::TextEditor tagsEditor;
+            juce::Label notesLabel;
+            juce::TextEditor notesEditor;
+            juce::TextButton saveMetadataButton { "Save Metadata" };
+            juce::TextButton resumeButton { "Resume" };
+            juce::TextButton archiveButton { "Archive" };
+            juce::TextButton snapshotActiveButton { "Snapshot Active" };
+            juce::TextButton restoreButton { "Restore" };
+            juce::TextButton duplicateArchiveButton { "Duplicate Archive" };
+            juce::TextButton copyToTrackButton { "Copy to Track..." };
+            juce::TextButton moveToTrackButton { "Move to Track..." };
+            juce::TextButton renameButton { "Rename" };
+            juce::TextButton discardButton { "Discard Active" };
+            juce::TextButton deleteArchiveButton { "Delete Archive" };
+            juce::TextButton refreshButton { "Refresh" };
+            juce::TextButton closeButton { "Close" };
+            mw::gui::HelperTooltipLookAndFeel helperTooltipLookAndFeel;
+            std::unique_ptr<juce::TooltipWindow> helperTooltipWindow;
+            ReviewAction onResume;
+            ReviewAction onArchive;
+            ReviewAction onSnapshotActive;
+            ReviewAction onRestore;
+            ReviewAction onDuplicateArchive;
+            ReviewAction onCopyToTrack;
+            ReviewAction onMoveToTrack;
+            ReviewAction onRename;
+            ReviewAction onDiscard;
+            ReviewAction onDeleteArchive;
+            MetadataAction onSaveMetadata;
+            std::function<void()> onRefresh;
+            std::function<void()> onClose;
+        };
+
+
         enum MenuCommandIds
         {
             menuNewProject = 1001,
@@ -8498,9 +10420,12 @@ namespace mw::gui
             menuSaveProject,
             menuProjectInfo,
             menuSaveSettings,
+            menuPendingTakeReviews,
 
             menuCleanTemp = 1101,
             menuChooseExportFolder,
+            menuAudioSettings,
+            menuMidiInputSettings,
 
             menuChooseInput = 1201,
             menuImportSequence,
@@ -8518,6 +10443,13 @@ namespace mw::gui
 
             menuTrackManager = 1401,
             menuPianoRoll,
+            menuMidiControllerLane,
+            menuMidiPitchBendLane,
+            menuMidiProgramChangeLane,
+            menuMidiChannelPressureLane,
+            menuMidiPolyPressureLane,
+            menuMidi14BitControllerLane,
+            menuMidiParameterLane,
             menuAudioClipEditor,
             menuPreviewPlayer,
             menuToggleHelperBubbles,
@@ -8544,6 +10476,16 @@ namespace mw::gui
             menuWindowSequenceThoughts,
             menuWindowSequenceColor,
             menuWindowRenderSettings,
+            menuWindowAudioSettings,
+            menuWindowMidiInputSettings,
+            menuWindowMidiControllerLane,
+            menuWindowMidiPitchBendLane,
+            menuWindowMidiProgramChangeLane,
+            menuWindowMidiChannelPressureLane,
+            menuWindowMidiPolyPressureLane,
+            menuWindowMidi14BitControllerLane,
+            menuWindowMidiParameterLane,
+            menuWindowPendingTakeReviews,
             menuWindowVstPluginManager,
             menuWindowVstSettings,
             menuWindowVstHostHelperStatus,
@@ -8559,6 +10501,7 @@ namespace mw::gui
 
             menuUserGuide = 1501,
             menuSetupGuide,
+            menuRunSimulationRegression,
             menuAbout
         };
     }
@@ -8588,6 +10531,16 @@ namespace mw::gui
             || sequenceThoughtsWindow != nullptr
             || sequenceColorWindow != nullptr
             || renderSettingsWindow != nullptr
+            || audioSettingsWindow != nullptr
+            || midiInputSettingsWindow != nullptr
+            || midiControllerLaneWindow != nullptr
+            || midiPitchBendLaneWindow != nullptr
+            || midiProgramChangeLaneWindow != nullptr
+            || midiChannelPressureLaneWindow != nullptr
+            || midiPolyPressureLaneWindow != nullptr
+            || midi14BitControllerLaneWindow != nullptr
+            || midiParameterLaneWindow != nullptr
+            || pendingTakeReviewsWindow != nullptr
             || vstPluginManagerWindow != nullptr
             || vstSettingsWindow != nullptr
             || vstHostHelperStatusWindow != nullptr
@@ -8717,6 +10670,36 @@ namespace mw::gui
 
         if (renderSettingsWindow != nullptr)
             menu.addItem(menuWindowRenderSettings, "Render Settings");
+
+        if (audioSettingsWindow != nullptr)
+            menu.addItem(menuWindowAudioSettings, "Audio Settings");
+
+        if (midiInputSettingsWindow != nullptr)
+            menu.addItem(menuWindowMidiInputSettings, "MIDI Input / Live Monitor");
+
+        if (midiControllerLaneWindow != nullptr)
+            menu.addItem(menuWindowMidiControllerLane, "MIDI Controller Lane");
+
+        if (midiPitchBendLaneWindow != nullptr)
+            menu.addItem(menuWindowMidiPitchBendLane, "MIDI Pitch Bend Lane");
+
+        if (midiProgramChangeLaneWindow != nullptr)
+            menu.addItem(menuWindowMidiProgramChangeLane, "MIDI Program Change Lane");
+
+        if (midiChannelPressureLaneWindow != nullptr)
+            menu.addItem(menuWindowMidiChannelPressureLane, "MIDI Channel Pressure Lane");
+
+        if (midiPolyPressureLaneWindow != nullptr)
+            menu.addItem(menuWindowMidiPolyPressureLane, "MIDI Poly Pressure Lane");
+
+        if (midi14BitControllerLaneWindow != nullptr)
+            menu.addItem(menuWindowMidi14BitControllerLane, "MIDI 14-bit Controller Lane");
+
+        if (midiParameterLaneWindow != nullptr)
+            menu.addItem(menuWindowMidiParameterLane, "MIDI Parameter Lane");
+
+        if (pendingTakeReviewsWindow != nullptr)
+            menu.addItem(menuWindowPendingTakeReviews, "Take Review Manager");
 
         if (vstPluginManagerWindow != nullptr)
             menu.addItem(menuWindowVstPluginManager, "VST3 Plugin Manager");
@@ -8867,6 +10850,17 @@ namespace mw::gui
                 break;
 
             case 1:
+                menu.addItem(menuAudioSettings, "Audio Settings...");
+                menu.addItem(menuMidiInputSettings, "MIDI Input / Live Monitor...");
+                {
+                    const int pendingCount = currentProject
+                        ? static_cast<int>(mw::midi::buildPendingMidiTakeReviewSummaries(*currentProject).size())
+                        : 0;
+                    menu.addItem(menuPendingTakeReviews,
+                                 "Take Review Manager... (" + juce::String(pendingCount) + ")",
+                                 currentProject.has_value());
+                }
+                menu.addSeparator();
                 menu.addItem(menuCleanTemp, "Clean Temp / Preview Files");
                 menu.addItem(menuChooseExportFolder, "Choose Render Export Folder...");
                 break;
@@ -8901,6 +10895,13 @@ namespace mw::gui
             case 4:
                 menu.addItem(menuTrackManager, "Open Track / Sequence Manager");
                 menu.addItem(menuPianoRoll, "Open Selected Track Piano Roll");
+                menu.addItem(menuMidiControllerLane, "Open MIDI Controller Lane");
+                menu.addItem(menuMidiPitchBendLane, "Open MIDI Pitch Bend Lane");
+                menu.addItem(menuMidiProgramChangeLane, "Open MIDI Program Change Lane");
+                menu.addItem(menuMidiChannelPressureLane, "Open MIDI Channel Pressure Lane");
+                menu.addItem(menuMidiPolyPressureLane, "Open MIDI Poly Pressure Lane");
+                menu.addItem(menuMidi14BitControllerLane, "Open MIDI 14-bit Controller Lane");
+                menu.addItem(menuMidiParameterLane, "Open MIDI Parameter Lane (RPN / NRPN)");
                 menu.addItem(menuAudioClipEditor, "AudioClip Editor");
                 break;
 
@@ -8919,6 +10920,7 @@ namespace mw::gui
             case 8:
                 menu.addItem(menuUserGuide, "Open User Guide PDF");
                 menu.addItem(menuSetupGuide, "Show Setup / Build Guide File");
+                menu.addItem(menuRunSimulationRegression, "Run Simulation / Regression Tests...");
                 menu.addSeparator();
                 menu.addItem(menuToggleHelperBubbles, "Helper Bubbles", true, helperBubblesEnabled);
                 menu.addItem(menuTogglePluginCompatibilityWarnings, "Plugin Compatibility Warnings", true, pluginCompatibilityWarningsEnabled());
@@ -8958,6 +10960,16 @@ namespace mw::gui
         if (menuItemID == menuWindowSequenceThoughts) { focusWindow(sequenceThoughtsWindow); return; }
         if (menuItemID == menuWindowSequenceColor) { focusWindow(sequenceColorWindow); return; }
         if (menuItemID == menuWindowRenderSettings) { focusWindow(renderSettingsWindow); return; }
+        if (menuItemID == menuWindowAudioSettings) { focusWindow(audioSettingsWindow); return; }
+        if (menuItemID == menuWindowMidiInputSettings) { focusWindow(midiInputSettingsWindow); return; }
+        if (menuItemID == menuWindowMidiControllerLane) { focusWindow(midiControllerLaneWindow); return; }
+        if (menuItemID == menuWindowMidiPitchBendLane) { focusWindow(midiPitchBendLaneWindow); return; }
+        if (menuItemID == menuWindowMidiProgramChangeLane) { focusWindow(midiProgramChangeLaneWindow); return; }
+        if (menuItemID == menuWindowMidiChannelPressureLane) { focusWindow(midiChannelPressureLaneWindow); return; }
+        if (menuItemID == menuWindowMidiPolyPressureLane) { focusWindow(midiPolyPressureLaneWindow); return; }
+        if (menuItemID == menuWindowMidi14BitControllerLane) { focusWindow(midi14BitControllerLaneWindow); return; }
+        if (menuItemID == menuWindowMidiParameterLane) { focusWindow(midiParameterLaneWindow); return; }
+        if (menuItemID == menuWindowPendingTakeReviews) { focusWindow(pendingTakeReviewsWindow); return; }
         if (menuItemID == menuWindowVstPluginManager) { focusWindow(vstPluginManagerWindow); return; }
         if (menuItemID == menuWindowVstSettings) { focusWindow(vstSettingsWindow); return; }
         if (menuItemID == menuWindowVstHostHelperStatus) { focusWindow(vstHostHelperStatusWindow); return; }
@@ -9022,6 +11034,14 @@ namespace mw::gui
             || menuItemID == menuWindowSequenceThoughts
             || menuItemID == menuWindowSequenceColor
             || menuItemID == menuWindowRenderSettings
+            || menuItemID == menuWindowAudioSettings
+            || menuItemID == menuWindowMidiInputSettings
+            || menuItemID == menuWindowMidiControllerLane
+            || menuItemID == menuWindowMidiPitchBendLane
+            || menuItemID == menuWindowMidiProgramChangeLane
+            || menuItemID == menuWindowMidiChannelPressureLane
+            || menuItemID == menuWindowMidiPolyPressureLane
+            || menuItemID == menuWindowPendingTakeReviews
             || menuItemID == menuWindowVstPluginManager
             || menuItemID == menuWindowVstSettings
             || menuItemID == menuWindowVstHostHelperStatus
@@ -9044,6 +11064,10 @@ namespace mw::gui
             case menuProjectInfo: openProjectInfoWindow(); break;
             case menuSaveSettings: saveUserSettingsNow(); break;
 
+            case menuAudioSettings: openAudioSettingsWindow(); break;
+            case menuMidiInputSettings: openMidiInputSettingsWindow(); break;
+            case menuPendingTakeReviews: openPendingTakeReviewsWindow(); break;
+            case menuRunSimulationRegression: runSimulationRegressionTests(); break;
             case menuCleanTemp: cleanTempFolder(); break;
             case menuChooseExportFolder: chooseExportFolder(); break;
 
@@ -9102,6 +11126,13 @@ namespace mw::gui
 
             case menuTrackManager: openTrackManagerWindow(); break;
             case menuPianoRoll: openPianoRollWindow(); break;
+            case menuMidiControllerLane: openMidiControllerLaneWindow(); break;
+            case menuMidiPitchBendLane: openMidiPitchBendLaneWindow(); break;
+            case menuMidiProgramChangeLane: openMidiProgramChangeLaneWindow(); break;
+            case menuMidiChannelPressureLane: openMidiChannelPressureLaneWindow(); break;
+            case menuMidiPolyPressureLane: openMidiPolyPressureLaneWindow(); break;
+            case menuMidi14BitControllerLane: openMidi14BitControllerLaneWindow(); break;
+            case menuMidiParameterLane: openMidiParameterLaneWindow(); break;
             case menuAudioClipEditor: openAudioClipEditorWindow(); break;
             case menuToggleHelperBubbles: setHelperBubblesEnabled(!helperBubblesEnabled); break;
 
@@ -9156,9 +11187,52 @@ namespace mw::gui
         }
     }
 
-    MainComponent::MainComponent()
+    MainComponent::MainComponent(mw::audio::ApplicationAudioService& audioService)
+        : applicationAudioService(audioService),
+          vstLiveDirectPreviewEngine(audioService),
+          clapLiveDirectPreviewEngine(audioService),
+          mixedLiveProjectPreviewEngine(audioService),
+          midiRecordingCountInPlayer(audioService)
     {
         const auto startupPreferences = mw::app::UserPreferencesStore::load();
+        mw::audio::ApplicationAudioConfiguration startupAudioConfiguration;
+        startupAudioConfiguration.deviceTypeName = startupPreferences.audioDeviceTypeName;
+        startupAudioConfiguration.inputDeviceName = startupPreferences.audioInputDeviceName;
+        startupAudioConfiguration.outputDeviceName = startupPreferences.audioOutputDeviceName;
+        startupAudioConfiguration.sampleRate = static_cast<double>(startupPreferences.audioSampleRate);
+        startupAudioConfiguration.bufferSize = startupPreferences.audioBufferSize;
+        startupAudioConfiguration.inputMode = startupPreferences.audioInputMode == 2
+            ? mw::audio::ApplicationAudioInputMode::StereoAdjacent
+            : mw::audio::ApplicationAudioInputMode::Mono;
+        startupAudioConfiguration.inputChannelIndex = startupPreferences.audioInputChannelIndex;
+        const auto startupAudioResult = applicationAudioService.applyConfiguration(startupAudioConfiguration);
+        const juce::String startupAudioSettingsMessage = startupAudioResult.success
+            ? ("Audio Settings restored: " + applicationAudioService.currentDeviceSummary()
+                + " / " + applicationAudioService.configuredInputRoutingSummary() + ".")
+            : ("Audio Settings restore warning: " + startupAudioResult.message);
+
+        midiInputCoordinator.setMessageCallback([this](const juce::MidiMessage& message)
+        {
+            handleIncomingLiveMidiMessage(message);
+        });
+        midiInputCoordinator.setDisconnectCallback([this](const juce::String& deviceName)
+        {
+            handleMidiInputDisconnected(deviceName);
+        });
+
+        juce::String startupMidiInputMessage = "MIDI Input: no saved device selected.";
+        if (!startupPreferences.midiInputDeviceIdentifier.empty() || !startupPreferences.midiInputDeviceName.empty())
+        {
+            mw::midi::MidiInputSelection midiSelection;
+            midiSelection.deviceIdentifier = startupPreferences.midiInputDeviceIdentifier;
+            midiSelection.deviceName = startupPreferences.midiInputDeviceName;
+            midiSelection.channel = startupPreferences.midiInputChannel;
+            const auto midiResult = midiInputCoordinator.open(midiSelection);
+            startupMidiInputMessage = midiResult.success
+                ? ("MIDI Input restored: " + midiInputCoordinator.statusSummary() + ".")
+                : ("MIDI Input restore warning: " + midiResult.message);
+        }
+
         helperBubblesEnabled = startupPreferences.helperBubblesEnabled;
         vstCompatibilityWarningsEnabled = startupPreferences.vstCompatibilityWarningsEnabled;
         vstSafePluginUiMode = startupPreferences.vstSafePluginUiMode;
@@ -9168,6 +11242,15 @@ namespace mw::gui
         clapCompatibilityWarningsEnabled = startupPreferences.clapCompatibilityWarningsEnabled;
         clapSafePluginUiMode = startupPreferences.clapSafePluginUiMode;
         clapMaxOpenPluginWindows = sanitizeMaxOpenVstPluginWindows(startupPreferences.clapMaxOpenPluginWindows);
+        midiRecordingCountInBars = juce::jlimit(0, 2, startupPreferences.midiRecordingCountInBars);
+        midiRecordingQuantizeDivision = mw::midi::sanitizeMidiRecordingQuantizeDivision(startupPreferences.midiRecordingQuantizeDivision);
+        midiRecordingMetronomeEnabled = startupPreferences.midiRecordingMetronomeEnabled;
+        midiRecordingRecordControllers = startupPreferences.midiRecordingRecordControllers;
+        midiRecordingRecordPitchBend = startupPreferences.midiRecordingRecordPitchBend;
+        midiRecordingRecordProgramChange = startupPreferences.midiRecordingRecordProgramChange;
+        midiRecordingRecordChannelPressure = startupPreferences.midiRecordingRecordChannelPressure;
+        midiRecordingRecordPolyPressure = startupPreferences.midiRecordingRecordPolyPressure;
+        midiRecordingRecordAdvancedParameters = startupPreferences.midiRecordingRecordAdvancedParameters;
         vstGraphicsProfile.detected = startupPreferences.vstGraphicsProfileDetected;
         vstGraphicsProfile.source = startupPreferences.vstGraphicsProfileSource;
         vstGraphicsProfile.lastDetectedLocal = startupPreferences.vstGraphicsProfileLastDetected;
@@ -9197,6 +11280,9 @@ namespace mw::gui
         renderTargetLabel.setJustificationType(juce::Justification::centredLeft);
         renderTargetLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
         renderTargetLabel.setFont(juce::FontOptions(14.0f));
+
+        pendingTakeReviewsButton.setTooltip(mw::midi::pendingTakeReviewsIndicatorTooltip);
+        pendingTakeReviewsButton.onClick = [this] { openPendingTakeReviewsWindow(); };
 
         auto setupLabel = [](juce::Label& label, const juce::String& text)
         {
@@ -9589,6 +11675,7 @@ namespace mw::gui
                     fitPianoRollToSelectedTrack();
                     clearPianoRollEditorDirty();
                     refreshAudioRecorderWindowStatus();
+                    restartLiveMidiMonitoringForSelectedTrack();
 
                     if (pianoRollWindow != nullptr)
                     {
@@ -9647,6 +11734,7 @@ namespace mw::gui
             syncTrackInspectorFromSelection();
             syncTrackManagerSelectionFromCurrentTrack(true, requestedIndex >= 0 && !suppressTrackManagerConsoleFollow);
             refreshAudioRecorderWindowStatus();
+            restartLiveMidiMonitoringForSelectedTrack();
         };
 
         trackSummaryBox.setMultiLine(true);
@@ -9750,6 +11838,7 @@ namespace mw::gui
         deletePianoRollNoteButton.onClick = [this] { pianoRoll.deleteSelectedNote(); };
         syncPianoRollButton.onClick = [this] { applyNoteEditorToTrack(); refreshNoteEditor(); };
         openPianoRollButton.onClick = [this] { openPianoRollWindow(); };
+        midiControllerLaneButton.onClick = [this] { openMidiControllerLaneWindow(); };
         audioClipEditorButton.onClick = [this] { openAudioClipEditorWindow(); };
 
         setBeatWindow4Button.onClick = [this] { pianoRollBeatWindowBox.setText("4"); applyPianoRollSettings(); };
@@ -9840,6 +11929,7 @@ namespace mw::gui
         addAndMakeVisible(titleLabel);
         addAndMakeVisible(renderStatusLabel);
         addAndMakeVisible(renderTargetLabel);
+        addAndMakeVisible(pendingTakeReviewsButton);
 
         addAndMakeVisible(musicXmlLabel);
         addAndMakeVisible(exportFolderLabel);
@@ -9951,6 +12041,7 @@ namespace mw::gui
         addAndMakeVisible(trackSummaryBox);
         addAndMakeVisible(logBox);
         addAndMakeVisible(openPianoRollButton);
+        addAndMakeVisible(midiControllerLaneButton);
         addAndMakeVisible(audioClipEditorButton);
         addAndMakeVisible(previousPianoRollWindowButton);
         addAndMakeVisible(nextPianoRollWindowButton);
@@ -9966,11 +12057,20 @@ namespace mw::gui
         helperTooltipWindow = std::make_unique<mw::gui::FreshHoverTooltipWindow>(this, 2000);
         helperTooltipWindow->setLookAndFeel(&helperTooltipLookAndFeel);
         setSize(1250, 820);
+        logMessage(startupAudioSettingsMessage);
+        logMessage(startupMidiInputMessage);
 
     }
 
     MainComponent::~MainComponent()
     {
+        stopLiveMidiMonitoring(false);
+        midiInputCoordinator.setMessageCallback({});
+        midiInputCoordinator.setDisconnectCallback({});
+        midiInputCoordinator.close();
+        cancelAudioRecorderTestAndCleanup();
+        stopAudioClipRecorder();
+
         if (helperTooltipWindow != nullptr)
             helperTooltipWindow->setLookAndFeel(nullptr);
 
@@ -10002,7 +12102,28 @@ namespace mw::gui
 
         audioClipEditorContent.reset();
 
+        if (audioSettingsWindow != nullptr)
+        {
+            audioSettingsWindow->setContentOwned(nullptr, false);
+            audioSettingsWindow.reset();
+        }
+        audioSettingsContent.reset();
 
+        if (midiInputSettingsWindow != nullptr)
+        {
+            midiInputSettingsWindow->setContentOwned(nullptr, false);
+            midiInputSettingsWindow.reset();
+        }
+        midiInputSettingsContent.reset();
+
+        if (pendingTakeReviewsWindow != nullptr)
+        {
+            pendingTakeReviewsWindow->setContentOwned(nullptr, false);
+            pendingTakeReviewsWindow.reset();
+        }
+        pendingTakeReviewsContent.reset();
+
+        stopLiveMidiMonitoring(true);
         stopClapInstrumentLiveAudition(true);
         stopVstInstrumentLiveAudition(true);
         disarmClapLiveEngineSession(false);
@@ -10061,6 +12182,7 @@ namespace mw::gui
         deletePianoRollNoteButton.setTooltip("Delete the currently selected Piano Roll note.");
         syncPianoRollButton.setTooltip("Sync note-editor changes into the Piano Roll view.");
         openPianoRollButton.setTooltip("Open the editable Piano Roll for the selected track. Empty tracks are linked to a sequence automatically.");
+        midiControllerLaneButton.setTooltip(mw::midi::midiControllerLaneTooltip);
         audioClipEditorButton.setTooltip("Open the selected AudioClip track in the AudioClip Editor for non-destructive source trim metadata. MIDI tracks still use Piano Roll.");
         previousPianoRollWindowButton.setTooltip("Move the Piano Roll to the previous beat window.");
         nextPianoRollWindowButton.setTooltip("Move the Piano Roll to the next beat window.");
@@ -10080,7 +12202,7 @@ namespace mw::gui
         renderSettingsButton.setTooltip("Open render settings for stem-file retention and render-output cleanup behavior.");
         renderSelectedTrackButton.setTooltip("Render only the selected track.");
         renderSelectedSequenceButton.setTooltip("Render only the selected sequence.");
-        renderMidiButton.setTooltip("Export the project as MIDI.");
+        renderMidiButton.setTooltip("Export the project as MIDI, including Controller Lane CC events. Exporter-generated setup controllers are marked so Poor Man's Studio can re-import without turning setup defaults into editable lane points.");
         cancelRenderButton.setTooltip("Request cancellation of the current render job.");
         previewButton.setTooltip("Preview the latest rendered WAV file.");
 
@@ -15759,7 +17881,7 @@ namespace mw::gui
 
 
 
-    bool MainComponent::startSelectedTrackVstDirectAudition(int index)
+    bool MainComponent::startSelectedTrackVstDirectAudition(int index, bool liveMidiInput)
     {
         if (!currentProject)
             return false;
@@ -15771,17 +17893,21 @@ namespace mw::gui
         const auto assignment = track.getInstrument();
         if (assignment.backendType != mw::core::SampleBackendType::VST3
             || !assignment.vst3.hasPluginIdentity()
-            || track.getNotes().empty())
+            || (!liveMidiInput && track.getNotes().empty() && track.getMidiControllerEvents().empty() && track.getMidiPitchBendEvents().empty() && track.getMidiProgramChangeEvents().empty() && track.getMidiChannelPressureEvents().empty() && track.getMidiPolyPressureEvents().empty() && track.getMidi14BitControllerEvents().empty() && track.getMidiRpnEvents().empty() && track.getMidiNrpnEvents().empty()))
         {
             return false;
         }
 
         if (hasEnabledNonVst3EffectSlots(track))
         {
-            logMessage("VST3 Live Preview: selected track has an enabled non-VST3 effect slot, so the rendered fallback will be used.");
+            logMessage(liveMidiInput
+                ? "Live MIDI Monitor: selected VST3 track has an enabled non-VST3 effect slot. Monitoring was not started because silently bypassing part of the effect chain would be misleading."
+                : "VST3 Live Preview: selected track has an enabled non-VST3 effect slot, so the rendered fallback will be used.");
             return false;
         }
 
+        if (!liveMidiInput)
+            stopLiveMidiMonitoring(true);
         stopClapInstrumentLiveAudition(true);
         stopVstInstrumentLiveAudition(true);
 
@@ -15868,6 +17994,42 @@ namespace mw::gui
             liveNotes.push_back(liveNote);
         }
 
+        std::vector<mw::clap::ClapLivePlaybackControllerEvent> liveControllers;
+        liveControllers.reserve(track.getMidiControllerEvents().size());
+        for (const auto& event : track.getMidiControllerEvents())
+            liveControllers.push_back({ event.stableId, event.tick, event.midiChannel, event.controller, event.value });
+
+        std::vector<mw::clap::ClapLivePlaybackPitchBendEvent> livePitchBends;
+        livePitchBends.reserve(track.getMidiPitchBendEvents().size());
+        for (const auto& event : track.getMidiPitchBendEvents())
+            livePitchBends.push_back({ event.stableId, event.tick, event.midiChannel, event.value });
+
+        std::vector<mw::clap::ClapLivePlaybackProgramChangeEvent> liveProgramChanges;
+        liveProgramChanges.reserve(track.getMidiProgramChangeEvents().size());
+        for (const auto& event : track.getMidiProgramChangeEvents())
+            liveProgramChanges.push_back({ event.stableId, event.tick, event.midiChannel, event.program });
+
+        std::vector<mw::clap::ClapLivePlaybackChannelPressureEvent> liveChannelPressures;
+        liveChannelPressures.reserve(track.getMidiChannelPressureEvents().size());
+        for (const auto& event : track.getMidiChannelPressureEvents())
+            liveChannelPressures.push_back({ event.stableId, event.tick, event.midiChannel, event.pressure });
+        std::vector<mw::clap::ClapLivePlaybackPolyPressureEvent> livePolyPressures;
+        livePolyPressures.reserve(track.getMidiPolyPressureEvents().size());
+        for (const auto& event : track.getMidiPolyPressureEvents())
+            livePolyPressures.push_back({ event.stableId, event.tick, event.midiChannel, event.noteNumber, event.pressure });
+        std::vector<mw::clap::ClapLivePlayback14BitControllerEvent> liveController14Bits;
+        liveController14Bits.reserve(track.getMidi14BitControllerEvents().size());
+        for (const auto& event : track.getMidi14BitControllerEvents())
+            liveController14Bits.push_back({ event.stableId, event.tick, event.midiChannel, event.controllerMsb, event.value });
+        std::vector<mw::clap::ClapLivePlaybackRpnEvent> liveRpns;
+        liveRpns.reserve(track.getMidiRpnEvents().size());
+        for (const auto& event : track.getMidiRpnEvents())
+            liveRpns.push_back({ event.stableId, event.tick, event.midiChannel, event.parameter, event.value });
+        std::vector<mw::clap::ClapLivePlaybackNrpnEvent> liveNrpns;
+        liveNrpns.reserve(track.getMidiNrpnEvents().size());
+        for (const auto& event : track.getMidiNrpnEvents())
+            liveNrpns.push_back({ event.stableId, event.tick, event.midiChannel, event.parameter, event.value });
+
         mw::clap::ClapLiveCallbackBridgeConfig bridgeConfig;
         bridgeConfig.trackIndex = index;
         bridgeConfig.trackName = track.getName();
@@ -15892,19 +18054,33 @@ namespace mw::gui
         request.session = instrumentSession.get();
         request.sessionProcessMutex = &vstLiveSessionProcessMutex;
         request.notes = std::move(liveNotes);
+        request.controllers = std::move(liveControllers);
+        request.pitchBends = std::move(livePitchBends);
+        request.programChanges = std::move(liveProgramChanges);
+        request.channelPressures = std::move(liveChannelPressures);
+        request.polyPressures = std::move(livePolyPressures);
+        request.controller14Bits = std::move(liveController14Bits);
+        request.rpns = std::move(liveRpns);
+        request.nrpns = std::move(liveNrpns);
         request.config = std::move(bridgeConfig);
         request.effects = std::move(effectRequests);
+        request.liveMidiInput = liveMidiInput;
         request.outputGain = mw::audio::sanitizeMainUiGain(
             static_cast<float>(static_cast<double>(track.getMixerSettings().volume)
                 * masterVolumeSlider.getValue()));
 
-        vstLiveTransportStartSample = static_cast<std::int64_t>(std::llround(previewStartSeconds * sampleRate));
-        vstLiveTransportGeneration = playbackTransportCoordinator.beginPreparing(
-            currentProject->getStableId(),
-            vstLiveTransportStartSample,
-            sampleRate,
-            blockSize,
-            { track.getStableId() });
+        vstLiveTransportStartSample = 0;
+        vstLiveTransportGeneration = 0;
+        if (!liveMidiInput)
+        {
+            vstLiveTransportStartSample = static_cast<std::int64_t>(std::llround(previewStartSeconds * sampleRate));
+            vstLiveTransportGeneration = playbackTransportCoordinator.beginPreparing(
+                currentProject->getStableId(),
+                vstLiveTransportStartSample,
+                sampleRate,
+                blockSize,
+                { track.getStableId() });
+        }
 
         auto startResult = vstLiveDirectPreviewEngine.start(std::move(request), channelCount);
         if (!startResult.started)
@@ -15912,7 +18088,8 @@ namespace mw::gui
             const auto reason = startResult.errorMessage.isNotEmpty()
                 ? startResult.errorMessage
                 : juce::String("VST3 live selected-track preview did not start.");
-            playbackTransportCoordinator.fail(vstLiveTransportGeneration, reason.toStdString());
+            if (vstLiveTransportGeneration != 0)
+                playbackTransportCoordinator.fail(vstLiveTransportGeneration, reason.toStdString());
             vstLiveTransportGeneration = 0;
             vstLiveTransportStartSample = 0;
             for (auto& prepared : preparedEffects)
@@ -15926,7 +18103,8 @@ namespace mw::gui
         vstLiveInstrumentSession = std::move(instrumentSession);
         vstLiveSelectedTrackEffectSessions = std::move(preparedEffects);
 
-        if (!playbackTransportCoordinator.beginPlaying(
+        if (!liveMidiInput
+            && !playbackTransportCoordinator.beginPlaying(
                 vstLiveTransportGeneration,
                 vstLiveTransportStartSample + startResult.totalSamples))
         {
@@ -15940,6 +18118,17 @@ namespace mw::gui
             vstLiveTransportGeneration = 0;
             vstLiveTransportStartSample = 0;
             return false;
+        }
+
+        if (liveMidiInput)
+        {
+            renderStatusLabel.setText("Live MIDI monitoring: VST3.", juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+            logMessage("Live MIDI Monitor: VST3 instrument is ready on " + getTrackDisplayName(index)
+                + " with " + juce::String(startResult.liveEffectSlotCount) + " same-backend live effect slot(s).");
+            if (startResult.message.isNotEmpty())
+                logMessage("Live MIDI Monitor: " + startResult.message);
+            return true;
         }
 
         renderStatusLabel.setText("VST3 live preview playing.", juce::dontSendNotification);
@@ -16233,7 +18422,7 @@ namespace mw::gui
         logMessage(juce::String("CLAP Live Engine: disarmed session") + (trackIndex >= 0 ? (juce::String(" for ") + getTrackDisplayName(trackIndex)) : juce::String()) + " (" + pluginName + ").");
     }
 
-    bool MainComponent::startSelectedTrackClapDirectAudition(int index)
+    bool MainComponent::startSelectedTrackClapDirectAudition(int index, bool liveMidiInput)
     {
         if (!currentProject)
             return false;
@@ -16253,14 +18442,19 @@ namespace mw::gui
         clapLiveSelectedTrackPreviewEffectSessions.clear();
 
         const auto track = currentProject->getTracks()[static_cast<std::size_t>(index)];
-        if (track.getNotes().empty())
+        if (!liveMidiInput && track.getNotes().empty() && track.getMidiControllerEvents().empty() && track.getMidiPitchBendEvents().empty() && track.getMidiProgramChangeEvents().empty() && track.getMidiChannelPressureEvents().empty() && track.getMidiPolyPressureEvents().empty() && track.getMidi14BitControllerEvents().empty() && track.getMidiRpnEvents().empty() && track.getMidiNrpnEvents().empty())
             return false;
 
         if (hasEnabledNonClapEffectSlots(track))
         {
-            logMessage("CLAP Preview: selected track has an enabled non-CLAP effect slot, so rendered preview will be used to preserve existing effect behavior.");
+            logMessage(liveMidiInput
+                ? "Live MIDI Monitor: selected CLAP track has an enabled non-CLAP effect slot. Monitoring was not started because silently bypassing part of the effect chain would be misleading."
+                : "CLAP Preview: selected track has an enabled non-CLAP effect slot, so rendered preview will be used to preserve existing effect behavior.");
             return false;
         }
+
+        if (!liveMidiInput)
+            stopLiveMidiMonitoring(true);
 
         const auto tempoBpm = std::max(1, currentProject->getTempoBpm());
         const int sampleRate = std::max(8000, clapLiveEngineArmedSession->sampleRate);
@@ -16279,6 +18473,42 @@ namespace mw::gui
             callbackNote.durationTicks = note.durationTicks;
             callbackNotes.push_back(callbackNote);
         }
+
+        std::vector<mw::clap::ClapLivePlaybackControllerEvent> liveControllers;
+        liveControllers.reserve(track.getMidiControllerEvents().size());
+        for (const auto& event : track.getMidiControllerEvents())
+            liveControllers.push_back({ event.stableId, event.tick, event.midiChannel, event.controller, event.value });
+
+        std::vector<mw::clap::ClapLivePlaybackPitchBendEvent> livePitchBends;
+        livePitchBends.reserve(track.getMidiPitchBendEvents().size());
+        for (const auto& event : track.getMidiPitchBendEvents())
+            livePitchBends.push_back({ event.stableId, event.tick, event.midiChannel, event.value });
+
+        std::vector<mw::clap::ClapLivePlaybackProgramChangeEvent> liveProgramChanges;
+        liveProgramChanges.reserve(track.getMidiProgramChangeEvents().size());
+        for (const auto& event : track.getMidiProgramChangeEvents())
+            liveProgramChanges.push_back({ event.stableId, event.tick, event.midiChannel, event.program });
+
+        std::vector<mw::clap::ClapLivePlaybackChannelPressureEvent> liveChannelPressures;
+        liveChannelPressures.reserve(track.getMidiChannelPressureEvents().size());
+        for (const auto& event : track.getMidiChannelPressureEvents())
+            liveChannelPressures.push_back({ event.stableId, event.tick, event.midiChannel, event.pressure });
+        std::vector<mw::clap::ClapLivePlaybackPolyPressureEvent> livePolyPressures;
+        livePolyPressures.reserve(track.getMidiPolyPressureEvents().size());
+        for (const auto& event : track.getMidiPolyPressureEvents())
+            livePolyPressures.push_back({ event.stableId, event.tick, event.midiChannel, event.noteNumber, event.pressure });
+        std::vector<mw::clap::ClapLivePlayback14BitControllerEvent> liveController14Bits;
+        liveController14Bits.reserve(track.getMidi14BitControllerEvents().size());
+        for (const auto& event : track.getMidi14BitControllerEvents())
+            liveController14Bits.push_back({ event.stableId, event.tick, event.midiChannel, event.controllerMsb, event.value });
+        std::vector<mw::clap::ClapLivePlaybackRpnEvent> liveRpns;
+        liveRpns.reserve(track.getMidiRpnEvents().size());
+        for (const auto& event : track.getMidiRpnEvents())
+            liveRpns.push_back({ event.stableId, event.tick, event.midiChannel, event.parameter, event.value });
+        std::vector<mw::clap::ClapLivePlaybackNrpnEvent> liveNrpns;
+        liveNrpns.reserve(track.getMidiNrpnEvents().size());
+        for (const auto& event : track.getMidiNrpnEvents())
+            liveNrpns.push_back({ event.stableId, event.tick, event.midiChannel, event.parameter, event.value });
 
         mw::clap::ClapLiveCallbackBridgeConfig bridgeConfig;
         bridgeConfig.trackIndex = index;
@@ -16352,21 +18582,32 @@ namespace mw::gui
         directRequest.session = clapLiveInstrumentSession.get();
         directRequest.sessionProcessMutex = &clapLiveSessionProcessMutex;
         directRequest.notes = std::move(callbackNotes);
+        directRequest.controllers = std::move(liveControllers);
+        directRequest.pitchBends = std::move(livePitchBends);
+        directRequest.programChanges = std::move(liveProgramChanges);
+        directRequest.channelPressures = std::move(liveChannelPressures);
+        directRequest.polyPressures = std::move(livePolyPressures);
         directRequest.config = std::move(bridgeConfig);
         directRequest.effects = std::move(effectRequests);
+        directRequest.liveMidiInput = liveMidiInput;
         directRequest.outputGain = mw::audio::sanitizeMainUiGain(static_cast<float>(static_cast<double>(track.getMixerSettings().volume) * masterVolumeSlider.getValue()));
 
         std::vector<mw::clap::ClapLiveDirectPreviewTrackRequest> directRequests;
         directRequests.push_back(std::move(directRequest));
 
         clapLiveSelectedTrackPreviewEffectSessions = std::move(preparedEffects);
-        clapLiveTransportStartSample = static_cast<std::int64_t>(std::llround(previewStartSeconds * sampleRate));
-        clapLiveTransportGeneration = playbackTransportCoordinator.beginPreparing(
-            currentProject->getStableId(),
-            clapLiveTransportStartSample,
-            sampleRate,
-            blockSize,
-            { track.getStableId() });
+        clapLiveTransportStartSample = 0;
+        clapLiveTransportGeneration = 0;
+        if (!liveMidiInput)
+        {
+            clapLiveTransportStartSample = static_cast<std::int64_t>(std::llround(previewStartSeconds * sampleRate));
+            clapLiveTransportGeneration = playbackTransportCoordinator.beginPreparing(
+                currentProject->getStableId(),
+                clapLiveTransportStartSample,
+                sampleRate,
+                blockSize,
+                { track.getStableId() });
+        }
         auto startResult = clapLiveDirectPreviewEngine.start(std::move(directRequests), channelCount);
         if (!startResult.started)
         {
@@ -16378,11 +18619,13 @@ namespace mw::gui
                 if (effectSlot != nullptr && effectSlot->session != nullptr)
                     effectSlot->session->close();
             clapLiveSelectedTrackPreviewEffectSessions.clear();
-            playbackTransportCoordinator.fail(clapLiveTransportGeneration, reason.toStdString());
+            if (clapLiveTransportGeneration != 0)
+                playbackTransportCoordinator.fail(clapLiveTransportGeneration, reason.toStdString());
             return false;
         }
 
-        if (!playbackTransportCoordinator.beginPlaying(
+        if (!liveMidiInput
+            && !playbackTransportCoordinator.beginPlaying(
                 clapLiveTransportGeneration,
                 clapLiveTransportStartSample + startResult.totalSamples))
         {
@@ -16399,6 +18642,17 @@ namespace mw::gui
             clapLiveEngineArmedSession->callbackBridgeMaxEventsPerBlock = startResult.maxEventsPerBlock;
             clapLiveEngineArmedSession->callbackBridgeTotalSamples = startResult.totalSamples;
             clapLiveEngineArmedSession->callbackBridgeMessage = startResult.message;
+        }
+
+        if (liveMidiInput)
+        {
+            renderStatusLabel.setText("Live MIDI monitoring: CLAP.", juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+            logMessage("Live MIDI Monitor: CLAP instrument is ready on " + getTrackDisplayName(index)
+                + " with " + juce::String(startResult.liveEffectSlotCount) + " same-backend live effect slot(s).");
+            if (startResult.message.isNotEmpty())
+                logMessage("Live MIDI Monitor: " + startResult.message);
+            return true;
         }
 
         renderStatusLabel.setText("CLAP preview playing.", juce::dontSendNotification);
@@ -16515,12 +18769,15 @@ namespace mw::gui
                 currentProject->getAudioClips().end(),
                 [i](const mw::core::AudioClip& clip) { return clip.trackIndex == i; });
             const bool hasMidiContent = !track.getNotes().empty();
-            if (!hasMidiContent && !hasAudioClipContent)
+            const bool isRecordingLiveTarget = midiRecordingPlaybackPending
+                && midiRecordingArmedProjectId == currentProject->getStableId()
+                && midiRecordingArmedTrackId == track.getStableId();
+            if (!hasMidiContent && !hasAudioClipContent && !isRecordingLiveTarget)
                 continue;
 
             const auto assignment = track.getInstrument();
             const bool commonLiveEligibility = !track.isAudioClipTrack()
-                && hasMidiContent
+                && (hasMidiContent || isRecordingLiveTarget)
                 && !hasAudioClipContent
                 && assignment.vst3.hasPluginIdentity();
 
@@ -16689,6 +18946,9 @@ namespace mw::gui
             managed.trackName = track.getName();
             managed.outputGain = mw::audio::sanitizeMainUiGain(
                 static_cast<float>(static_cast<double>(track.getMixerSettings().volume) * masterVolumeSlider.getValue()));
+            managed.liveMidiInput = midiRecordingPlaybackPending
+                && midiRecordingArmedProjectId == currentProject->getStableId()
+                && midiRecordingArmedTrackId == track.getStableId();
             managed.sessionConfig.pluginPath = pluginPath;
             managed.sessionConfig.pluginUid = assignment.vst3.uid;
             managed.sessionConfig.pluginName = assignment.vst3.name.empty() ? pluginPath.stem().string() : assignment.vst3.name;
@@ -16708,6 +18968,31 @@ namespace mw::gui
                 liveNote.durationTicks = note.durationTicks;
                 managed.notes.push_back(liveNote);
             }
+
+            managed.controllers.reserve(track.getMidiControllerEvents().size());
+            for (const auto& event : track.getMidiControllerEvents())
+                managed.controllers.push_back({ event.stableId, event.tick, event.midiChannel, event.controller, event.value });
+            managed.pitchBends.reserve(track.getMidiPitchBendEvents().size());
+            for (const auto& event : track.getMidiPitchBendEvents())
+                managed.pitchBends.push_back({ event.stableId, event.tick, event.midiChannel, event.value });
+            managed.programChanges.reserve(track.getMidiProgramChangeEvents().size());
+            for (const auto& event : track.getMidiProgramChangeEvents())
+                managed.programChanges.push_back({ event.stableId, event.tick, event.midiChannel, event.program });
+            managed.channelPressures.reserve(track.getMidiChannelPressureEvents().size());
+            for (const auto& event : track.getMidiChannelPressureEvents())
+                managed.channelPressures.push_back({ event.stableId, event.tick, event.midiChannel, event.pressure });
+            managed.polyPressures.reserve(track.getMidiPolyPressureEvents().size());
+            for (const auto& event : track.getMidiPolyPressureEvents())
+                managed.polyPressures.push_back({ event.stableId, event.tick, event.midiChannel, event.noteNumber, event.pressure });
+            managed.controller14Bits.reserve(track.getMidi14BitControllerEvents().size());
+            for (const auto& event : track.getMidi14BitControllerEvents())
+                managed.controller14Bits.push_back({ event.stableId, event.tick, event.midiChannel, event.controllerMsb, event.value });
+            managed.rpns.reserve(track.getMidiRpnEvents().size());
+            for (const auto& event : track.getMidiRpnEvents())
+                managed.rpns.push_back({ event.stableId, event.tick, event.midiChannel, event.parameter, event.value });
+            managed.nrpns.reserve(track.getMidiNrpnEvents().size());
+            for (const auto& event : track.getMidiNrpnEvents())
+                managed.nrpns.push_back({ event.stableId, event.tick, event.midiChannel, event.parameter, event.value });
 
             managed.bridgeConfig.trackIndex = index;
             managed.bridgeConfig.trackName = track.getName();
@@ -16776,6 +19061,9 @@ namespace mw::gui
             managed.trackName = track.getName();
             managed.outputGain = mw::audio::sanitizeMainUiGain(
                 static_cast<float>(static_cast<double>(track.getMixerSettings().volume) * masterVolumeSlider.getValue()));
+            managed.liveMidiInput = midiRecordingPlaybackPending
+                && midiRecordingArmedProjectId == currentProject->getStableId()
+                && midiRecordingArmedTrackId == track.getStableId();
             managed.sessionConfig.plugin = assignment.vst3;
             managed.sessionConfig.sampleRate = sampleRate;
             managed.sessionConfig.channelCount = channelCount;
@@ -16792,6 +19080,31 @@ namespace mw::gui
                 liveNote.durationTicks = note.durationTicks;
                 managed.notes.push_back(liveNote);
             }
+
+            managed.controllers.reserve(track.getMidiControllerEvents().size());
+            for (const auto& event : track.getMidiControllerEvents())
+                managed.controllers.push_back({ event.stableId, event.tick, event.midiChannel, event.controller, event.value });
+            managed.pitchBends.reserve(track.getMidiPitchBendEvents().size());
+            for (const auto& event : track.getMidiPitchBendEvents())
+                managed.pitchBends.push_back({ event.stableId, event.tick, event.midiChannel, event.value });
+            managed.programChanges.reserve(track.getMidiProgramChangeEvents().size());
+            for (const auto& event : track.getMidiProgramChangeEvents())
+                managed.programChanges.push_back({ event.stableId, event.tick, event.midiChannel, event.program });
+            managed.channelPressures.reserve(track.getMidiChannelPressureEvents().size());
+            for (const auto& event : track.getMidiChannelPressureEvents())
+                managed.channelPressures.push_back({ event.stableId, event.tick, event.midiChannel, event.pressure });
+            managed.polyPressures.reserve(track.getMidiPolyPressureEvents().size());
+            for (const auto& event : track.getMidiPolyPressureEvents())
+                managed.polyPressures.push_back({ event.stableId, event.tick, event.midiChannel, event.noteNumber, event.pressure });
+            managed.controller14Bits.reserve(track.getMidi14BitControllerEvents().size());
+            for (const auto& event : track.getMidi14BitControllerEvents())
+                managed.controller14Bits.push_back({ event.stableId, event.tick, event.midiChannel, event.controllerMsb, event.value });
+            managed.rpns.reserve(track.getMidiRpnEvents().size());
+            for (const auto& event : track.getMidiRpnEvents())
+                managed.rpns.push_back({ event.stableId, event.tick, event.midiChannel, event.parameter, event.value });
+            managed.nrpns.reserve(track.getMidiNrpnEvents().size());
+            for (const auto& event : track.getMidiNrpnEvents())
+                managed.nrpns.push_back({ event.stableId, event.tick, event.midiChannel, event.parameter, event.value });
 
             managed.bridgeConfig.trackIndex = index;
             managed.bridgeConfig.trackName = track.getName();
@@ -16852,11 +19165,19 @@ namespace mw::gui
             }
         }
 
+        const auto timeSignature = currentProject->getTimeSignature();
+        const auto recordingMetronome = mw::midi::makeMidiRecordingMetronomeConfig(
+            (midiRecordingPlaybackPending || midiRecordingLoopRunState.isActive()) && midiRecordingMetronomeEnabled,
+            currentProject->getTempoBpm(),
+            timeSignature.numerator,
+            timeSignature.denominator);
         auto startResult = mixedLiveProjectPreviewEngine.start(
             clapLiveProjectTrackSessionManager.makeDirectPreviewRequests(),
             vstLiveProjectTrackSessionManager.makeDirectPreviewRequests(),
             std::move(audioSources),
-            channelCount);
+            channelCount,
+            recordingMetronome,
+            std::max(0.0, pendingPianoRollPreviewStartSeconds));
         if (!startResult.started)
         {
             const auto reason = startResult.errorMessage.isNotEmpty()
@@ -16885,6 +19206,16 @@ namespace mw::gui
         clapLiveDirectPreviewProjectMode = true;
         clapLiveTransportGeneration = transportGeneration;
 
+        if (midiRecordingPlaybackPending && !beginMidiRecordingSessionForActivePlayback())
+        {
+            logMessage("MIDI Recording: project playback started, but capture could not be synchronized to the transport; stopping playback.");
+            stopClapInstrumentLiveAudition(true);
+            stopVstInstrumentLiveAudition(true);
+            midiRecordingPlaybackPending = false;
+            midiRecordingOwnsProjectPlayback = false;
+            return false;
+        }
+
         setPianoRollPreviewNoteMapFromTracks(tracks);
         setPianoRollPreviewAudioClipMapFromClips(currentProject->getAudioClips());
         lastPianoRollPreviewScope = 3;
@@ -16901,12 +19232,20 @@ namespace mw::gui
             previewStartBeat);
         openPianoRollPreviewPlayerWindow();
 
-        renderStatusLabel.setText(
-            hybridMode
-                ? "Preview Project: mixed live playback with prepared sources."
-                : "Preview Project: native mixed CLAP/VST3 playback.",
-            juce::dontSendNotification);
-        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+        if (midiRecordingSession.isRecording() && midiRecordingOwnsProjectPlayback)
+        {
+            renderStatusLabel.setText("MIDI recording with project playback.", juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+        }
+        else
+        {
+            renderStatusLabel.setText(
+                hybridMode
+                    ? "Preview Project: mixed live playback with prepared sources."
+                    : "Preview Project: native mixed CLAP/VST3 playback.",
+                juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+        }
 
         logMessage("Project Preview Transport: state Playing, generation "
             + juce::String(static_cast<juce::int64>(transportGeneration))
@@ -17115,6 +19454,11 @@ namespace mw::gui
 
     void MainComponent::stopLivePlaybackBeforeProjectMutation()
     {
+        if ((midiRecordingCountInState.isActive() || midiRecordingPlaybackPending || midiRecordingPunchRunState.isPreRoll())
+            && !midiRecordingSession.isRecording())
+            stopMidiRecording(false);
+        stopLiveMidiMonitoring(true);
+
         if (clapLiveTransportGeneration == 0
             && vstLiveTransportGeneration == 0
             && !mixedLiveProjectPreviewEngine.isActive()
@@ -17196,6 +19540,12 @@ namespace mw::gui
 
             const bool hadFailure = status.hadFailure;
             const auto statusMessage = status.toStatusMessage();
+            if (midiRecordingSession.isRecording() && midiRecordingOwnsProjectPlayback)
+            {
+                logMessage("MIDI Recording: project backing playback reached its end; finalizing the active take.");
+                stopMidiRecording(true);
+                return;
+            }
             stopClapInstrumentLiveAudition(true);
             stopVstInstrumentLiveAudition(true);
 
@@ -18142,6 +20492,7 @@ namespace mw::gui
     {
         int closedCount = 0;
 
+        stopLiveMidiMonitoring(true);
         stopClapInstrumentLiveAudition(true);
         stopVstInstrumentLiveAudition(true);
         disarmClapLiveEngineSession(false);
@@ -18219,6 +20570,16 @@ namespace mw::gui
         closeNonOwnedWindow(rawNotesWindow, rawNotesContent);
         closeNonOwnedWindow(projectInfoWindow, projectInfoContent);
         closeNonOwnedWindow(renderSettingsWindow, renderSettingsContent);
+        closeNonOwnedWindow(audioSettingsWindow, audioSettingsContent);
+        closeNonOwnedWindow(midiInputSettingsWindow, midiInputSettingsContent);
+        closeOwnedWindow(midiControllerLaneWindow);
+        closeOwnedWindow(midiPitchBendLaneWindow);
+        closeOwnedWindow(midiProgramChangeLaneWindow);
+        closeOwnedWindow(midiChannelPressureLaneWindow);
+        closeOwnedWindow(midiPolyPressureLaneWindow);
+        closeOwnedWindow(midi14BitControllerLaneWindow);
+        closeOwnedWindow(midiParameterLaneWindow);
+        closeNonOwnedWindow(pendingTakeReviewsWindow, pendingTakeReviewsContent);
 
         closeOwnedWindow(sequencePickerWindow);
         closeOwnedWindow(sequenceThoughtsWindow);
@@ -18324,7 +20685,9 @@ namespace mw::gui
         themeLabel.setBounds(topButtons.removeFromLeft(65));
         themeCombo.setBounds(topButtons.removeFromLeft(230).reduced(4, 2));
         area.removeFromTop(4);
-        renderTargetLabel.setBounds(area.removeFromTop(24).reduced(4, 2));
+        auto renderTargetRow = area.removeFromTop(28);
+        pendingTakeReviewsButton.setBounds(renderTargetRow.removeFromRight(175).reduced(4, 2));
+        renderTargetLabel.setBounds(renderTargetRow.reduced(4, 2));
         area.removeFromTop(4);
 
         auto topArea = area.removeFromTop(290);
@@ -18382,6 +20745,7 @@ namespace mw::gui
         auto noteHeader = area.removeFromTop(rowHeight);
         noteEditorLabel.setBounds(noteHeader.removeFromLeft(labelWidth));
         openPianoRollButton.setBounds(noteHeader.removeFromLeft(140).reduced(4, 2));
+        midiControllerLaneButton.setBounds(noteHeader.removeFromLeft(145).reduced(4, 2));
         audioClipEditorButton.setBounds(noteHeader.removeFromLeft(145).reduced(4, 2));
         trackManagerButton.setBounds(noteHeader.removeFromLeft(130).reduced(4, 2));
         importAudioButton.setBounds(noteHeader.removeFromLeft(120).reduced(4, 2));
@@ -18528,7 +20892,7 @@ namespace mw::gui
         const auto midiPath = mw::exporting::ExportPathBuilder::buildMidiPath(settings);
         const auto wavPath = mw::exporting::ExportPathBuilder::buildWavPath(settings);
 
-        if (!mw::midi::MidiExporter::exportToFile(testProject, midiPath))
+        if (!mw::midi::MidiExporter::exportToFile(testProject, midiPath, { mw::midi::MidiExportPurpose::InternalRender }))
         {
             logMessage("ERROR: Failed to create SFZ test MIDI.");
             return;
@@ -18672,6 +21036,20 @@ namespace mw::gui
 
     void MainComponent::resetProjectWorkspace()
     {
+        stopLiveMidiMonitoring(true);
+        midiRecordingSession.cancel();
+        midiRecordingPunchRunState.cancel();
+        clearMidiRecordingLoopSession();
+        midiRecordingPunchEnabled = false;
+        midiRecordingLoopEnabled = false;
+        midiRecordingPunchProjectId = 0;
+        midiRecordingPunchInTick = -1;
+        midiRecordingPunchOutTick = -1;
+        midiRecordingArmedProjectId = 0;
+        midiRecordingArmedTrackId = 0;
+        midiRecordingArmedTrackIndex = -1;
+        midiRecordingUndoStack.clear();
+        midiRecordingRedoStack.clear();
         stopClapInstrumentLiveAudition(true);
         stopVstInstrumentLiveAudition(true);
         playbackTransportCoordinator.reset();
@@ -18943,7 +21321,8 @@ namespace mw::gui
                 captureProjectUserSettings();
                 seedMissingTrackSoundLibrariesFromProjectDefaults(*currentProject);
 
-                refreshTrackSelector();
+                refreshTrackSelector({});
+                syncTrackManagerSelectionFromCurrentTrack(false, false);
                 syncTrackInspectorFromSelection();
                 tempoBox.setText(juce::String(currentProject->getTempoBpm()), juce::dontSendNotification);
                 juce::String ts;
@@ -19132,6 +21511,7 @@ namespace mw::gui
 
     void MainComponent::setProjectDirty(bool shouldBeDirty)
     {
+        refreshPendingTakeReviewsUi();
         if (shouldBeDirty && suppressDirtyTracking)
             return;
 
@@ -19160,6 +21540,8 @@ namespace mw::gui
             {
                 suppressDirtyTracking = false;
                 clearProjectDirty();
+                restorePersistentMidiTakeReviewForSelectedTrack();
+                refreshMidiRecordingUi();
             }
         );
     }
@@ -19453,6 +21835,7 @@ namespace mw::gui
         state.sequenceMapFirstIndex = sequenceMapFirstIndex;
         state.sequenceMapStartBeat = sequenceMapStartBeat;
         state.sequenceMapBeatWindow = sequenceMapBeatWindow;
+        state.trackSelection = captureCurrentTrackSelection();
         state.label = actionLabel;
 
         trackManagerUndoStack.push_back(std::move(state));
@@ -19487,6 +21870,7 @@ namespace mw::gui
         redoState.sequenceMapFirstIndex = sequenceMapFirstIndex;
         redoState.sequenceMapStartBeat = sequenceMapStartBeat;
         redoState.sequenceMapBeatWindow = sequenceMapBeatWindow;
+        redoState.trackSelection = captureCurrentTrackSelection();
         redoState.label = state.label;
 
         trackManagerRedoStack.push_back(std::move(redoState));
@@ -19507,14 +21891,8 @@ namespace mw::gui
         trackManagerMapStartBeatBox.setText(juce::String(sequenceMapStartBeat), juce::dontSendNotification);
         trackManagerMapBeatWindowBox.setText(sequenceMapBeatWindow <= 0 ? juce::String("Full") : juce::String(sequenceMapBeatWindow), juce::dontSendNotification);
 
-        refreshTrackSelector();
-
-        if (currentProject && !currentProject->getTracks().empty())
-        {
-            const auto selectedId = std::clamp(trackCombo.getSelectedId(), 1, static_cast<int>(currentProject->getTracks().size()));
-            trackCombo.setSelectedId(selectedId, juce::sendNotification);
-        }
-
+        refreshTrackSelector(state.trackSelection);
+        syncTrackManagerSelectionFromCurrentTrack(false, false);
         syncTrackInspectorFromSelection();
         refreshNoteEditor();
         syncPianoRollFromSelectedTrack();
@@ -19558,6 +21936,7 @@ namespace mw::gui
         undoState.sequenceMapFirstIndex = sequenceMapFirstIndex;
         undoState.sequenceMapStartBeat = sequenceMapStartBeat;
         undoState.sequenceMapBeatWindow = sequenceMapBeatWindow;
+        undoState.trackSelection = captureCurrentTrackSelection();
         undoState.label = state.label;
 
         trackManagerUndoStack.push_back(std::move(undoState));
@@ -19578,14 +21957,8 @@ namespace mw::gui
         trackManagerMapStartBeatBox.setText(juce::String(sequenceMapStartBeat), juce::dontSendNotification);
         trackManagerMapBeatWindowBox.setText(sequenceMapBeatWindow <= 0 ? juce::String("Full") : juce::String(sequenceMapBeatWindow), juce::dontSendNotification);
 
-        refreshTrackSelector();
-
-        if (currentProject && !currentProject->getTracks().empty())
-        {
-            const auto selectedId = std::clamp(trackCombo.getSelectedId(), 1, static_cast<int>(currentProject->getTracks().size()));
-            trackCombo.setSelectedId(selectedId, juce::sendNotification);
-        }
-
+        refreshTrackSelector(state.trackSelection);
+        syncTrackManagerSelectionFromCurrentTrack(false, false);
         syncTrackInspectorFromSelection();
         refreshNoteEditor();
         syncPianoRollFromSelectedTrack();
@@ -19708,6 +22081,11 @@ namespace mw::gui
             const auto& src = currentTracks[static_cast<std::size_t>(index)];
 
             dst.getNotes() = src.getNotes();
+            dst.setMidiControllerEvents(src.getMidiControllerEvents());
+            dst.setMidiPitchBendEvents(src.getMidiPitchBendEvents());
+            dst.setMidiProgramChangeEvents(src.getMidiProgramChangeEvents());
+            dst.setMidiChannelPressureEvents(src.getMidiChannelPressureEvents());
+            dst.setMidiPolyPressureEvents(src.getMidiPolyPressureEvents());
             dst.setInstrumentAssignment(src.getInstrument());
             dst.getMixerSettings() = src.getMixerSettings();
             dst.setMuted(src.getMuted());
@@ -19751,6 +22129,7 @@ namespace mw::gui
             return;
         }
 
+        const auto selectionBeforeDiscard = captureCurrentTrackSelection();
         auto restoredProject = *trackManagerSessionProjectSnapshot;
         preserveExternalTrackStateUpdates(restoredProject);
         if (currentProject)
@@ -19768,13 +22147,8 @@ namespace mw::gui
         trackManagerMapStartBeatBox.setText(juce::String(sequenceMapStartBeat), juce::dontSendNotification);
         trackManagerMapBeatWindowBox.setText(sequenceMapBeatWindow <= 0 ? juce::String("Full") : juce::String(sequenceMapBeatWindow), juce::dontSendNotification);
 
-        refreshTrackSelector();
-        if (currentProject && !currentProject->getTracks().empty())
-        {
-            const auto selectedId = std::clamp(trackCombo.getSelectedId(), 1, static_cast<int>(currentProject->getTracks().size()));
-            trackCombo.setSelectedId(selectedId, juce::sendNotification);
-        }
-
+        refreshTrackSelector(selectionBeforeDiscard);
+        syncTrackManagerSelectionFromCurrentTrack(false, false);
         syncTrackInspectorFromSelection();
         refreshNoteEditor();
         syncPianoRollFromSelectedTrack();
@@ -20061,6 +22435,17 @@ namespace mw::gui
         if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
             return;
 
+        const auto selectedTrackStableId = currentProject->getTracks()[static_cast<std::size_t>(index)].getStableId();
+        if (selectedTrackStableId == midiRecordingArmedTrackId)
+        {
+            if (isMidiRecordingBusy())
+                stopMidiRecording(true);
+            midiRecordingArmedProjectId = 0;
+            midiRecordingArmedTrackId = 0;
+            midiRecordingArmedTrackIndex = -1;
+            refreshMidiRecordingUi();
+        }
+
         if (findPianoRollEditorWindow(index) != nullptr)
         {
             juce::AlertWindow::showMessageBoxAsync(
@@ -20234,7 +22619,6 @@ namespace mw::gui
 
                         suppressTrackComboSwitchPrompt = true;
                         refreshTrackSelector();
-                        trackCombo.setSelectedId(index + 1, juce::dontSendNotification);
                         suppressTrackComboSwitchPrompt = false;
 
                         syncTrackInspectorFromSelection();
@@ -20761,7 +23145,8 @@ void MainComponent::importMusicXmlOnly()
             captureProjectUserSettings();
         }
 
-        refreshTrackSelector();
+        refreshTrackSelector({});
+        syncTrackManagerSelectionFromCurrentTrack(false, false);
         syncTrackInspectorFromSelection();
         tempoBox.setText(juce::String(currentProject->getTempoBpm()), juce::dontSendNotification);
         pianoRollBpmBox.setText(juce::String(currentProject->getTempoBpm()), juce::dontSendNotification);
@@ -20820,8 +23205,7 @@ void MainComponent::importMusicXmlOnly()
 
     void MainComponent::clearAudioRecordingSessionStaging(bool removeFiles)
     {
-        if (audioClipRecorder && audioClipRecorder->isRecording())
-            audioClipRecorder->stop();
+        stopAudioClipRecorder();
 
         if (removeFiles && audioRecordingSessionFolderPath && !audioRecordingSessionFolderPath->empty())
         {
@@ -21541,7 +23925,7 @@ void MainComponent::openAudioRecorderWindow()
             return;
         }
 
-        audioClipRecorder = std::make_unique<mw::audio::AudioClipRecorder>();
+        audioClipRecorder = std::make_unique<mw::audio::AudioClipRecorder>(applicationAudioService);
         audioRecordingTakeStopped = false;
         audioRecordingTakeDirty = false;
 
@@ -21588,8 +23972,19 @@ void MainComponent::openAudioRecorderWindow()
         if (content == nullptr)
             return;
 
+        if (audioClipRecorder->isRecording())
+        {
+            logMessage("AudioClip Recorder: stop the active recording before refreshing input devices.");
+            return;
+        }
+
+        stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
         const auto devices = audioClipRecorder->getAvailableInputDeviceNames();
-        content->setInputDevices(devices, audioClipRecorder->getPreferredInputDeviceName());
+
+        const auto configuredInput = applicationAudioService.currentConfiguration().inputDeviceName;
+        audioClipRecorder->setPreferredInputDeviceName(configuredInput);
+        content->setInputDevices(devices, configuredInput);
         if (devices.isEmpty())
             logMessage("AudioClip Recorder: no input devices detected. Connect/enable a microphone, then click Refresh Devices.");
         else
@@ -21610,10 +24005,15 @@ void MainComponent::openAudioRecorderWindow()
             return;
         }
 
-        audioClipRecorder->setPreferredInputDeviceName(deviceName);
-        logMessage(deviceName.isEmpty()
-            ? juce::String("AudioClip Recorder input set to System Default.")
-            : juce::String("AudioClip Recorder input set to: ") + deviceName);
+        auto configuration = applicationAudioService.currentConfiguration();
+        configuration.inputDeviceName = deviceName;
+        applyAudioConfigurationAndPersist(configuration, true);
+        const auto acceptedInput = applicationAudioService.currentConfiguration().inputDeviceName;
+        audioClipRecorder->setPreferredInputDeviceName(acceptedInput);
+
+        logMessage(acceptedInput.isEmpty()
+            ? juce::String("AudioClip Recorder input is using the accepted System Default selection from Audio Settings.")
+            : juce::String("AudioClip Recorder accepted input from Audio Settings: ") + acceptedInput);
         refreshAudioRecorderWindowStatus();
     }
 
@@ -21732,6 +24132,12 @@ void MainComponent::openAudioRecorderWindow()
 
 
 
+    void MainComponent::stopAudioClipRecorder()
+    {
+        if (audioClipRecorder && audioClipRecorder->isRecording())
+            audioClipRecorder->stop();
+    }
+
     void MainComponent::startAudioRecorderTest()
     {
         if (audioRecorderTestActive || audioRecorderTestPlaybackActive)
@@ -21766,15 +24172,21 @@ void MainComponent::openAudioRecorderWindow()
         audioRecorderTestTempWavPath = mw::audio::AudioClipImporter::makeUniqueMediaPath(tempFolder, "recording_test", mw::core::AudioClipSavedFormat::Wav);
 
         if (!audioClipRecorder)
-            audioClipRecorder = std::make_unique<mw::audio::AudioClipRecorder>();
+            audioClipRecorder = std::make_unique<mw::audio::AudioClipRecorder>(applicationAudioService);
         audioClipRecorder->setInputGainDb(audioRecorderMicGainDb);
 
         const int selectedEffectTrackIndex = getSelectedTrackIndex();
         auto liveEffectOptions = buildAudioRecorderLiveEffectOptions(selectedEffectTrackIndex, selectedEffectTrackIndex);
         liveEffectOptions.writeEffectToOutputFile = liveEffectOptions.enabled;
         audioRecorderTestPlaybackGain = liveEffectOptions.monitorOutputGain;
+
+        // Recording becomes the sole shared hardware callback owner. Detach any
+        // normal live preview first, matching the established transport rule.
+        stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
+
         const auto startResult = audioClipRecorder->startRecording(audioRecorderTestTempWavPath,
-                                                                    channelsCombo.getSelectedId() == 1 ? 1 : 2,
+                                                                    applicationAudioService.configuredRecordingChannelCount(),
                                                                     24,
                                                                     liveEffectOptions);
         if (!startResult.success)
@@ -21813,8 +24225,7 @@ void MainComponent::openAudioRecorderWindow()
         if (!audioRecorderTestActive)
             return;
 
-        if (audioClipRecorder && audioClipRecorder->isRecording())
-            audioClipRecorder->stop();
+        stopAudioClipRecorder();
 
         audioRecorderTestActive = false;
         audioRecorderTestPlaybackActive = false;
@@ -21828,11 +24239,12 @@ void MainComponent::openAudioRecorderWindow()
         if (audioRecorderTestReaderSource)
         {
             audioRecorderTestTransport.stop();
+            applicationAudioService.deactivateOutputCallback(
+                mw::audio::ApplicationAudioPlaybackOwner::RecordTestPlayback,
+                &audioRecorderTestSourcePlayer);
             audioRecorderTestSourcePlayer.setSource(nullptr);
-            audioRecorderTestPlaybackDeviceManager.removeAudioCallback(&audioRecorderTestSourcePlayer);
             audioRecorderTestTransport.setSource(nullptr);
             audioRecorderTestReaderSource.reset();
-            audioRecorderTestPlaybackDeviceManager.closeAudioDevice();
             audioRecorderTestPlaybackActive = false;
         }
 
@@ -21859,16 +24271,17 @@ void MainComponent::openAudioRecorderWindow()
         audioRecorderTestReaderSource = std::make_unique<juce::AudioFormatReaderSource>(reader.release(), true);
         audioRecorderTestTransport.setSource(audioRecorderTestReaderSource.get(), 0, nullptr, readerSampleRate);
 
-        const auto initError = audioRecorderTestPlaybackDeviceManager.initialise(0, 2, nullptr, true);
-        if (initError.isNotEmpty())
+        audioRecorderTestSourcePlayer.setSource(&audioRecorderTestTransport);
+        const auto activation = applicationAudioService.activateOutputCallback(
+            mw::audio::ApplicationAudioPlaybackOwner::RecordTestPlayback,
+            &audioRecorderTestSourcePlayer);
+        if (!activation.success)
         {
-            logMessage("AudioClip Record Test: playback device did not open; deleting temp file. " + initError);
+            audioRecorderTestSourcePlayer.setSource(nullptr);
+            logMessage("AudioClip Record Test: playback device did not open; deleting temp file. " + activation.message);
             stopAudioRecorderTestPlaybackAndCleanup(testPath);
             return;
         }
-
-        audioRecorderTestSourcePlayer.setSource(&audioRecorderTestTransport);
-        audioRecorderTestPlaybackDeviceManager.addAudioCallback(&audioRecorderTestSourcePlayer);
         audioRecorderTestTransport.setPosition(0.0);
         audioRecorderTestTransport.setGain(audioRecorderTestPlaybackGain);
         audioRecorderTestPlaybackActive = true;
@@ -21889,11 +24302,12 @@ void MainComponent::openAudioRecorderWindow()
         if (audioRecorderTestPlaybackActive || audioRecorderTestReaderSource)
         {
             audioRecorderTestTransport.stop();
+            applicationAudioService.deactivateOutputCallback(
+                mw::audio::ApplicationAudioPlaybackOwner::RecordTestPlayback,
+                &audioRecorderTestSourcePlayer);
             audioRecorderTestSourcePlayer.setSource(nullptr);
-            audioRecorderTestPlaybackDeviceManager.removeAudioCallback(&audioRecorderTestSourcePlayer);
             audioRecorderTestTransport.setSource(nullptr);
             audioRecorderTestReaderSource.reset();
-            audioRecorderTestPlaybackDeviceManager.closeAudioDevice();
         }
 
         std::error_code ec;
@@ -21913,8 +24327,8 @@ void MainComponent::openAudioRecorderWindow()
 
     void MainComponent::cancelAudioRecorderTestAndCleanup()
     {
-        if (audioRecorderTestActive && audioClipRecorder && audioClipRecorder->isRecording())
-            audioClipRecorder->stop();
+        if (audioRecorderTestActive)
+            stopAudioClipRecorder();
 
         audioRecorderTestActive = false;
         stopAudioRecorderTestPlaybackAndCleanup(audioRecorderTestTempWavPath);
@@ -22190,8 +24604,7 @@ void MainComponent::openAudioRecorderWindow()
             return;
         }
 
-        if (audioClipRecorder && audioClipRecorder->isRecording())
-            audioClipRecorder->stop();
+        stopAudioClipRecorder();
 
         std::error_code ec;
         std::filesystem::remove(activeRecordingTempWavPath, ec);
@@ -22212,10 +24625,19 @@ void MainComponent::openAudioRecorderWindow()
         audioRecordingTakeDirty = true;
 
         if (!audioClipRecorder)
-            audioClipRecorder = std::make_unique<mw::audio::AudioClipRecorder>();
+            audioClipRecorder = std::make_unique<mw::audio::AudioClipRecorder>(applicationAudioService);
 
         const auto liveEffectOptions = buildAudioRecorderLiveEffectOptions(trackIndex, trackIndex);
-        const auto startResult = audioClipRecorder->startRecording(activeRecordingTempWavPath, channelsCombo.getSelectedId() == 1 ? 1 : 2, 24, liveEffectOptions);
+
+        // Recording becomes the sole shared hardware callback owner. Detach any
+        // normal live preview before enabling shared input and wet monitoring.
+        stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
+
+        const auto startResult = audioClipRecorder->startRecording(activeRecordingTempWavPath,
+                                                                    applicationAudioService.configuredRecordingChannelCount(),
+                                                                    24,
+                                                                    liveEffectOptions);
         if (!startResult.success)
         {
             logMessage(juce::String("ERROR: AudioClip recording did not start: ") + startResult.message);
@@ -22337,7 +24759,7 @@ void MainComponent::openAudioRecorderWindow()
             return;
         }
 
-        audioClipRecorder->stop();
+        stopAudioClipRecorder();
         activeRecordingSourceWavPath = activeRecordingTempWavPath;
         audioRecordingTakeStopped = true;
         audioRecordingTakeDirty = true;
@@ -22441,8 +24863,7 @@ void MainComponent::openAudioRecorderWindow()
             return;
         }
 
-        if (audioClipRecorder && audioClipRecorder->isRecording())
-            audioClipRecorder->stop();
+        stopAudioClipRecorder();
 
         std::error_code ec;
         if (!activeRecordingTempWavPath.empty())
@@ -22465,8 +24886,7 @@ void MainComponent::openAudioRecorderWindow()
             return;
         }
 
-        if (audioClipRecorder && audioClipRecorder->isRecording())
-            audioClipRecorder->stop();
+        stopAudioClipRecorder();
 
         std::error_code ec;
         if (!activeRecordingTempWavPath.empty())
@@ -22541,8 +24961,7 @@ void MainComponent::openAudioRecorderWindow()
             {
                 cancelAudioRecorderTestAndCleanup();
 
-                if (audioClipRecorder && audioClipRecorder->isRecording())
-                    audioClipRecorder->stop();
+                stopAudioClipRecorder();
 
                 if (audioRecorderWindow != nullptr)
                 {
@@ -22623,6 +25042,7 @@ void MainComponent::openAudioRecorderWindow()
         if (!currentProject)
             return;
 
+        stopLiveMidiMonitoring(true);
         applyTrackInspector();
         captureProjectUserSettings();
 
@@ -22640,7 +25060,7 @@ void MainComponent::openAudioRecorderWindow()
 
         const auto midiPath = mw::exporting::ExportPathBuilder::buildMidiPath(exportSettings);
 
-        if (mw::midi::MidiExporter::exportToFile(job.project, midiPath))
+        if (mw::midi::MidiExporter::exportToFile(job.project, midiPath, { mw::midi::MidiExportPurpose::UserMidiExport }))
         {
             logMessage("Rendered MIDI: " + midiPath.string());
             renderStatusLabel.setText("MIDI rendered.", juce::dontSendNotification);
@@ -22706,6 +25126,7 @@ void MainComponent::openAudioRecorderWindow()
         if (!currentProject)
             return;
 
+        stopLiveMidiMonitoring(true);
         applyTrackInspector();
 
         if (appliedProjectBackendId == 2 && !mw::app::UserPreferencesStore::load().suppressSfzRenderWarning)
@@ -22771,6 +25192,8 @@ void MainComponent::openAudioRecorderWindow()
                         if (result.cancelled)
                         {
                             logMessage("Render cancelled: " + label);
+                            if (midiRecordingPlaybackPending)
+                                stopMidiRecording(false);
                         }
                         else if (result.success)
                         {
@@ -22794,7 +25217,55 @@ void MainComponent::openAudioRecorderWindow()
                                     if (!result.finalAudioPath.empty() && result.finalAudioPath != result.wavPath)
                                         generatedPreviewFiles.push_back(result.finalAudioPath);
 
-                                    lastPianoRollPreviewWavPath = result.finalAudioPath;
+                                    std::filesystem::path previewPlaybackPath = result.finalAudioPath;
+                                    if (midiRecordingPlaybackPending && midiRecordingMetronomeEnabled && currentProject)
+                                    {
+                                        const auto timeSignature = currentProject->getTimeSignature();
+                                        const auto metronomeConfig = mw::midi::makeMidiRecordingMetronomeConfig(
+                                            true,
+                                            currentProject->getTempoBpm(),
+                                            timeSignature.numerator,
+                                            timeSignature.denominator);
+                                        const auto metronomePath = result.finalAudioPath.parent_path()
+                                            / (result.finalAudioPath.stem().string() + "_midi_recording_metronome.wav");
+                                        double metronomeStartSeconds = std::max(0.0, midiRecordingRequestedStartSeconds);
+                                        double metronomeEndSeconds = std::numeric_limits<double>::infinity();
+                                        if (midiRecordingPunchRunState.isActive())
+                                        {
+                                            const auto region = midiRecordingPunchRunState.region();
+                                            if (mw::midi::isValidMidiRecordingPunchRegion(region))
+                                            {
+                                                metronomeStartSeconds = mw::midi::midiRecordingProjectSecondsForTick(
+                                                    region.inTick, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+                                                metronomeEndSeconds = mw::midi::midiRecordingProjectSecondsForTick(
+                                                    region.outTick, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+                                            }
+                                        }
+                                        std::string metronomeError;
+                                        if (!mw::midi::createMidiRecordingMetronomeBackingWav(
+                                                result.finalAudioPath,
+                                                metronomePath,
+                                                metronomeConfig,
+                                                metronomeStartSeconds,
+                                                metronomeEndSeconds,
+                                                metronomeError))
+                                        {
+                                            logMessage("MIDI Recording: continuous metronome backing could not be prepared: "
+                                                + juce::String(metronomeError));
+                                            stopMidiRecording(false);
+                                            setRenderingState(false);
+                                            return;
+                                        }
+                                        midiRecordingMetronomeBasePreviewWavPath = result.finalAudioPath;
+                                        midiRecordingMetronomePreviewWavPath = metronomePath;
+                                        generatedPreviewFiles.push_back(metronomePath);
+                                        previewPlaybackPath = metronomePath;
+                                        logMessage(midiRecordingPunchRunState.isActive()
+                                            ? "MIDI Recording Punch: prepared temporary rendered backing with metronome clicks limited to the punch capture region. Project/render media was not modified."
+                                            : "MIDI Recording: prepared temporary rendered backing with continuous metronome clicks. Project/render media was not modified.");
+                                    }
+
+                                    lastPianoRollPreviewWavPath = previewPlaybackPath;
                                     lastPianoRollPreviewTempoBpm = pianoRollBpmBox.getText().getDoubleValue() > 0.0
                                         ? pianoRollBpmBox.getText().getDoubleValue()
                                         : 120.0;
@@ -22804,7 +25275,9 @@ void MainComponent::openAudioRecorderWindow()
                                         ? std::max(0.01, renderedPreviewSeconds * lastPianoRollPreviewTempoBpm / 60.0)
                                         : std::max(1.0, previewDurationBeats > 0.0 ? previewDurationBeats : static_cast<double>(getSelectedTrackEndBeat()));
                                     pianoRollPreviewPaused = false;
-                                    pendingPianoRollPreviewStartSeconds = 0.0;
+                                    pendingPianoRollPreviewStartSeconds = midiRecordingPlaybackPending
+                                        ? std::max(0.0, midiRecordingRequestedStartSeconds)
+                                        : 0.0;
 
                                     openPianoRollPreviewPlayerWindow();
                                     playPianoRollPreviewFile(lastPianoRollPreviewWavPath);
@@ -22814,12 +25287,16 @@ void MainComponent::openAudioRecorderWindow()
                                 else
                                 {
                                     logMessage("Preview player currently supports WAV files. Created: " + result.finalAudioPath.string());
+                                    if (midiRecordingPlaybackPending)
+                                        stopMidiRecording(false);
                                 }
                             }
                         }
                         else
                         {
                             logMessage("Render failed (" + label + "): " + result.message);
+                            if (midiRecordingPlaybackPending)
+                                stopMidiRecording(false);
                         }
 
                         setRenderingState(false);
@@ -22828,6 +25305,4759 @@ void MainComponent::openAudioRecorderWindow()
             }
         );
     }
+
+    void MainComponent::closeAudioSettingsWindow()
+    {
+        juce::MessageManager::callAsync(
+            [this]
+            {
+                if (audioSettingsWindow != nullptr)
+                    audioSettingsWindow->setContentOwned(nullptr, false);
+                audioSettingsWindow.reset();
+                audioSettingsContent.reset();
+            }
+        );
+    }
+
+    void MainComponent::stopRealtimeAudioForDeviceReconfiguration()
+    {
+        if (audioRecorderTestActive || audioRecorderTestPlaybackActive)
+            cancelAudioRecorderTestAndCleanup();
+
+        if (audioClipRecorder && audioClipRecorder->isRecording())
+            stopAudioRecordingTake();
+
+        stopLivePlaybackBeforeProjectMutation();
+    }
+
+    void MainComponent::applyAudioConfigurationAndPersist(
+        const mw::audio::ApplicationAudioConfiguration& configuration,
+        bool keepAudioSettingsWindowOpen)
+    {
+        stopRealtimeAudioForDeviceReconfiguration();
+        const auto result = applicationAudioService.applyConfiguration(configuration);
+
+        if (!result.success)
+        {
+            logMessage("ERROR: " + result.message);
+            if (auto* content = dynamic_cast<AudioSettingsContent*>(audioSettingsContent.get()))
+            {
+                content->setResultMessage(result.message);
+                content->refreshFromService();
+            }
+            return;
+        }
+
+        const auto& accepted = result.acceptedConfiguration;
+        const bool saved = mw::app::UserPreferencesStore::saveValues({
+            { "audioDeviceTypeName", accepted.deviceTypeName.toStdString() },
+            { "audioInputDeviceName", accepted.inputDeviceName.toStdString() },
+            { "audioOutputDeviceName", accepted.outputDeviceName.toStdString() },
+            { "audioSampleRate", std::to_string(static_cast<int>(std::lround(accepted.sampleRate))) },
+            { "audioBufferSize", std::to_string(accepted.bufferSize) },
+            { "audioInputMode", accepted.inputMode == mw::audio::ApplicationAudioInputMode::StereoAdjacent ? "2" : "1" },
+            { "audioInputChannelIndex", std::to_string(accepted.inputChannelIndex) }
+        });
+
+        if (audioClipRecorder)
+            audioClipRecorder->setPreferredInputDeviceName(accepted.inputDeviceName);
+
+        juce::String message = result.message
+            + " Accepted setup: " + applicationAudioService.currentDeviceSummary()
+            + " / " + applicationAudioService.configuredInputRoutingSummary() + ".";
+        if (!saved)
+            message += " WARNING: the accepted setup could not be written to user preferences.";
+        logMessage(message);
+
+        if (audioRecorderContent)
+        {
+            refreshAudioRecorderInputDevices();
+            refreshAudioRecorderWindowStatus();
+        }
+
+        if (auto* content = dynamic_cast<AudioSettingsContent*>(audioSettingsContent.get()))
+        {
+            content->setResultMessage(message);
+            content->refreshFromService();
+        }
+
+        if (!keepAudioSettingsWindowOpen)
+            closeAudioSettingsWindow();
+    }
+
+    void MainComponent::runSimulationRegressionTests()
+    {
+        const auto report = mw::simulation::runSimulationRegressionSuite();
+        const auto outputFolder = mw::app::AppPaths::workspaceFolder() / "simulation";
+        std::filesystem::path textPath;
+        std::filesystem::path jsonPath;
+        std::string writeError;
+        const bool wroteReports = mw::simulation::writeSimulationReports(
+            report, outputFolder, textPath, jsonPath, writeError);
+
+        std::vector<std::filesystem::path> artifactPaths;
+        std::string artifactError;
+        const bool wroteArtifacts = mw::simulation::writeSimulationArtifacts(
+            outputFolder, artifactPaths, artifactError);
+
+        juce::String summary = "Simulation / Regression: "
+            + juce::String(report.passedCount()) + " passed, "
+            + juce::String(report.failedCount()) + " failed, "
+            + juce::String(static_cast<int>(report.scenarios.size())) + " total.";
+
+        if (wroteReports)
+        {
+            summary += "\n\nResults:\n" + juce::String(textPath.string())
+                + "\n" + juce::String(jsonPath.string());
+        }
+        else
+        {
+            summary += "\n\nThe tests ran, but result files could not be written: "
+                + juce::String(writeError);
+        }
+
+        if (wroteArtifacts)
+            summary += "\n\nDeterministic WAV artifacts:\n"
+                + juce::String((outputFolder / "artifacts").string());
+        else
+            summary += "\n\nThe tests ran, but deterministic WAV artifacts could not be written: "
+                + juce::String(artifactError);
+
+        summary += "\n\nThis mode is deterministic and does not open physical audio/MIDI devices or third-party plugins.";
+        logMessage(summary.replaceCharacter('\n', ' '));
+
+        juce::AlertWindow::showMessageBoxAsync(
+            report.allPassed() && wroteReports && wroteArtifacts
+                ? juce::AlertWindow::InfoIcon
+                : juce::AlertWindow::WarningIcon,
+            "Simulation / Regression Tests",
+            summary,
+            "OK");
+    }
+
+    void MainComponent::openAudioSettingsWindow()
+    {
+        if (audioSettingsWindow != nullptr)
+        {
+            audioSettingsWindow->toFront(true);
+            return;
+        }
+
+        auto closeCallback = [this] { closeAudioSettingsWindow(); };
+        auto* window = new SequencePickerDocumentWindow("Audio Settings", closeCallback);
+        auto* content = new AudioSettingsContent(
+            applicationAudioService,
+            [this](const mw::audio::ApplicationAudioConfiguration& configuration)
+            {
+                applyAudioConfigurationAndPersist(configuration, true);
+            },
+            [this]
+            {
+                logMessage("Audio Settings cancelled.");
+                closeAudioSettingsWindow();
+            });
+
+        audioSettingsContent.reset(content);
+        window->setContentNonOwned(audioSettingsContent.get(), false);
+        window->centreWithSize(820, 510);
+        window->setVisible(true);
+        window->toFront(true);
+        audioSettingsWindow.reset(window);
+    }
+
+
+    void MainComponent::closeMidiInputSettingsWindow()
+    {
+        if (isMidiRecordingBusy())
+        {
+            const juce::String message = midiRecordingLoopTakeReviewState.isReviewActive()
+                ? juce::String("MIDI Recording Take Review: choose Keep Selected, Keep All, Keep Comp, or Discard before closing the recording window.")
+                : juce::String("MIDI Recording: the recording window stays open during Count-In, playback preparation, or an active take. Use Stop Recording first.");
+            logMessage(message);
+            if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+                content->updateStatus(message);
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        juce::MessageManager::callAsync(
+            [this]
+            {
+                if (midiInputSettingsWindow != nullptr)
+                    midiInputSettingsWindow->setContentOwned(nullptr, false);
+                midiInputSettingsWindow.reset();
+                midiInputSettingsContent.reset();
+            }
+        );
+    }
+
+    bool MainComponent::applyMidiInputSelectionAndPersist(const mw::midi::MidiInputSelection& selection)
+    {
+        // A channel/device change can filter the Note Off for a currently-held note.
+        // Release the current target before changing the physical MIDI route.
+        stopLiveMidiMonitoring(true);
+
+        const auto result = midiInputCoordinator.open(selection);
+        if (!result.success)
+        {
+            logMessage("ERROR: " + result.message);
+            if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+                content->updateStatus(result.message);
+            return false;
+        }
+
+        const auto& accepted = result.acceptedSelection;
+        const bool saved = mw::app::UserPreferencesStore::saveValues({
+            { "midiInputDeviceIdentifier", accepted.deviceIdentifier.toStdString() },
+            { "midiInputDeviceName", accepted.deviceName.toStdString() },
+            { "midiInputChannel", std::to_string(accepted.channel) }
+        });
+
+        juce::String message = result.message;
+        if (!saved)
+            message += " WARNING: the MIDI selection could not be written to user preferences.";
+        logMessage(message);
+
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+        {
+            content->refreshFromCoordinator();
+            content->updateStatus(message);
+        }
+        refreshMidiRecordingUi();
+        return true;
+    }
+
+
+    void MainComponent::refreshPendingTakeReviewIndicator()
+    {
+        const int count = currentProject
+            ? static_cast<int>(mw::midi::buildPendingMidiTakeReviewSummaries(*currentProject).size())
+            : 0;
+        pendingTakeReviewsButton.setButtonText("Pending Takes: " + juce::String(count));
+        pendingTakeReviewsButton.setTooltip(mw::midi::pendingTakeReviewsIndicatorTooltip);
+    }
+
+    void MainComponent::refreshPendingTakeReviewsUi(mw::core::StableId preferredTrackId,
+                                                     mw::core::StableId preferredSessionId)
+    {
+        refreshPendingTakeReviewIndicator();
+        auto* content = dynamic_cast<PendingTakeReviewsContent*>(pendingTakeReviewsContent.get());
+        if (content == nullptr)
+            return;
+
+        if (!currentProject)
+        {
+            content->setSummaries({}, 120, preferredTrackId, preferredSessionId);
+            return;
+        }
+
+        content->setSummaries(
+            mw::midi::buildMidiTakeReviewSummaries(*currentProject),
+            currentProject->getTempoBpm(),
+            preferredTrackId,
+            preferredSessionId);
+    }
+
+    void MainComponent::openPendingTakeReviewsWindow()
+    {
+        if (pendingTakeReviewsWindow != nullptr)
+        {
+            refreshPendingTakeReviewsUi();
+            pendingTakeReviewsWindow->toFront(true);
+            return;
+        }
+
+        auto closeCallback = [this] { closePendingTakeReviewsWindow(); };
+        auto* window = new SequencePickerDocumentWindow("Take Review Manager", closeCallback);
+        auto* content = new PendingTakeReviewsContent(
+            [this](mw::core::StableId trackId, mw::core::StableId sessionId) { resumePendingTakeReview(trackId, sessionId); },
+            [this](mw::core::StableId trackId, mw::core::StableId sessionId) { archivePendingTakeReview(trackId, sessionId); },
+            [this](mw::core::StableId trackId, mw::core::StableId sessionId) { snapshotActiveTakeReview(trackId, sessionId); },
+            [this](mw::core::StableId trackId, mw::core::StableId sessionId) { restoreArchivedTakeReview(trackId, sessionId); },
+            [this](mw::core::StableId trackId, mw::core::StableId sessionId) { duplicateArchivedTakeReview(trackId, sessionId); },
+            [this](mw::core::StableId trackId, mw::core::StableId sessionId) { requestCopyArchivedTakeReviewToTrack(trackId, sessionId); },
+            [this](mw::core::StableId trackId, mw::core::StableId sessionId) { requestMoveArchivedTakeReviewToTrack(trackId, sessionId); },
+            [this](mw::core::StableId trackId, mw::core::StableId sessionId) { requestRenameTakeReview(trackId, sessionId); },
+            [this](mw::core::StableId trackId, mw::core::StableId sessionId) { requestDiscardPendingTakeReview(trackId, sessionId); },
+            [this](mw::core::StableId trackId, mw::core::StableId sessionId) { requestDeleteArchivedTakeReview(trackId, sessionId); },
+            [this](mw::core::StableId trackId, mw::core::StableId sessionId, const juce::String& tags, const juce::String& notes)
+            { saveTakeReviewMetadata(trackId, sessionId, tags, notes); },
+            [this] { refreshPendingTakeReviewsUi(); },
+            [this] { closePendingTakeReviewsWindow(); });
+
+        pendingTakeReviewsContent.reset(content);
+        window->setContentNonOwned(pendingTakeReviewsContent.get(), false);
+        window->centreWithSize(1040, 800);
+        pendingTakeReviewsWindow.reset(window);
+        refreshPendingTakeReviewsUi();
+        window->setVisible(true);
+        window->toFront(true);
+    }
+
+    void MainComponent::closePendingTakeReviewsWindow()
+    {
+        juce::MessageManager::callAsync(
+            [this]
+            {
+                if (pendingTakeReviewsWindow != nullptr)
+                    pendingTakeReviewsWindow->setContentOwned(nullptr, false);
+                pendingTakeReviewsWindow.reset();
+                pendingTakeReviewsContent.reset();
+            });
+    }
+
+    void MainComponent::resumePendingTakeReview(mw::core::StableId trackId,
+                                                mw::core::StableId reviewSessionId)
+    {
+        if (!currentProject)
+        {
+            logMessage("Take Review Manager: no project is loaded.");
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+
+        const auto trackIndex = mw::midi::findPendingMidiTakeReviewTrackIndexByStableId(*currentProject, trackId);
+        if (!trackIndex.has_value())
+        {
+            logMessage("Take Review Manager: the selected Active review is no longer available.");
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+        const auto& persisted = currentProject->getTracks()[static_cast<std::size_t>(*trackIndex)].getPendingMidiTakeReview();
+        if (reviewSessionId == 0 || persisted.reviewSessionId != reviewSessionId)
+        {
+            logMessage("Take Review Manager: stale Active review identity was rejected.");
+            refreshPendingTakeReviewsUi(trackId);
+            return;
+        }
+
+        if (midiRecordingLoopTakeReviewState.isReviewActive()
+            && midiRecordingLoopTakeReviewState.trackId() != trackId)
+        {
+            const juce::String message =
+                "Take Review Manager: another TAKE REVIEW is already active. Resolve, discard, or archive it before resuming a different track.";
+            logMessage(message);
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::WarningIcon,
+                "Take Review Already Active",
+                message,
+                "OK");
+            refreshPendingTakeReviewsUi(trackId, reviewSessionId);
+            return;
+        }
+
+        if (pianoRollWindow != nullptr
+            && pianoRollOpenTrackIndex >= 0
+            && pianoRollOpenTrackIndex != *trackIndex
+            && pianoRollEditorDirty)
+        {
+            const juce::String message =
+                "Take Review Manager: apply or discard the open Piano Roll edits before resuming a review on a different track.";
+            logMessage(message);
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::WarningIcon,
+                "Apply Piano Roll Edits First",
+                message,
+                "OK");
+            refreshPendingTakeReviewsUi(trackId, reviewSessionId);
+            return;
+        }
+
+        trackCombo.setSelectedId(*trackIndex + 1, juce::sendNotificationSync);
+        if (!midiRecordingLoopTakeReviewState.isReviewActive()
+            && !restorePersistentMidiTakeReviewForTrack(*trackIndex))
+        {
+            logMessage("Take Review Manager: the selected persisted review could not be restored safely.");
+            refreshPendingTakeReviewsUi(trackId, reviewSessionId);
+            return;
+        }
+
+        openMidiInputSettingsWindow();
+        refreshMidiRecordingUi();
+        logMessage("Take Review Manager: resumed Active review '" + juce::String(persisted.reviewName)
+                   + "' for " + getTrackDisplayName(*trackIndex) + ".");
+        closePendingTakeReviewsWindow();
+    }
+
+    void MainComponent::archivePendingTakeReview(mw::core::StableId trackId,
+                                                 mw::core::StableId reviewSessionId)
+    {
+        if (!currentProject)
+        {
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+        const auto trackIndex = mw::midi::findPendingMidiTakeReviewTrackIndexByStableId(*currentProject, trackId);
+        if (!trackIndex.has_value())
+        {
+            logMessage("Take Review Manager: Active review is no longer available for Archive.");
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+
+        if (midiRecordingLoopTakeReviewState.isReviewActive()
+            && midiRecordingLoopTakeReviewState.trackId() == trackId)
+            syncPersistentMidiTakeReviewToProject(false);
+
+        auto& track = currentProject->getTracks()[static_cast<std::size_t>(*trackIndex)];
+        const auto archivedName = juce::String(track.getPendingMidiTakeReview().reviewName);
+        if (reviewSessionId == 0 || track.getPendingMidiTakeReview().reviewSessionId != reviewSessionId
+            || !mw::midi::archivePendingMidiTakeReviewByStableId(*currentProject, trackId))
+        {
+            logMessage("Take Review Manager: stale Active review identity was rejected for Archive.");
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+
+        if (midiRecordingLoopTakeReviewState.isReviewActive()
+            && midiRecordingLoopTakeReviewState.trackId() == trackId)
+        {
+            midiRecordingLoopTakeReviewState.cancel();
+            midiRecordingLoopCompState.cancel();
+            midiRecordingLoopCompModeEnabled = false;
+            midiRecordingLoopCompSelectedSegmentIndex = 0;
+        }
+        setProjectDirty();
+        logMessage("Take Review Manager: archived '" + archivedName + "' without committing MIDI notes.");
+        refreshPendingTakeReviewsUi(trackId, reviewSessionId);
+        refreshMidiRecordingUi();
+    }
+
+    void MainComponent::snapshotActiveTakeReview(mw::core::StableId trackId,
+                                                  mw::core::StableId reviewSessionId)
+    {
+        if (!currentProject)
+        {
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+
+        const auto trackIndex = mw::midi::findPendingMidiTakeReviewTrackIndexByStableId(*currentProject, trackId);
+        if (!trackIndex.has_value())
+        {
+            logMessage("Take Review Manager: Active review is no longer available for Snapshot.");
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+
+        if (midiRecordingLoopTakeReviewState.isReviewActive()
+            && midiRecordingLoopTakeReviewState.trackId() == trackId)
+            syncPersistentMidiTakeReviewToProject(false);
+
+        const auto& active = currentProject->getTracks()[static_cast<std::size_t>(*trackIndex)].getPendingMidiTakeReview();
+        if (reviewSessionId == 0 || active.reviewSessionId != reviewSessionId)
+        {
+            logMessage("Take Review Manager: stale Active review identity was rejected for Snapshot Active.");
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+
+        const auto snapshotId = mw::midi::snapshotActiveMidiTakeReviewByStableIds(
+            *currentProject, trackId, reviewSessionId);
+        if (!snapshotId.has_value())
+        {
+            logMessage("Take Review Manager: Snapshot Active could not create a stable Archived snapshot.");
+            refreshPendingTakeReviewsUi(trackId, reviewSessionId);
+            return;
+        }
+
+        setProjectDirty();
+        logMessage("Take Review Manager: saved an independent Archived snapshot while leaving the Active review unresolved; project MIDI notes were unchanged.");
+        refreshPendingTakeReviewsUi(trackId, *snapshotId);
+        refreshMidiRecordingUi();
+    }
+
+    void MainComponent::restoreArchivedTakeReview(mw::core::StableId trackId,
+                                                   mw::core::StableId reviewSessionId)
+    {
+        if (!currentProject)
+        {
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+        if (!mw::midi::restoreArchivedMidiTakeReviewByStableIds(*currentProject, trackId, reviewSessionId))
+        {
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::WarningIcon,
+                "Cannot Restore Take Review",
+                "The archived review is stale or this track already has an Active TAKE REVIEW. Keep, Discard, or Archive the Active review first.",
+                "OK");
+            refreshPendingTakeReviewsUi(trackId, reviewSessionId);
+            return;
+        }
+        setProjectDirty();
+        logMessage("Take Review Manager: restored archived review into the track's Active review slot.");
+        refreshPendingTakeReviewsUi(trackId, reviewSessionId);
+        refreshMidiRecordingUi();
+    }
+
+    void MainComponent::requestRenameTakeReview(mw::core::StableId trackId,
+                                                mw::core::StableId reviewSessionId)
+    {
+        if (!currentProject)
+            return;
+        juce::String currentName;
+        for (const auto& summary : mw::midi::buildMidiTakeReviewSummaries(*currentProject))
+        {
+            if (summary.trackId == trackId && summary.reviewSessionId == reviewSessionId)
+            {
+                currentName = juce::String(summary.reviewName);
+                break;
+            }
+        }
+        if (currentName.isEmpty())
+        {
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+
+        auto* prompt = new juce::AlertWindow("Rename Take Review",
+                                             "Enter a non-blank name for this saved review.",
+                                             juce::AlertWindow::NoIcon);
+        prompt->addTextEditor("reviewName", currentName, "Review Name:");
+        prompt->addButton("Rename", 1, juce::KeyPress(juce::KeyPress::returnKey));
+        prompt->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        prompt->enterModalState(true,
+            juce::ModalCallbackFunction::create([safeThis, prompt, trackId, reviewSessionId](int result)
+            {
+                if (safeThis != nullptr && result == 1)
+                    safeThis->renameTakeReview(trackId, reviewSessionId, prompt->getTextEditorContents("reviewName"));
+            }),
+            true);
+    }
+
+    void MainComponent::renameTakeReview(mw::core::StableId trackId,
+                                         mw::core::StableId reviewSessionId,
+                                         const juce::String& newName)
+    {
+        if (!currentProject)
+            return;
+        const auto trimmed = newName.trim();
+        if (trimmed.isEmpty())
+        {
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                                   "Invalid Review Name",
+                                                   "Take Review names cannot be blank.", "OK");
+            refreshPendingTakeReviewsUi(trackId, reviewSessionId);
+            return;
+        }
+        if (!mw::midi::renameMidiTakeReviewByStableIds(*currentProject, trackId, reviewSessionId,
+                                                        trimmed.toStdString()))
+        {
+            logMessage("Take Review Manager: stale review identity was rejected for Rename.");
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+        setProjectDirty();
+        logMessage("Take Review Manager: renamed saved review to '" + trimmed + "'.");
+        refreshPendingTakeReviewsUi(trackId, reviewSessionId);
+    }
+
+    void MainComponent::saveTakeReviewMetadata(mw::core::StableId trackId,
+                                                     mw::core::StableId reviewSessionId,
+                                                     const juce::String& tags,
+                                                     const juce::String& notes)
+    {
+        if (!currentProject)
+            return;
+        if (!mw::midi::updateMidiTakeReviewMetadataByStableIds(
+                *currentProject, trackId, reviewSessionId, tags.toStdString(), notes.toStdString()))
+        {
+            logMessage("Take Review Manager: stale review identity was rejected for Save Metadata.");
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+        setProjectDirty();
+        logMessage("Take Review Manager: saved organizational Tags/Notes without changing MIDI or take history.");
+        refreshPendingTakeReviewsUi(trackId, reviewSessionId);
+    }
+
+    void MainComponent::requestDiscardPendingTakeReview(mw::core::StableId trackId,
+                                                        mw::core::StableId reviewSessionId)
+    {
+        if (!currentProject)
+        {
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+        const auto trackIndex = mw::midi::findPendingMidiTakeReviewTrackIndexByStableId(*currentProject, trackId);
+        if (!trackIndex.has_value()
+            || currentProject->getTracks()[static_cast<std::size_t>(*trackIndex)].getPendingMidiTakeReview().reviewSessionId != reviewSessionId)
+        {
+            logMessage("Take Review Manager: the selected Active review is stale.");
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+
+        const auto trackName = getTrackDisplayName(*trackIndex);
+        const auto reviewName = juce::String(currentProject->getTracks()[static_cast<std::size_t>(*trackIndex)].getPendingMidiTakeReview().reviewName);
+        juce::String message;
+        message << "Discard Active review '" << reviewName << "' for " << trackName << "?\n\n"
+                << "Its retained passes and comp choices will be permanently removed. No MIDI notes will be added, and other Active/Archived reviews will not be changed.";
+
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        juce::AlertWindow::showOkCancelBox(
+            juce::AlertWindow::WarningIcon,
+            "Discard Active Take Review",
+            message,
+            "Discard Review",
+            "Cancel",
+            this,
+            juce::ModalCallbackFunction::create([safeThis, trackId, reviewSessionId](int result)
+            {
+                if (safeThis != nullptr && result != 0)
+                    safeThis->discardPendingTakeReview(trackId, reviewSessionId);
+            }));
+    }
+
+    void MainComponent::discardPendingTakeReview(mw::core::StableId trackId,
+                                                 mw::core::StableId reviewSessionId)
+    {
+        if (!currentProject)
+        {
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+        const auto trackIndex = mw::midi::findPendingMidiTakeReviewTrackIndexByStableId(*currentProject, trackId);
+        if (!trackIndex.has_value()
+            || currentProject->getTracks()[static_cast<std::size_t>(*trackIndex)].getPendingMidiTakeReview().reviewSessionId != reviewSessionId)
+        {
+            logMessage("Take Review Manager: stale Active review identity was rejected for Discard.");
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+
+        if (midiRecordingLoopTakeReviewState.isReviewActive()
+            && midiRecordingLoopTakeReviewState.trackId() == trackId)
+        {
+            discardMidiRecordingLoopTakeReview();
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+
+        if (!mw::midi::discardPendingMidiTakeReviewByStableId(*currentProject, trackId))
+        {
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+        setProjectDirty();
+        logMessage("Take Review Manager: discarded the selected Active review; project notes and archives were unchanged.");
+        refreshPendingTakeReviewsUi();
+        refreshMidiRecordingUi();
+    }
+
+    void MainComponent::duplicateArchivedTakeReview(mw::core::StableId trackId,
+                                                    mw::core::StableId reviewSessionId)
+    {
+        if (!currentProject)
+            return;
+
+        const auto duplicateId = mw::midi::duplicateArchivedMidiTakeReviewByStableIds(
+            *currentProject, trackId, reviewSessionId);
+        if (!duplicateId.has_value())
+        {
+            logMessage("Take Review Manager: stale Archived review identity was rejected for Duplicate Archive.");
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+
+        setProjectDirty();
+        logMessage("Take Review Manager: duplicated the selected Archived review as an independent same-track copy; project MIDI notes were unchanged.");
+        refreshPendingTakeReviewsUi(trackId, *duplicateId);
+    }
+
+    void MainComponent::requestCopyArchivedTakeReviewToTrack(mw::core::StableId trackId,
+                                                                 mw::core::StableId reviewSessionId)
+    {
+        if (!currentProject)
+            return;
+
+        juce::String sourceReviewName;
+        juce::String sourceTrackName;
+        for (const auto& summary : mw::midi::buildMidiTakeReviewSummaries(*currentProject))
+        {
+            if (summary.trackId == trackId && summary.reviewSessionId == reviewSessionId
+                && summary.storageState == mw::midi::MidiTakeReviewStorageState::Archived)
+            {
+                sourceReviewName = juce::String(summary.reviewName);
+                sourceTrackName = juce::String(summary.trackName);
+                break;
+            }
+        }
+        if (sourceReviewName.isEmpty())
+        {
+            logMessage("Take Review Manager: stale Archived review identity was rejected for Copy to Track.");
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+
+        const auto destinations = mw::midi::buildCrossTrackMidiTakeReviewCopyDestinations(*currentProject, trackId);
+        if (destinations.empty())
+        {
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::InfoIcon,
+                "No Destination MIDI Track",
+                "This project has no other MIDI track available for an Archived Take Review copy. AudioClip tracks and the source track are not valid destinations.",
+                "OK");
+            refreshPendingTakeReviewsUi(trackId, reviewSessionId);
+            return;
+        }
+
+        juce::StringArray destinationNames;
+        std::vector<mw::core::StableId> destinationIds;
+        destinationIds.reserve(destinations.size());
+        for (const auto& destination : destinations)
+        {
+            juce::String label;
+            label << "Track #" << (destination.trackIndex + 1) << " - " << juce::String(destination.trackName);
+            destinationNames.add(label);
+            destinationIds.push_back(destination.trackId);
+        }
+
+        auto* prompt = new juce::AlertWindow(
+            "Copy Archived Take Review",
+            "Copy '" + sourceReviewName + "' from " + sourceTrackName
+                + " to a different MIDI track as an independent Archived review. The source review, Active reviews, Pending Takes, and project MIDI notes are not changed.",
+            juce::AlertWindow::NoIcon,
+            this);
+        prompt->addComboBox("destinationTrack", destinationNames, "To Track:");
+        if (auto* combo = prompt->getComboBoxComponent("destinationTrack"))
+        {
+            combo->setSelectedId(1, juce::dontSendNotification);
+            combo->setTooltip(mw::midi::pendingTakeReviewsCopyDestinationTooltip);
+        }
+        prompt->addButton("Copy", 1, juce::KeyPress(juce::KeyPress::returnKey));
+        prompt->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+        if (auto* copyButton = prompt->getButton("Copy"))
+            copyButton->setTooltip(mw::midi::pendingTakeReviewsCopyConfirmTooltip);
+
+        const auto expectedProjectId = currentProject->getStableId();
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        prompt->enterModalState(true,
+            juce::ModalCallbackFunction::create(
+                [safeThis, prompt, expectedProjectId, trackId, reviewSessionId, destinationIds](int result)
+                {
+                    if (safeThis == nullptr || result != 1)
+                        return;
+                    const auto* combo = prompt->getComboBoxComponent("destinationTrack");
+                    const int selectedIndex = combo != nullptr ? combo->getSelectedId() - 1 : -1;
+                    if (selectedIndex < 0 || selectedIndex >= static_cast<int>(destinationIds.size()))
+                    {
+                        safeThis->logMessage("Take Review Manager: Copy to Track was cancelled because the destination selection was no longer valid.");
+                        safeThis->refreshPendingTakeReviewsUi(trackId, reviewSessionId);
+                        return;
+                    }
+                    safeThis->copyArchivedTakeReviewToTrack(expectedProjectId, trackId, reviewSessionId,
+                                                            destinationIds[static_cast<std::size_t>(selectedIndex)]);
+                }),
+            true);
+    }
+
+    void MainComponent::copyArchivedTakeReviewToTrack(mw::core::StableId expectedProjectId,
+                                                       mw::core::StableId sourceTrackId,
+                                                       mw::core::StableId reviewSessionId,
+                                                       mw::core::StableId destinationTrackId)
+    {
+        if (!currentProject || currentProject->getStableId() != expectedProjectId)
+        {
+            logMessage("Take Review Manager: stale project identity was rejected for Copy to Track.");
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+
+        juce::String sourceName;
+        juce::String destinationName;
+        for (const auto& track : currentProject->getTracks())
+        {
+            if (track.getStableId() == sourceTrackId)
+                sourceName = juce::String(track.getName());
+            if (track.getStableId() == destinationTrackId)
+                destinationName = juce::String(track.getName());
+        }
+
+        const auto copiedId = mw::midi::copyArchivedMidiTakeReviewToTrackByStableIds(
+            *currentProject, sourceTrackId, reviewSessionId, destinationTrackId);
+        if (!copiedId.has_value())
+        {
+            logMessage("Take Review Manager: stale source/destination identity or invalid track type was rejected for Copy to Track.");
+            refreshPendingTakeReviewsUi(sourceTrackId, reviewSessionId);
+            return;
+        }
+
+        juce::String copiedName;
+        for (const auto& summary : mw::midi::buildMidiTakeReviewSummaries(*currentProject))
+        {
+            if (summary.trackId == destinationTrackId && summary.reviewSessionId == *copiedId)
+            {
+                copiedName = juce::String(summary.reviewName);
+                break;
+            }
+        }
+
+        setProjectDirty();
+        juce::String message = "Take Review Manager: copied Archived review";
+        if (sourceName.isNotEmpty())
+            message << " from " << sourceName;
+        if (destinationName.isNotEmpty())
+            message << " to " << destinationName;
+        if (copiedName.isNotEmpty())
+            message << " as '" << copiedName << "'";
+        message << "; source review, Active reviews, Pending Takes, and project MIDI notes were unchanged.";
+        logMessage(message);
+        refreshPendingTakeReviewsUi(sourceTrackId, reviewSessionId);
+    }
+
+    void MainComponent::requestMoveArchivedTakeReviewToTrack(mw::core::StableId trackId,
+                                                                 mw::core::StableId reviewSessionId)
+    {
+        if (!currentProject)
+            return;
+
+        juce::String sourceReviewName;
+        juce::String sourceTrackName;
+        for (const auto& summary : mw::midi::buildMidiTakeReviewSummaries(*currentProject))
+        {
+            if (summary.trackId == trackId && summary.reviewSessionId == reviewSessionId
+                && summary.storageState == mw::midi::MidiTakeReviewStorageState::Archived)
+            {
+                sourceReviewName = juce::String(summary.reviewName);
+                sourceTrackName = juce::String(summary.trackName);
+                break;
+            }
+        }
+        if (sourceReviewName.isEmpty())
+        {
+            logMessage("Take Review Manager: stale Archived review identity was rejected for Move to Track.");
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+
+        const auto destinations = mw::midi::buildCrossTrackMidiTakeReviewCopyDestinations(*currentProject, trackId);
+        if (destinations.empty())
+        {
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::InfoIcon,
+                "No Destination MIDI Track",
+                "This project has no other MIDI track available for an Archived Take Review move. AudioClip tracks and the source track are not valid destinations.",
+                "OK");
+            refreshPendingTakeReviewsUi(trackId, reviewSessionId);
+            return;
+        }
+
+        juce::StringArray destinationNames;
+        std::vector<mw::core::StableId> destinationIds;
+        destinationIds.reserve(destinations.size());
+        for (const auto& destination : destinations)
+        {
+            juce::String label;
+            label << "Track #" << (destination.trackIndex + 1) << " - " << juce::String(destination.trackName);
+            destinationNames.add(label);
+            destinationIds.push_back(destination.trackId);
+        }
+
+        auto* prompt = new juce::AlertWindow(
+            "Move Archived Take Review",
+            "Move '" + sourceReviewName + "' from " + sourceTrackName
+                + " to a different MIDI track. The review remains Archived, keeps its stable review identity, and is removed from the source track only after destination validation succeeds. Active reviews, Pending Takes, and project MIDI notes are not changed.",
+            juce::AlertWindow::WarningIcon,
+            this);
+        prompt->addComboBox("destinationTrack", destinationNames, "To Track:");
+        if (auto* combo = prompt->getComboBoxComponent("destinationTrack"))
+        {
+            combo->setSelectedId(1, juce::dontSendNotification);
+            combo->setTooltip(mw::midi::pendingTakeReviewsMoveDestinationTooltip);
+        }
+        prompt->addButton("Move", 1, juce::KeyPress(juce::KeyPress::returnKey));
+        prompt->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+        if (auto* moveButton = prompt->getButton("Move"))
+            moveButton->setTooltip(mw::midi::pendingTakeReviewsMoveConfirmTooltip);
+
+        const auto expectedProjectId = currentProject->getStableId();
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        prompt->enterModalState(true,
+            juce::ModalCallbackFunction::create(
+                [safeThis, prompt, expectedProjectId, trackId, reviewSessionId, destinationIds](int result)
+                {
+                    if (safeThis == nullptr || result != 1)
+                        return;
+                    const auto* combo = prompt->getComboBoxComponent("destinationTrack");
+                    const int selectedIndex = combo != nullptr ? combo->getSelectedId() - 1 : -1;
+                    if (selectedIndex < 0 || selectedIndex >= static_cast<int>(destinationIds.size()))
+                    {
+                        safeThis->logMessage("Take Review Manager: Move to Track was cancelled because the destination selection was no longer valid.");
+                        safeThis->refreshPendingTakeReviewsUi(trackId, reviewSessionId);
+                        return;
+                    }
+                    safeThis->moveArchivedTakeReviewToTrack(expectedProjectId, trackId, reviewSessionId,
+                                                            destinationIds[static_cast<std::size_t>(selectedIndex)]);
+                }),
+            true);
+    }
+
+    void MainComponent::moveArchivedTakeReviewToTrack(mw::core::StableId expectedProjectId,
+                                                       mw::core::StableId sourceTrackId,
+                                                       mw::core::StableId reviewSessionId,
+                                                       mw::core::StableId destinationTrackId)
+    {
+        if (!currentProject || currentProject->getStableId() != expectedProjectId)
+        {
+            logMessage("Take Review Manager: stale project identity was rejected for Move to Track.");
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+
+        juce::String sourceName;
+        juce::String destinationName;
+        for (const auto& track : currentProject->getTracks())
+        {
+            if (track.getStableId() == sourceTrackId)
+                sourceName = juce::String(track.getName());
+            if (track.getStableId() == destinationTrackId)
+                destinationName = juce::String(track.getName());
+        }
+
+        const auto movedId = mw::midi::moveArchivedMidiTakeReviewToTrackByStableIds(
+            *currentProject, sourceTrackId, reviewSessionId, destinationTrackId);
+        if (!movedId.has_value())
+        {
+            logMessage("Take Review Manager: stale source/destination identity, review-ID collision, or invalid track type was rejected for Move to Track; no source archive was removed.");
+            refreshPendingTakeReviewsUi(sourceTrackId, reviewSessionId);
+            return;
+        }
+
+        juce::String movedName;
+        for (const auto& summary : mw::midi::buildMidiTakeReviewSummaries(*currentProject))
+        {
+            if (summary.trackId == destinationTrackId && summary.reviewSessionId == *movedId)
+            {
+                movedName = juce::String(summary.reviewName);
+                break;
+            }
+        }
+
+        setProjectDirty();
+        juce::String message = "Take Review Manager: moved Archived review";
+        if (sourceName.isNotEmpty())
+            message << " from " << sourceName;
+        if (destinationName.isNotEmpty())
+            message << " to " << destinationName;
+        if (movedName.isNotEmpty())
+            message << " as '" << movedName << "'";
+        message << "; stable review identity was preserved, source archive removal was atomic with destination creation, and Active reviews, Pending Takes, project MIDI notes, and Undo Take history were unchanged.";
+        logMessage(message);
+        refreshPendingTakeReviewsUi(destinationTrackId, *movedId);
+    }
+
+    void MainComponent::requestDeleteArchivedTakeReview(mw::core::StableId trackId,
+                                                        mw::core::StableId reviewSessionId)
+    {
+        if (!currentProject)
+            return;
+        juce::String reviewName;
+        for (const auto& summary : mw::midi::buildMidiTakeReviewSummaries(*currentProject))
+        {
+            if (summary.trackId == trackId && summary.reviewSessionId == reviewSessionId
+                && summary.storageState == mw::midi::MidiTakeReviewStorageState::Archived)
+            {
+                reviewName = juce::String(summary.reviewName);
+                break;
+            }
+        }
+        if (reviewName.isEmpty())
+        {
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+        juce::String message;
+        message << "Delete archived review '" << reviewName << "'?\n\n"
+                << "Its retained passes, comp choices, and controller data will be permanently removed. Project MIDI notes and other reviews will not be changed.";
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        juce::AlertWindow::showOkCancelBox(
+            juce::AlertWindow::WarningIcon, "Delete Archived Take Review", message,
+            "Delete Archive", "Cancel", this,
+            juce::ModalCallbackFunction::create([safeThis, trackId, reviewSessionId](int result)
+            {
+                if (safeThis != nullptr && result != 0)
+                    safeThis->deleteArchivedTakeReview(trackId, reviewSessionId);
+            }));
+    }
+
+    void MainComponent::deleteArchivedTakeReview(mw::core::StableId trackId,
+                                                 mw::core::StableId reviewSessionId)
+    {
+        if (!currentProject)
+            return;
+        if (!mw::midi::deleteArchivedMidiTakeReviewByStableIds(*currentProject, trackId, reviewSessionId))
+        {
+            logMessage("Take Review Manager: stale Archived review identity was rejected for Delete.");
+            refreshPendingTakeReviewsUi();
+            return;
+        }
+        setProjectDirty();
+        logMessage("Take Review Manager: deleted the selected Archived review; project MIDI notes were unchanged.");
+        refreshPendingTakeReviewsUi();
+    }
+
+    void MainComponent::openMidiInputSettingsWindow()
+    {
+        if (midiInputSettingsWindow != nullptr)
+        {
+            midiInputSettingsWindow->toFront(true);
+            return;
+        }
+
+        auto initialSelection = midiInputCoordinator.selection();
+        if (initialSelection.deviceIdentifier.isEmpty() && initialSelection.deviceName.isEmpty())
+        {
+            const auto preferences = mw::app::UserPreferencesStore::load();
+            initialSelection.deviceIdentifier = preferences.midiInputDeviceIdentifier;
+            initialSelection.deviceName = preferences.midiInputDeviceName;
+            initialSelection.channel = preferences.midiInputChannel;
+        }
+
+        auto closeCallback = [this] { closeMidiInputSettingsWindow(); };
+        auto* window = new SequencePickerDocumentWindow("MIDI Input / Live Monitor", closeCallback);
+        auto* content = new MidiInputSettingsContent(
+            midiInputCoordinator,
+            initialSelection,
+            midiRecordingCountInBars,
+            midiRecordingQuantizeDivision,
+            midiRecordingMetronomeEnabled,
+            midiRecordingRecordControllers,
+            midiRecordingRecordPitchBend,
+            midiRecordingRecordProgramChange,
+            midiRecordingRecordChannelPressure,
+            midiRecordingRecordPolyPressure,
+            midiRecordingRecordAdvancedParameters,
+            midiRecordingPunchEnabled,
+            midiRecordingLoopEnabled,
+            midiRecordingLoopTakeReviewEnabled,
+            [this](const mw::midi::MidiInputSelection& selection)
+            {
+                applyMidiInputSelectionAndPersist(selection);
+            },
+            [this](int bars)
+            {
+                midiRecordingCountInBars = juce::jlimit(0, 2, bars);
+                const bool saved = mw::app::UserPreferencesStore::saveIntValue("midiRecordingCountInBars", midiRecordingCountInBars);
+                juce::String message = "MIDI Recording Count-In: ";
+                message += midiRecordingCountInBars == 0 ? "Off" : (juce::String(midiRecordingCountInBars) + (midiRecordingCountInBars == 1 ? " Bar" : " Bars"));
+                if (!saved)
+                    message += " (preference save failed)";
+                logMessage(message + ".");
+                refreshMidiRecordingUi();
+            },
+            [this](int division)
+            {
+                midiRecordingQuantizeDivision = mw::midi::sanitizeMidiRecordingQuantizeDivision(division);
+                const bool saved = mw::app::UserPreferencesStore::saveIntValue(
+                    "midiRecordingQuantizeDivision", midiRecordingQuantizeDivision);
+                juce::String message = "MIDI Recording Quantize: ";
+                message += midiRecordingQuantizeDivision == 0
+                    ? "Off"
+                    : (juce::String("1/") + juce::String(midiRecordingQuantizeDivision));
+                if (!saved)
+                    message += " (preference save failed)";
+                logMessage(message + ".");
+                refreshMidiRecordingUi();
+            },
+            [this](bool enabled)
+            {
+                midiRecordingMetronomeEnabled = enabled;
+                const bool saved = mw::app::UserPreferencesStore::saveBoolValue(
+                    "midiRecordingMetronomeEnabled", midiRecordingMetronomeEnabled);
+                juce::String message = "MIDI Recording Metronome: ";
+                message += midiRecordingMetronomeEnabled ? "On" : "Off";
+                if (!saved)
+                    message += " (preference save failed)";
+                logMessage(message + ".");
+                refreshMidiRecordingUi();
+            },
+            [this](bool enabled)
+            {
+                midiRecordingRecordControllers = enabled;
+                const bool saved = mw::app::UserPreferencesStore::saveBoolValue(
+                    "midiRecordingRecordControllers", midiRecordingRecordControllers);
+                juce::String message = "MIDI Recording Record Controllers: ";
+                message += midiRecordingRecordControllers ? "All CC 0-127" : "Off";
+                if (!saved)
+                    message += " (preference save failed)";
+                logMessage(message + ".");
+                refreshMidiRecordingUi();
+            },
+            [this](bool enabled)
+            {
+                midiRecordingRecordPitchBend = enabled;
+                const bool saved = mw::app::UserPreferencesStore::saveBoolValue(
+                    "midiRecordingRecordPitchBend", midiRecordingRecordPitchBend);
+                juce::String message = "MIDI Recording Record Pitch Bend: ";
+                message += midiRecordingRecordPitchBend ? "On" : "Off";
+                if (!saved)
+                    message += " (preference save failed)";
+                logMessage(message + ".");
+                refreshMidiRecordingUi();
+            },
+            [this](bool enabled)
+            {
+                midiRecordingRecordProgramChange = enabled;
+                const bool saved = mw::app::UserPreferencesStore::saveBoolValue(
+                    "midiRecordingRecordProgramChange", midiRecordingRecordProgramChange);
+                juce::String message = "MIDI Recording Record Program Change: ";
+                message += midiRecordingRecordProgramChange ? "On" : "Off";
+                if (!saved)
+                    message += " (preference save failed)";
+                logMessage(message + ".");
+                refreshMidiRecordingUi();
+            },
+            [this](bool enabled)
+            {
+                midiRecordingRecordChannelPressure = enabled;
+                const bool saved = mw::app::UserPreferencesStore::saveBoolValue(
+                    "midiRecordingRecordChannelPressure", midiRecordingRecordChannelPressure);
+                juce::String message = "MIDI Recording Record Channel Pressure: ";
+                message += midiRecordingRecordChannelPressure ? "On" : "Off";
+                if (!saved)
+                    message += " (preference save failed)";
+                logMessage(message + ".");
+                refreshMidiRecordingUi();
+            },
+            [this](bool enabled)
+            {
+                midiRecordingRecordPolyPressure = enabled;
+                const bool saved = mw::app::UserPreferencesStore::saveBoolValue(
+                    "midiRecordingRecordPolyPressure", midiRecordingRecordPolyPressure);
+                juce::String message = "MIDI Recording Record Poly Pressure: ";
+                message += midiRecordingRecordPolyPressure ? "On" : "Off";
+                if (!saved)
+                    message += " (preference save failed)";
+                logMessage(message + ".");
+                refreshMidiRecordingUi();
+            },
+            [this](bool enabled)
+            {
+                midiRecordingRecordAdvancedParameters = enabled;
+                const bool saved = mw::app::UserPreferencesStore::saveBoolValue(
+                    "midiRecordingRecordAdvancedParameters", midiRecordingRecordAdvancedParameters);
+                juce::String message = "MIDI Recording Record Advanced Parameters: ";
+                message += midiRecordingRecordAdvancedParameters ? "On" : "Off";
+                if (!saved)
+                    message += " (preference save failed)";
+                logMessage(message + ".");
+                refreshMidiRecordingUi();
+            },
+            [this](bool enabled)
+            {
+                midiRecordingPunchEnabled = enabled;
+                logMessage(juce::String("MIDI Recording Punch: ") + (enabled ? "On." : "Off."));
+                refreshMidiRecordingUi();
+            },
+            [this](bool enabled)
+            {
+                midiRecordingLoopEnabled = enabled;
+                logMessage(juce::String("MIDI Recording Loop: ") + (enabled ? "On." : "Off."));
+                refreshMidiRecordingUi();
+            },
+            [this](bool enabled)
+            {
+                midiRecordingLoopTakeReviewEnabled = enabled;
+                logMessage(juce::String("MIDI Recording Loop Takes: ") + (enabled ? "Review." : "Merge."));
+                refreshMidiRecordingUi();
+            },
+            [this](int passNumber) { selectMidiRecordingLoopTakeReviewPass(passNumber); },
+            [this] { auditionMidiRecordingLoopTakeReviewPass(); },
+            [this] { commitMidiRecordingLoopTakeReview(false); },
+            [this] { commitMidiRecordingLoopTakeReview(true); },
+            [this] { discardMidiRecordingLoopTakeReview(); },
+            [this]
+            {
+                if (!currentProject || !midiRecordingLoopTakeReviewState.isReviewActive())
+                    return;
+                syncPersistentMidiTakeReviewToProject(false);
+                const auto trackId = midiRecordingLoopTakeReviewState.trackId();
+                const int trackIndex = findTrackIndexByStableId(trackId);
+                if (trackIndex < 0)
+                    return;
+                const auto sessionId = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)]
+                    .getPendingMidiTakeReview().reviewSessionId;
+                archivePendingTakeReview(trackId, sessionId);
+            },
+            [this]
+            {
+                if (!currentProject || !midiRecordingLoopTakeReviewState.isReviewActive())
+                    return;
+                syncPersistentMidiTakeReviewToProject(false);
+                const auto trackId = midiRecordingLoopTakeReviewState.trackId();
+                const int trackIndex = findTrackIndexByStableId(trackId);
+                if (trackIndex < 0)
+                    return;
+                const auto sessionId = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)]
+                    .getPendingMidiTakeReview().reviewSessionId;
+                snapshotActiveTakeReview(trackId, sessionId);
+            },
+            [this](bool enabled) { setMidiRecordingLoopCompMode(enabled); },
+            [this](int gridId) { setMidiRecordingLoopCompGrid(gridId); },
+            [this](int segmentIndex) { selectMidiRecordingLoopCompSegment(segmentIndex); },
+            [this](int passNumber) { assignMidiRecordingLoopCompPass(passNumber); },
+            [this](int modeId) { setMidiRecordingLoopCompBoundaryNoteMode(modeId); },
+            [this](int modeId) { setMidiRecordingLoopCompCrossPassNoteMode(modeId); },
+            [this](int modeId) { setMidiRecordingSustainPedalMode(modeId); },
+            [this] { addMidiRecordingLoopCompBoundary(); },
+            [this](std::int64_t tick) { removeMidiRecordingLoopCompBoundary(tick); },
+            [this] { auditionMidiRecordingLoopComp(); },
+            [this] { commitMidiRecordingLoopComp(); },
+            [this] { setMidiRecordingPunchPoint(true); },
+            [this] { setMidiRecordingPunchPoint(false); },
+            [this] { clearMidiRecordingPunchRegion(); },
+            [this](const mw::midi::MidiInputSelection& selection)
+            {
+                startLiveMidiMonitoringForSelectedTrack(&selection);
+            },
+            [this] { panicLiveMidiMonitoring(); },
+            [this] { stopLiveMidiMonitoring(true); },
+            [this] { armSelectedTrackForMidiRecording(); },
+            [this] { startMidiRecording(); },
+            [this] { stopMidiRecording(true); },
+            [this] { undoLastMidiRecordingTake(); },
+            [this] { redoLastMidiRecordingTake(); },
+            [this] { closeMidiInputSettingsWindow(); });
+
+        midiInputSettingsContent.reset(content);
+        window->setContentNonOwned(midiInputSettingsContent.get(), false);
+        window->centreWithSize(820, 1102);
+        refreshMidiRecordingUi();
+        window->setVisible(true);
+        window->toFront(true);
+        midiInputSettingsWindow.reset(window);
+    }
+
+    double MainComponent::currentMidiRecordingTransportSeconds()
+    {
+        if (!currentProject)
+            return std::max(0.0, midiRecordingRequestedStartSeconds);
+
+        if (clapLiveDirectPreviewProjectMode
+            && clapLiveTransportGeneration != 0
+            && mixedLiveProjectPreviewEngine.isActive())
+        {
+            const auto status = mixedLiveProjectPreviewEngine.status();
+            playbackTransportCoordinator.updatePositionWithAudioFormat(
+                clapLiveTransportGeneration,
+                clapLiveTransportStartSample + status.currentSample,
+                clapLiveTransportStartSample + status.totalSamples,
+                status.sampleRate,
+                status.blockSize);
+        }
+        else if (midiRecordingFallbackTransportGeneration != 0)
+        {
+            const auto transport = playbackTransportCoordinator.snapshot();
+            const auto sampleRate = std::max(1, transport.sampleRate);
+            auto currentSeconds = std::max(0.0, getPianoRollPreviewCurrentSeconds());
+#if JUCE_WINDOWS
+            // For rendered fallback, the MCI player is the audible clock. Query its actual
+            // position instead of relying only on the 30 Hz visual playhead timer.
+            wchar_t positionBuffer[64] {};
+            if (mciSendStringW(L"status PoorMansStudioPianoRollPreview position",
+                               positionBuffer,
+                               static_cast<UINT>(64),
+                               nullptr) == 0)
+            {
+                wchar_t* end = nullptr;
+                const auto positionMilliseconds = std::wcstod(positionBuffer, &end);
+                if (end != positionBuffer && std::isfinite(positionMilliseconds))
+                    currentSeconds = std::max(0.0, positionMilliseconds / 1000.0);
+            }
+#endif
+            const auto totalSeconds = std::max(currentSeconds, getPianoRollPreviewTotalSeconds());
+            playbackTransportCoordinator.updatePositionWithAudioFormat(
+                midiRecordingFallbackTransportGeneration,
+                static_cast<std::int64_t>(std::llround(currentSeconds * sampleRate)),
+                static_cast<std::int64_t>(std::llround(totalSeconds * sampleRate)),
+                sampleRate,
+                std::max(1, transport.blockSize));
+        }
+
+        const auto transport = playbackTransportCoordinator.snapshot();
+        const bool generationMatches = (clapLiveTransportGeneration != 0
+                && transport.generation == clapLiveTransportGeneration)
+            || (midiRecordingFallbackTransportGeneration != 0
+                && transport.generation == midiRecordingFallbackTransportGeneration);
+        if (transport.projectId == currentProject->getStableId()
+            && generationMatches
+            && transport.state != mw::playback::TransportState::Stopped
+            && transport.state != mw::playback::TransportState::Failed)
+        {
+            return std::max(0.0, transport.currentSeconds());
+        }
+
+        return std::max(0.0, midiRecordingRequestedStartSeconds);
+    }
+
+    int MainComponent::findTrackIndexByStableId(mw::core::StableId stableId) const
+    {
+        if (!currentProject || stableId == 0)
+            return -1;
+
+        const auto& tracks = currentProject->getTracks();
+        for (int index = 0; index < static_cast<int>(tracks.size()); ++index)
+            if (tracks[static_cast<std::size_t>(index)].getStableId() == stableId)
+                return index;
+
+        return -1;
+    }
+
+    bool MainComponent::restorePersistentMidiTakeReviewForSelectedTrack()
+    {
+        if (!currentProject || midiRecordingLoopTakeReviewState.isCollecting()
+            || midiRecordingLoopTakeReviewState.isReviewActive() || isMidiRecordingBusy())
+        {
+            return false;
+        }
+        return restorePersistentMidiTakeReviewForTrack(getSelectedTrackIndex());
+    }
+
+    bool MainComponent::restorePersistentMidiTakeReviewForTrack(int trackIndex)
+    {
+        if (!currentProject || trackIndex < 0
+            || trackIndex >= static_cast<int>(currentProject->getTracks().size()))
+        {
+            return false;
+        }
+
+        auto& track = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)];
+        const auto& persisted = track.getPendingMidiTakeReview();
+        if (!persisted.active || persisted.passes.empty())
+            return false;
+
+        std::vector<mw::midi::MidiRecordingLoopTakePass> passes;
+        passes.reserve(persisted.passes.size());
+        for (const auto& storedPass : persisted.passes)
+        {
+            passes.push_back({
+                storedPass.passNumber,
+                storedPass.notes,
+                storedPass.sustainDownMaskAtStart,
+                storedPass.cc64Events,
+                storedPass.controllerEvents,
+                storedPass.pitchBendEvents,
+                storedPass.programChangeEvents,
+                storedPass.channelPressureEvents,
+                storedPass.polyPressureEvents });
+        }
+
+        ++midiRecordingPersistentReviewGeneration;
+        if (midiRecordingPersistentReviewGeneration == 0)
+            ++midiRecordingPersistentReviewGeneration;
+        const auto generation = midiRecordingPersistentReviewGeneration;
+
+        if (!midiRecordingLoopTakeReviewState.restoreReview(
+                currentProject->getStableId(),
+                track.getStableId(),
+                generation,
+                std::move(passes),
+                persisted.selectedPassNumber))
+        {
+            logMessage("MIDI Recording Take Review: persisted review state could not be restored safely.");
+            return false;
+        }
+
+        midiRecordingPunchProjectId = currentProject->getStableId();
+        midiRecordingPunchInTick = persisted.regionInTick;
+        midiRecordingPunchOutTick = persisted.regionOutTick;
+        midiRecordingLoopTakeReviewEnabled = true;
+        midiRecordingSustainPedalMode = persisted.sustainPedalMode == mw::core::PersistentMidiSustainPedalMode::ApplyCc64
+            ? mw::midi::MidiRecordingSustainPedalMode::ApplyCc64
+            : mw::midi::MidiRecordingSustainPedalMode::Ignore;
+        midiRecordingLoopCompState.cancel();
+        midiRecordingLoopCompSelectedSegmentIndex = 0;
+
+        if (!persisted.segments.empty())
+        {
+            std::vector<mw::midi::MidiRecordingCompSegment> segments;
+            segments.reserve(persisted.segments.size());
+            for (const auto& storedSegment : persisted.segments)
+            {
+                segments.push_back({
+                    storedSegment.startTick,
+                    storedSegment.endTick,
+                    storedSegment.selectedPassNumber
+                });
+            }
+
+            mw::midi::MidiRecordingCompGrid grid = mw::midi::MidiRecordingCompGrid::Beat;
+            if (persisted.compGrid == mw::core::PersistentMidiCompGrid::Bar)
+                grid = mw::midi::MidiRecordingCompGrid::Bar;
+            else if (persisted.compGrid == mw::core::PersistentMidiCompGrid::Custom)
+                grid = mw::midi::MidiRecordingCompGrid::Custom;
+
+            const auto timeSignature = currentProject->getTimeSignature();
+            if (!midiRecordingLoopCompState.restore(
+                    currentProject->getStableId(),
+                    track.getStableId(),
+                    generation,
+                    persisted.regionInTick,
+                    persisted.regionOutTick,
+                    mw::core::Project::ticksPerQuarterNote,
+                    timeSignature.numerator,
+                    timeSignature.denominator,
+                    grid,
+                    std::move(segments),
+                    midiRecordingLoopTakeReviewState.passes()))
+            {
+                midiRecordingLoopTakeReviewState.cancel();
+                logMessage("MIDI Recording Take Review: persisted comp map could not be restored safely.");
+                return false;
+            }
+
+            const auto boundaryMode = persisted.boundaryNoteMode == mw::core::PersistentMidiCompBoundaryNoteMode::PreserveSamePass
+                ? mw::midi::MidiRecordingCompBoundaryNoteMode::PreserveSamePass
+                : mw::midi::MidiRecordingCompBoundaryNoteMode::Cut;
+            if (!midiRecordingLoopCompState.setBoundaryNoteMode(generation, boundaryMode))
+            {
+                midiRecordingLoopTakeReviewState.cancel();
+                midiRecordingLoopCompState.cancel();
+                logMessage("MIDI Recording Take Review: persisted Boundary Notes mode could not be restored safely.");
+                return false;
+            }
+            const auto crossPassMode = persisted.crossPassNoteMode == mw::core::PersistentMidiCompCrossPassNoteMode::BridgeExact
+                ? mw::midi::MidiRecordingCompCrossPassNoteMode::BridgeExact
+                : mw::midi::MidiRecordingCompCrossPassNoteMode::Off;
+            if (!midiRecordingLoopCompState.setCrossPassNoteMode(generation, crossPassMode))
+            {
+                midiRecordingLoopTakeReviewState.cancel();
+                midiRecordingLoopCompState.cancel();
+                logMessage("MIDI Recording Take Review: persisted Cross-Pass Notes mode could not be restored safely.");
+                return false;
+            }
+            if (!midiRecordingLoopCompState.setSustainPedalMode(generation, midiRecordingSustainPedalMode))
+            {
+                midiRecordingLoopTakeReviewState.cancel();
+                midiRecordingLoopCompState.cancel();
+                logMessage("MIDI Recording Take Review: persisted Sustain Pedal mode could not be restored safely.");
+                return false;
+            }
+        }
+
+        midiRecordingLoopCompModeEnabled =
+            persisted.reviewMode == mw::core::PersistentMidiTakeReviewMode::Comp;
+        if (midiRecordingLoopCompModeEnabled && !midiRecordingLoopCompState.isActive())
+        {
+            midiRecordingLoopTakeReviewState.cancel();
+            midiRecordingLoopCompModeEnabled = false;
+            logMessage("MIDI Recording Take Review: persisted Comp mode had no valid comp map and was not restored.");
+            return false;
+        }
+
+        juce::String message;
+        message << "MIDI Recording Take Review: restored "
+                << static_cast<int>(persisted.passes.size())
+                << " persisted pass(es) for " << getTrackDisplayName(trackIndex)
+                << ". Resolve with Keep Selected, Keep All, Keep Comp, or Discard.";
+        logMessage(message);
+        return true;
+    }
+
+    bool MainComponent::syncPersistentMidiTakeReviewToProject(bool markDirty)
+    {
+        if (!currentProject || !midiRecordingLoopTakeReviewState.isReviewActive())
+            return false;
+
+        const int trackIndex = findTrackIndexByStableId(midiRecordingLoopTakeReviewState.trackId());
+        if (trackIndex < 0)
+            return false;
+
+        auto& track = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)];
+        const auto existingReviewSessionId = track.getPendingMidiTakeReview().reviewSessionId;
+        const auto existingReviewName = track.getPendingMidiTakeReview().reviewName;
+        mw::core::PersistentMidiTakeReview persisted;
+        persisted.active = true;
+        persisted.reviewSessionId = existingReviewSessionId;
+        persisted.reviewName = existingReviewName;
+        persisted.selectedPassNumber = midiRecordingLoopTakeReviewState.selectedPassNumber();
+        persisted.reviewMode = midiRecordingLoopCompModeEnabled
+            ? mw::core::PersistentMidiTakeReviewMode::Comp
+            : mw::core::PersistentMidiTakeReviewMode::WholePass;
+        persisted.sustainPedalMode = midiRecordingSustainPedalMode == mw::midi::MidiRecordingSustainPedalMode::ApplyCc64
+            ? mw::core::PersistentMidiSustainPedalMode::ApplyCc64
+            : mw::core::PersistentMidiSustainPedalMode::Ignore;
+
+        if (midiRecordingLoopCompState.isActive()
+            && midiRecordingLoopCompState.matches(midiRecordingLoopTakeReviewState.generation()))
+        {
+            persisted.regionInTick = midiRecordingLoopCompState.regionInTick();
+            persisted.regionOutTick = midiRecordingLoopCompState.regionOutTick();
+            if (midiRecordingLoopCompState.grid() == mw::midi::MidiRecordingCompGrid::Bar)
+                persisted.compGrid = mw::core::PersistentMidiCompGrid::Bar;
+            else if (midiRecordingLoopCompState.grid() == mw::midi::MidiRecordingCompGrid::Custom)
+                persisted.compGrid = mw::core::PersistentMidiCompGrid::Custom;
+            else
+                persisted.compGrid = mw::core::PersistentMidiCompGrid::Beat;
+            persisted.boundaryNoteMode = midiRecordingLoopCompState.boundaryNoteMode()
+                    == mw::midi::MidiRecordingCompBoundaryNoteMode::PreserveSamePass
+                ? mw::core::PersistentMidiCompBoundaryNoteMode::PreserveSamePass
+                : mw::core::PersistentMidiCompBoundaryNoteMode::Cut;
+            persisted.crossPassNoteMode = midiRecordingLoopCompState.crossPassNoteMode()
+                    == mw::midi::MidiRecordingCompCrossPassNoteMode::BridgeExact
+                ? mw::core::PersistentMidiCompCrossPassNoteMode::BridgeExact
+                : mw::core::PersistentMidiCompCrossPassNoteMode::Off;
+
+            persisted.segments.reserve(midiRecordingLoopCompState.segments().size());
+            for (const auto& segment : midiRecordingLoopCompState.segments())
+            {
+                persisted.segments.push_back({
+                    segment.startTick,
+                    segment.endTick,
+                    segment.selectedPassNumber
+                });
+            }
+        }
+        else
+        {
+            persisted.regionInTick = midiRecordingPunchInTick;
+            persisted.regionOutTick = midiRecordingPunchOutTick;
+        }
+
+        if (persisted.regionInTick < 0 || persisted.regionOutTick <= persisted.regionInTick)
+            return false;
+
+        persisted.passes.reserve(midiRecordingLoopTakeReviewState.passCount());
+        for (const auto& pass : midiRecordingLoopTakeReviewState.passes())
+        {
+            persisted.passes.push_back({
+                pass.passNumber,
+                pass.notes,
+                pass.sustainDownMaskAtStart,
+                pass.cc64Events,
+                pass.controllerEvents,
+                pass.pitchBendEvents,
+                pass.programChangeEvents,
+                pass.channelPressureEvents,
+                pass.polyPressureEvents });
+        }
+        if (persisted.passes.empty())
+            return false;
+
+        track.setPendingMidiTakeReview(std::move(persisted));
+        if (markDirty)
+            setProjectDirty();
+        return true;
+    }
+
+    void MainComponent::clearPersistentMidiTakeReviewForTrack(int trackIndex, bool markDirty)
+    {
+        if (!currentProject || trackIndex < 0
+            || trackIndex >= static_cast<int>(currentProject->getTracks().size()))
+        {
+            return;
+        }
+        auto& review = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getPendingMidiTakeReview();
+        if (!review.active)
+            return;
+        review.clear();
+        if (markDirty)
+            setProjectDirty();
+    }
+
+    void MainComponent::refreshMidiRecordingUi()
+    {
+        if (!midiRecordingLoopTakeReviewState.isReviewActive()
+            && !midiRecordingLoopTakeReviewState.isCollecting()
+            && !isMidiRecordingBusy())
+        {
+            restorePersistentMidiTakeReviewForSelectedTrack();
+        }
+        const auto currentProjectId = currentProject ? currentProject->getStableId() : 0;
+        if (midiRecordingPunchProjectId != 0 && midiRecordingPunchProjectId != currentProjectId)
+        {
+            midiRecordingPunchProjectId = 0;
+            midiRecordingPunchInTick = -1;
+            midiRecordingPunchOutTick = -1;
+            midiRecordingPunchEnabled = false;
+            midiRecordingLoopEnabled = false;
+            midiRecordingPunchRunState.cancel();
+            clearMidiRecordingLoopSession();
+        }
+        int armedIndex = (midiRecordingArmedProjectId == currentProjectId)
+            ? findTrackIndexByStableId(midiRecordingArmedTrackId)
+            : -1;
+        if (midiRecordingArmedTrackId != 0 && (armedIndex < 0 || midiRecordingArmedProjectId != currentProjectId))
+        {
+            midiRecordingArmedProjectId = 0;
+            midiRecordingArmedTrackId = 0;
+            midiRecordingArmedTrackIndex = -1;
+        }
+        else
+        {
+            midiRecordingArmedTrackIndex = armedIndex;
+        }
+
+        if (midiRecordingLoopTakeReviewState.isReviewActive()
+            && !midiRecordingLoopTakeReviewState.matchesProjectTrack(
+                currentProjectId, midiRecordingLoopTakeReviewState.trackId()))
+        {
+            midiRecordingLoopTakeReviewState.cancel();
+            midiRecordingLoopCompState.cancel();
+            midiRecordingLoopCompModeEnabled = false;
+            midiRecordingLoopCompSelectedSegmentIndex = 0;
+            logMessage("MIDI Recording Take Review: project identity changed; pending runtime loop takes were discarded.");
+        }
+        if (midiRecordingLoopTakeReviewState.isReviewActive()
+            && findTrackIndexByStableId(midiRecordingLoopTakeReviewState.trackId()) < 0)
+        {
+            midiRecordingLoopTakeReviewState.cancel();
+            midiRecordingLoopCompState.cancel();
+            midiRecordingLoopCompModeEnabled = false;
+            midiRecordingLoopCompSelectedSegmentIndex = 0;
+            logMessage("MIDI Recording Take Review: target track is no longer available; pending runtime loop takes were discarded.");
+        }
+
+        juce::String armedName;
+        if (currentProject && armedIndex >= 0 && armedIndex < static_cast<int>(currentProject->getTracks().size()))
+            armedName = getTrackDisplayName(armedIndex);
+
+        const auto projectId = currentProject ? currentProject->getStableId() : 0;
+        const bool canUndo = !midiRecordingUndoStack.empty()
+            && midiRecordingUndoStack.back().projectId == projectId
+            && findTrackIndexByStableId(midiRecordingUndoStack.back().trackId) >= 0;
+        const bool canRedo = !midiRecordingRedoStack.empty()
+            && midiRecordingRedoStack.back().projectId == projectId
+            && findTrackIndexByStableId(midiRecordingRedoStack.back().trackId) >= 0;
+
+        bool liveMonitoringActiveForUi = false;
+        {
+            const std::scoped_lock lock(liveMidiRouteMutex);
+            liveMonitoringActiveForUi = liveMidiMonitoringActive;
+        }
+
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+        {
+            const auto region = currentMidiRecordingPunchRegion();
+            const bool punchValid = mw::midi::isValidMidiRecordingPunchRegion(region);
+            juce::String inText;
+            juce::String outText;
+            if (currentProject && midiRecordingPunchProjectId == currentProjectId)
+            {
+                if (midiRecordingPunchInTick >= 0)
+                {
+                    const auto seconds = mw::midi::midiRecordingProjectSecondsForTick(
+                        midiRecordingPunchInTick, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+                    inText = formatPreviewClockTime(seconds) + " / tick " + juce::String(static_cast<juce::int64>(midiRecordingPunchInTick));
+                }
+                if (midiRecordingPunchOutTick >= 0)
+                {
+                    const auto seconds = mw::midi::midiRecordingProjectSecondsForTick(
+                        midiRecordingPunchOutTick, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+                    outText = formatPreviewClockTime(seconds) + " / tick " + juce::String(static_cast<juce::int64>(midiRecordingPunchOutTick));
+                }
+            }
+            content->setPunchRegion(midiRecordingPunchEnabled, midiRecordingLoopEnabled, punchValid, inText, outText, currentProject.has_value());
+            std::vector<int> reviewPassNumbers;
+            if (midiRecordingLoopTakeReviewState.isReviewActive())
+            {
+                reviewPassNumbers.reserve(midiRecordingLoopTakeReviewState.passCount());
+                for (const auto& pass : midiRecordingLoopTakeReviewState.passes())
+                    reviewPassNumbers.push_back(pass.passNumber);
+            }
+            int compGridId = 1;
+            if (midiRecordingLoopCompState.grid() == mw::midi::MidiRecordingCompGrid::Bar)
+                compGridId = 2;
+            else if (midiRecordingLoopCompState.grid() == mw::midi::MidiRecordingCompGrid::Custom)
+                compGridId = 3;
+            const auto compSegments = midiRecordingLoopCompState.isActive()
+                ? midiRecordingLoopCompState.segments()
+                : std::vector<mw::midi::MidiRecordingCompSegment>{};
+            const auto customBoundaries = midiRecordingLoopCompState.isActive()
+                ? midiRecordingLoopCompState.customBoundaries()
+                : std::vector<std::int64_t>{};
+            const int compBoundaryNoteModeId = midiRecordingLoopCompState.boundaryNoteMode()
+                    == mw::midi::MidiRecordingCompBoundaryNoteMode::PreserveSamePass
+                ? 2
+                : 1;
+            const int crossPassNoteModeId = midiRecordingLoopCompState.crossPassNoteMode()
+                    == mw::midi::MidiRecordingCompCrossPassNoteMode::BridgeExact
+                ? 2
+                : 1;
+            const int sustainPedalModeId = midiRecordingSustainPedalMode == mw::midi::MidiRecordingSustainPedalMode::ApplyCc64 ? 2 : 1;
+            content->setTakeReviewState(
+                midiRecordingLoopTakeReviewState.isReviewActive(),
+                reviewPassNumbers,
+                midiRecordingLoopTakeReviewState.selectedPassNumber(),
+                midiRecordingLoopCompModeEnabled,
+                compGridId,
+                compBoundaryNoteModeId,
+                crossPassNoteModeId,
+                sustainPedalModeId,
+                compSegments,
+                customBoundaries,
+                midiRecordingLoopCompSelectedSegmentIndex);
+            content->setRecordingState(
+                armedName,
+                midiRecordingSession.isRecording(),
+                midiRecordingPlaybackPending,
+                midiRecordingCountInState.isActive(),
+                midiRecordingPunchRunState.isPreRoll() && midiRecordingOwnsProjectPlayback,
+                liveMonitoringActiveForUi,
+                canUndo,
+                canRedo,
+                midiRecordingLoopRunState.passNumber());
+        }
+        refreshPendingTakeReviewsUi();
+    }
+
+    mw::midi::MidiRecordingPunchRegion MainComponent::currentMidiRecordingPunchRegion() const noexcept
+    {
+        mw::midi::MidiRecordingPunchRegion region;
+        region.enabled = midiRecordingPunchEnabled || midiRecordingLoopEnabled;
+        if (currentProject && midiRecordingPunchProjectId == currentProject->getStableId())
+        {
+            region.inTick = midiRecordingPunchInTick;
+            region.outTick = midiRecordingPunchOutTick;
+        }
+        return region;
+    }
+
+    bool MainComponent::setMidiRecordingPunchPoint(bool setInPoint)
+    {
+        if (isMidiRecordingBusy())
+        {
+            logMessage("MIDI Recording Punch: stop the current take before changing punch points.");
+            return false;
+        }
+        if (!currentProject)
+        {
+            logMessage("MIDI Recording Punch: no project loaded.");
+            return false;
+        }
+
+        const auto seconds = std::max(0.0, getPianoRollPreviewCurrentSeconds());
+        const auto tick = mw::midi::projectTickForTransportSeconds(
+            seconds, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+        if (midiRecordingPunchProjectId != currentProject->getStableId())
+        {
+            midiRecordingPunchInTick = -1;
+            midiRecordingPunchOutTick = -1;
+        }
+        midiRecordingPunchProjectId = currentProject->getStableId();
+        if (setInPoint)
+            midiRecordingPunchInTick = tick;
+        else
+            midiRecordingPunchOutTick = tick;
+
+        juce::String message = setInPoint ? "MIDI Recording Punch In set to " : "MIDI Recording Punch Out set to ";
+        message << formatPreviewClockTime(seconds) << " / tick " << static_cast<juce::int64>(tick) << ".";
+        logMessage(message);
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+            content->updateStatus(message);
+        refreshMidiRecordingUi();
+        return true;
+    }
+
+    void MainComponent::clearMidiRecordingPunchRegion()
+    {
+        if (isMidiRecordingBusy())
+        {
+            logMessage("MIDI Recording Punch: stop the current take before clearing the punch region.");
+            return;
+        }
+        midiRecordingPunchProjectId = currentProject ? currentProject->getStableId() : 0;
+        midiRecordingPunchInTick = -1;
+        midiRecordingPunchOutTick = -1;
+        midiRecordingPunchEnabled = false;
+        midiRecordingLoopEnabled = false;
+        midiRecordingPunchRunState.cancel();
+        clearMidiRecordingLoopSession();
+        logMessage("MIDI Recording Punch/Loop: region cleared; Punch and Loop Record set to Off.");
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+            content->updateStatus("Punch/Loop region cleared; Punch and Loop Record are Off.");
+        refreshMidiRecordingUi();
+    }
+
+    bool MainComponent::armSelectedTrackForMidiRecording()
+    {
+        if (isMidiRecordingBusy())
+        {
+            logMessage("MIDI Recording: stop the current take/count-in before changing the armed track.");
+            return false;
+        }
+
+        if (!currentProject)
+        {
+            logMessage("MIDI Recording: no project loaded.");
+            return false;
+        }
+
+        const int index = getSelectedTrackIndex();
+        if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+        {
+            logMessage("MIDI Recording: select a MIDI track to arm.");
+            return false;
+        }
+
+        const auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
+        if (track.isAudioClipTrack())
+        {
+            logMessage("MIDI Recording: AudioClip tracks cannot be armed for MIDI notes.");
+            return false;
+        }
+
+        if (auto* state = findPianoRollEditorWindow(index); state != nullptr && (state->dirty || state->hasPendingInstrumentAssignment))
+        {
+            logMessage("MIDI Recording: apply or discard the open Piano Roll edits for this track before arming it for recording.");
+            return false;
+        }
+
+        midiRecordingArmedProjectId = currentProject->getStableId();
+        midiRecordingArmedTrackId = track.getStableId();
+        midiRecordingArmedTrackIndex = index;
+        logMessage("MIDI Recording: armed " + getTrackDisplayName(index) + ".");
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+            content->updateStatus("Armed " + getTrackDisplayName(index) + " for MIDI recording.");
+        refreshMidiRecordingUi();
+        return true;
+    }
+
+    void MainComponent::clearMidiRecordingArm()
+    {
+        if (isMidiRecordingBusy())
+            stopMidiRecording(true);
+
+        midiRecordingArmedProjectId = 0;
+        midiRecordingArmedTrackId = 0;
+        midiRecordingArmedTrackIndex = -1;
+        refreshMidiRecordingUi();
+    }
+
+    bool MainComponent::isMidiRecordingBusy() const noexcept
+    {
+        return midiRecordingCountInState.isActive()
+            || midiRecordingPlaybackPending
+            || midiRecordingPunchRunState.isActive()
+            || midiRecordingSession.isRecording()
+            || midiRecordingLoopTakeReviewState.isReviewActive();
+    }
+
+    void MainComponent::cancelMidiRecordingCountIn(const juce::String& reason)
+    {
+        const bool wasActive = midiRecordingCountInState.isActive() || midiRecordingCountInPlayer.isActive();
+        if (!wasActive)
+            return;
+
+        midiRecordingCountInPlayer.stop();
+        midiRecordingCountInState.cancel();
+        midiRecordingPunchRunState.cancel();
+        clearMidiRecordingLoopSession();
+
+        renderStatusLabel.setText("MIDI recording count-in cancelled.", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+
+        juce::String message = "MIDI Recording: count-in cancelled";
+        if (reason.isNotEmpty())
+            message += " - " + reason;
+        message += ".";
+        logMessage(message);
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+            content->updateStatus(message);
+        refreshMidiRecordingUi();
+    }
+
+    bool MainComponent::startMidiRecordingCountIn()
+    {
+        if (!currentProject || midiRecordingCountInBars <= 0)
+            return false;
+
+        const auto timeSignature = currentProject->getTimeSignature();
+        const auto generation = midiRecordingCountInState.begin(
+            midiRecordingCountInBars,
+            currentProject->getTempoBpm(),
+            timeSignature.numerator,
+            timeSignature.denominator,
+            midiRecordingRequestedStartSeconds);
+        const auto& plan = midiRecordingCountInState.plan();
+        if (!plan.enabled())
+        {
+            midiRecordingCountInState.cancel();
+            return false;
+        }
+
+        juce::String errorMessage;
+        if (!midiRecordingCountInPlayer.start(plan, errorMessage))
+        {
+            midiRecordingCountInState.cancel();
+            renderStatusLabel.setText("MIDI recording count-in could not start.", juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::red);
+            const auto message = "MIDI Recording: count-in audio could not start. " + errorMessage;
+            logMessage(message);
+            if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+                content->updateStatus(message);
+            refreshMidiRecordingUi();
+            return false;
+        }
+
+        juce::String message;
+        message << "MIDI Recording: " << plan.bars << "-bar"
+                << " count-in started at " << plan.tempoBpm << " BPM in "
+                << plan.numerator << "/" << plan.denominator
+                << "; project playback and capture will still begin at "
+                << formatPreviewClockTime(midiRecordingRequestedStartSeconds) << ".";
+        renderStatusLabel.setText("MIDI recording count-in...", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+        logMessage(message);
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+            content->updateStatus(message);
+        refreshMidiRecordingUi();
+
+        const int delayMs = juce::jmax(1, static_cast<int>(std::ceil(plan.durationSeconds * 1000.0)));
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        juce::Timer::callAfterDelay(delayMs, [safeThis, generation]() mutable
+        {
+            if (safeThis != nullptr)
+                safeThis->completeMidiRecordingCountIn(generation);
+        });
+        return true;
+    }
+
+    void MainComponent::completeMidiRecordingCountIn(std::uint64_t generation)
+    {
+        if (!midiRecordingCountInState.complete(generation))
+            return;
+
+        midiRecordingCountInPlayer.stop();
+
+        if (!currentProject
+            || midiRecordingArmedProjectId != currentProject->getStableId()
+            || findTrackIndexByStableId(midiRecordingArmedTrackId) < 0)
+        {
+            midiRecordingCountInState.cancel();
+            midiRecordingPunchRunState.cancel();
+            clearMidiRecordingLoopSession();
+            logMessage("MIDI Recording: count-in completed, but the armed project/track is no longer available.");
+            renderStatusLabel.setText("MIDI recording count-in cancelled.", juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        if (renderingInProgress || (audioClipRecorder && audioClipRecorder->isRecording()))
+        {
+            midiRecordingCountInState.cancel();
+            midiRecordingPunchRunState.cancel();
+            clearMidiRecordingLoopSession();
+            logMessage("MIDI Recording: count-in completed, but another render/recording operation became active.");
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        logMessage("MIDI Recording: count-in complete; starting project playback and transport-synchronized capture.");
+        if (!startMidiRecordingProjectPlayback())
+        {
+            midiRecordingCountInState.cancel();
+            midiRecordingPunchRunState.cancel();
+            clearMidiRecordingLoopSession();
+            renderStatusLabel.setText("MIDI recording could not start after count-in.", juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::red);
+            refreshMidiRecordingUi();
+        }
+    }
+
+    bool MainComponent::startMidiRecordingProjectPlayback()
+    {
+        if (!currentProject)
+            return false;
+
+        const int trackIndex = (midiRecordingArmedProjectId == currentProject->getStableId())
+            ? findTrackIndexByStableId(midiRecordingArmedTrackId)
+            : -1;
+        if (trackIndex < 0 || trackIndex >= static_cast<int>(currentProject->getTracks().size()))
+        {
+            logMessage("MIDI Recording: the armed track is no longer available before project playback could start.");
+            return false;
+        }
+
+        midiRecordingArmedTrackIndex = trackIndex;
+        midiRecordingPlaybackPending = true;
+        midiRecordingOwnsProjectPlayback = false;
+        midiRecordingFallbackTransportGeneration = 0;
+        pendingPianoRollPreviewStartSeconds = midiRecordingRequestedStartSeconds;
+        midiRecordingRedoStack.clear();
+
+        renderStatusLabel.setText("Preparing project playback for MIDI recording...", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+        logMessage("MIDI Recording: preparing project playback for " + getTrackDisplayName(trackIndex)
+            + " from " + formatPreviewClockTime(midiRecordingRequestedStartSeconds) + ".");
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+            content->updateStatus("Preparing project playback for MIDI recording...");
+        refreshMidiRecordingUi();
+
+        previewCurrentProjectOnBackgroundThread();
+        return true;
+    }
+
+    bool MainComponent::startMidiRecording()
+    {
+        if (isMidiRecordingBusy())
+        {
+            logMessage("MIDI Recording: a take is already in progress, counting in, or preparing.");
+            return false;
+        }
+
+        if (!currentProject)
+        {
+            logMessage("MIDI Recording: no project loaded.");
+            return false;
+        }
+
+        const bool midiInputAvailable = midiInputCoordinator.isOpen();
+        if (!midiInputAvailable && !midiRecordingLoopEnabled)
+        {
+            logMessage("MIDI Recording: choose and apply a MIDI input device first.");
+            return false;
+        }
+        if (renderingInProgress || (audioClipRecorder && audioClipRecorder->isRecording()))
+        {
+            logMessage("MIDI Recording: stop rendering or AudioClip recording before starting a MIDI take.");
+            return false;
+        }
+
+        int trackIndex = (midiRecordingArmedProjectId == currentProject->getStableId())
+            ? findTrackIndexByStableId(midiRecordingArmedTrackId)
+            : -1;
+        if (trackIndex < 0)
+        {
+            if (!armSelectedTrackForMidiRecording())
+                return false;
+            trackIndex = findTrackIndexByStableId(midiRecordingArmedTrackId);
+        }
+
+        if (trackIndex < 0 || trackIndex >= static_cast<int>(currentProject->getTracks().size()))
+        {
+            logMessage("MIDI Recording: the armed track is no longer available.");
+            clearMidiRecordingArm();
+            return false;
+        }
+
+        auto& track = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)];
+        if (track.isAudioClipTrack())
+        {
+            logMessage("MIDI Recording: the armed track is no longer a MIDI track.");
+            clearMidiRecordingArm();
+            return false;
+        }
+
+        if (auto* state = findPianoRollEditorWindow(trackIndex); state != nullptr && (state->dirty || state->hasPendingInstrumentAssignment))
+        {
+            logMessage("MIDI Recording: apply or discard the open Piano Roll edits before recording into this track.");
+            return false;
+        }
+        if (track.getPendingMidiTakeReview().active)
+        {
+            restorePersistentMidiTakeReviewForTrack(trackIndex);
+            logMessage("MIDI Recording Take Review: this track already has a persisted unresolved review. Keep or Discard it before recording another take on the track.");
+            refreshMidiRecordingUi();
+            return false;
+        }
+
+        // Keep the requested recording anchor before stopping any existing preview. The
+        // count-in is pre-roll only and must never shift project time.
+        const auto requestedStartSeconds = std::max(0.0, getPianoRollPreviewCurrentSeconds());
+        const auto requestedStartTick = mw::midi::projectTickForTransportSeconds(
+            requestedStartSeconds, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+        const auto punchRegion = currentMidiRecordingPunchRegion();
+        clearMidiRecordingLoopSession();
+        midiRecordingSustainPedalMode = mw::midi::MidiRecordingSustainPedalMode::Ignore;
+        midiRecordingLoopNoMidiDiagnosticMode = !midiInputAvailable && midiRecordingLoopEnabled;
+        if (midiRecordingLoopNoMidiDiagnosticMode)
+        {
+            logMessage("MIDI Recording Loop: no MIDI input is open; starting backing-wrap diagnostic mode. Empty loop passes are allowed and no MIDI notes can be captured.");
+        }
+        if (midiRecordingPunchEnabled || midiRecordingLoopEnabled)
+        {
+            if (!mw::midi::isValidMidiRecordingPunchRegion(punchRegion))
+            {
+                logMessage("MIDI Recording Punch: set a valid Punch In < Punch Out region before recording.");
+                if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+                    content->updateStatus("Punch is On, but the Punch In/Out region is invalid.");
+                refreshMidiRecordingUi();
+                return false;
+            }
+            if (mw::midi::midiRecordingPunchPositionForTick(punchRegion, requestedStartTick)
+                == mw::midi::MidiRecordingPunchPosition::AtOrAfterOut)
+            {
+                logMessage("MIDI Recording Punch: the requested playback position is at or beyond Punch Out.");
+                if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+                    content->updateStatus("Move the project position before Punch Out before starting the punch take.");
+                refreshMidiRecordingUi();
+                return false;
+            }
+            midiRecordingPunchRunState.begin(punchRegion, requestedStartTick);
+            const auto loopGeneration = midiRecordingLoopRunState.begin(
+                midiRecordingLoopEnabled, punchRegion, requestedStartTick);
+            if (midiRecordingLoopEnabled && midiRecordingLoopTakeReviewEnabled)
+            {
+                midiRecordingLoopTakeReviewState.begin(
+                    currentProject->getStableId(),
+                    track.getStableId(),
+                    loopGeneration);
+            }
+        }
+        else
+        {
+            midiRecordingPunchRunState.cancel();
+            midiRecordingLoopRunState.cancel();
+        }
+
+        stopLiveMidiMonitoring(true);
+        stopPianoRollPreview();
+
+        midiRecordingArmedTrackIndex = trackIndex;
+        midiRecordingRequestedStartSeconds = requestedStartSeconds;
+        midiRecordingPlaybackPending = false;
+        midiRecordingOwnsProjectPlayback = false;
+        midiRecordingFallbackTransportGeneration = 0;
+        midiRecordingRedoStack.clear();
+
+        if (midiRecordingCountInBars > 0)
+            return startMidiRecordingCountIn();
+
+        return startMidiRecordingProjectPlayback();
+    }
+
+    bool MainComponent::beginMidiRecordingSessionForActivePlayback()
+    {
+        if (!midiRecordingPlaybackPending || !currentProject)
+            return false;
+
+        const int trackIndex = (midiRecordingArmedProjectId == currentProject->getStableId())
+            ? findTrackIndexByStableId(midiRecordingArmedTrackId)
+            : -1;
+        if (trackIndex < 0 || trackIndex >= static_cast<int>(currentProject->getTracks().size()))
+        {
+            logMessage("MIDI Recording: armed track disappeared while project playback was preparing.");
+            midiRecordingPlaybackPending = false;
+            midiRecordingPunchRunState.cancel();
+            clearMidiRecordingLoopSession();
+            return false;
+        }
+
+        const auto transport = playbackTransportCoordinator.snapshot();
+        if (transport.projectId != currentProject->getStableId()
+            || transport.state != mw::playback::TransportState::Playing)
+        {
+            logMessage("MIDI Recording: project transport was not in Playing state when capture was due to start.");
+            midiRecordingPlaybackPending = false;
+            midiRecordingPunchRunState.cancel();
+            clearMidiRecordingLoopSession();
+            return false;
+        }
+
+        const auto transportTick = mw::midi::projectTickForTransportSeconds(
+            transport.currentSeconds(), currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+        const auto punchGeneration = midiRecordingPunchRunState.generation();
+        if (midiRecordingPunchRunState.isActive()
+            && midiRecordingPunchRunState.shouldPunchOut(punchGeneration, transportTick))
+        {
+            logMessage("MIDI Recording Punch: project playback reached Punch Out before capture could begin.");
+            midiRecordingPlaybackPending = false;
+            midiRecordingPunchRunState.cancel();
+            clearMidiRecordingLoopSession();
+            return false;
+        }
+
+        if (midiRecordingPunchRunState.isPreRoll())
+        {
+            midiRecordingArmedTrackIndex = trackIndex;
+            midiRecordingRequestedStartSeconds = std::max(0.0, transport.currentSeconds());
+            midiRecordingPlaybackPending = false;
+            midiRecordingOwnsProjectPlayback = true;
+            midiRecordingRedoStack.clear();
+
+            scheduleMidiRecordingPunchBoundary(punchGeneration, false);
+            scheduleMidiRecordingPunchBoundary(punchGeneration, true);
+
+            const auto region = midiRecordingPunchRunState.region();
+            const auto inSeconds = mw::midi::midiRecordingProjectSecondsForTick(
+                region.inTick, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+            renderStatusLabel.setText("MIDI punch pre-roll with project playback...", juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+            juce::String message;
+            message << "MIDI Recording Punch: backing playback is running before Punch In; capture will begin at tick "
+                    << static_cast<juce::int64>(region.inTick) << " (" << formatPreviewClockTime(inSeconds) << ").";
+            logMessage(message);
+            if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+                content->updateStatus(message);
+            refreshMidiRecordingUi();
+            return true;
+        }
+
+        auto config = mw::midi::makeTransportSynchronizedRecordingConfig(
+            transport,
+            currentProject->getTempoBpm(),
+            mw::core::Project::ticksPerQuarterNote);
+        if (midiRecordingLoopRunState.isActive())
+            config.sustainDownMaskAtStart = midiRecordingLoopSustainDownMask;
+        config.recordControllers = midiRecordingRecordControllers;
+        config.recordPitchBend = midiRecordingRecordPitchBend;
+        config.recordProgramChange = midiRecordingRecordProgramChange;
+        config.recordChannelPressure = midiRecordingRecordChannelPressure;
+        config.recordPolyPressure = midiRecordingRecordPolyPressure;
+        config.recordAdvancedParameters = midiRecordingRecordAdvancedParameters;
+        if (!midiRecordingSession.start(config))
+        {
+            logMessage("MIDI Recording: could not start the transport-synchronized recording session.");
+            midiRecordingPlaybackPending = false;
+            midiRecordingPunchRunState.cancel();
+            clearMidiRecordingLoopSession();
+            return false;
+        }
+
+        midiRecordingArmedTrackIndex = trackIndex;
+        midiRecordingRequestedStartSeconds = config.startTimeSeconds;
+        midiRecordingPlaybackPending = false;
+        midiRecordingOwnsProjectPlayback = true;
+        midiRecordingRedoStack.clear();
+
+        if (midiRecordingLoopRunState.isActive()
+            && midiRecordingLoopRunState.passNumber() > 1
+            && midiRecordingLoopPendingWrapStartedMs >= 0.0
+            && midiRecordingLoopPendingWrapPass > 0)
+        {
+            const auto acknowledgementMs = std::max(0.0,
+                juce::Time::getMillisecondCounterHiRes() - midiRecordingLoopPendingWrapStartedMs);
+            juce::String wrapAck;
+            wrapAck << "MIDI Recording Loop Timing: pass " << midiRecordingLoopPendingWrapPass
+                    << " -> pass " << midiRecordingLoopRunState.passNumber()
+                    << " backend " << midiRecordingLoopPendingWrapBackend
+                    << "; next-pass Playing/capture acknowledgement "
+                    << juce::String(acknowledgementMs, 2) << " ms after Out claim.";
+            logMessage(wrapAck);
+            midiRecordingLoopPendingWrapStartedMs = -1.0;
+            midiRecordingLoopPendingWrapPass = 0;
+            midiRecordingLoopPendingWrapBackend.clear();
+        }
+
+        const auto timeSignature = currentProject->getTimeSignature();
+        const auto metronomeConfig = mw::midi::makeMidiRecordingMetronomeConfig(
+            midiRecordingMetronomeEnabled,
+            currentProject->getTempoBpm(),
+            timeSignature.numerator,
+            timeSignature.denominator);
+        midiRecordingMetronomeRunState.begin(metronomeConfig, config.startTimeSeconds);
+        if (midiRecordingMetronomeRunState.isActive()
+            && clapLiveDirectPreviewProjectMode
+            && mixedLiveProjectPreviewEngine.isActive())
+        {
+            mixedLiveProjectPreviewEngine.setMidiRecordingMetronomeActive(true);
+        }
+
+        if (midiRecordingPunchRunState.isCapturePhase())
+            scheduleMidiRecordingPunchBoundary(punchGeneration, true);
+
+        renderStatusLabel.setText("MIDI recording with project playback.", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+
+        juce::String message;
+        message << "MIDI Recording: recording " << getTrackDisplayName(trackIndex)
+                << " with project playback from project tick " << static_cast<juce::int64>(config.startTick)
+                << " (" << formatPreviewClockTime(config.startTimeSeconds) << ") at "
+                << config.tempoBpm << " BPM.";
+        if (clapLiveDirectPreviewProjectMode && mixedLiveProjectPreviewEngine.isActive())
+            message << " Compatible live instrument monitoring is routed inside the mixed project engine.";
+        else
+            message << " Note capture remains active even when the rendered backing path cannot provide live plugin monitoring.";
+        if (midiRecordingMetronomeRunState.isActive())
+            message << " Continuous recording metronome is active on the project beat grid.";
+        if (midiRecordingLoopRunState.isActive())
+            message << " Loop recording pass " << midiRecordingLoopRunState.passNumber()
+                    << " is active and will wrap at region Out.";
+        else if (midiRecordingPunchRunState.isCapturePhase())
+            message << " Punch capture is active and will end automatically at Punch Out.";
+        logMessage(message);
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+            content->updateStatus(message);
+        refreshMidiRecordingUi();
+        return true;
+    }
+
+    bool MainComponent::beginMidiRecordingPunchCapture(std::uint64_t generation)
+    {
+        if (!currentProject
+            || !midiRecordingPunchRunState.matches(generation)
+            || !midiRecordingPunchRunState.isPreRoll()
+            || !midiRecordingOwnsProjectPlayback)
+        {
+            return false;
+        }
+
+        const auto region = midiRecordingPunchRunState.region();
+        if (!mw::midi::isValidMidiRecordingPunchRegion(region))
+            return false;
+
+        const auto currentSeconds = currentMidiRecordingTransportSeconds();
+        const auto currentTick = mw::midi::projectTickForTransportSeconds(
+            currentSeconds, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+        if (currentTick < region.inTick)
+        {
+            scheduleMidiRecordingPunchBoundary(generation, false);
+            return false;
+        }
+        if (currentTick >= region.outTick)
+        {
+            completeMidiRecordingPunchOut(generation);
+            return false;
+        }
+        if (!midiRecordingPunchRunState.activateCapture(generation, currentTick))
+            return false;
+        if (midiRecordingLoopRunState.isActive())
+            midiRecordingLoopRunState.activateFirstPass(midiRecordingLoopRunState.generation(), currentTick);
+
+        mw::midi::MidiRecordingConfig config;
+        config.tempoBpm = std::max(1, currentProject->getTempoBpm());
+        config.ticksPerQuarterNote = mw::core::Project::ticksPerQuarterNote;
+        config.startTick = region.inTick;
+        config.startTimeSeconds = mw::midi::midiRecordingProjectSecondsForTick(
+            region.inTick, config.tempoBpm, config.ticksPerQuarterNote);
+        if (midiRecordingLoopRunState.isActive())
+            config.sustainDownMaskAtStart = midiRecordingLoopSustainDownMask;
+        config.recordControllers = midiRecordingRecordControllers;
+        config.recordPitchBend = midiRecordingRecordPitchBend;
+        config.recordProgramChange = midiRecordingRecordProgramChange;
+        config.recordChannelPressure = midiRecordingRecordChannelPressure;
+        config.recordPolyPressure = midiRecordingRecordPolyPressure;
+        config.recordAdvancedParameters = midiRecordingRecordAdvancedParameters;
+        if (!midiRecordingSession.start(config))
+        {
+            midiRecordingPunchRunState.cancel();
+            clearMidiRecordingLoopSession();
+            stopMidiRecordingBackingPlayback();
+            logMessage("MIDI Recording Punch: Punch In was reached, but capture could not start.");
+            refreshMidiRecordingUi();
+            return false;
+        }
+
+        const auto timeSignature = currentProject->getTimeSignature();
+        const auto metronomeConfig = mw::midi::makeMidiRecordingMetronomeConfig(
+            midiRecordingMetronomeEnabled,
+            currentProject->getTempoBpm(),
+            timeSignature.numerator,
+            timeSignature.denominator);
+        midiRecordingMetronomeRunState.begin(metronomeConfig, config.startTimeSeconds);
+        if (midiRecordingMetronomeRunState.isActive()
+            && clapLiveDirectPreviewProjectMode
+            && mixedLiveProjectPreviewEngine.isActive())
+        {
+            mixedLiveProjectPreviewEngine.setMidiRecordingMetronomeActive(true);
+        }
+
+        renderStatusLabel.setText(midiRecordingLoopRunState.isActive()
+            ? "MIDI loop recording active."
+            : "MIDI punch recording active.", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+        juce::String message;
+        message << (midiRecordingLoopRunState.isActive() ? "MIDI Recording Loop: pass 1 began at region In tick "
+                                                        : "MIDI Recording Punch: capture began exactly at Punch In tick ")
+                << static_cast<juce::int64>(region.inTick) << " ("
+                << formatPreviewClockTime(config.startTimeSeconds) << ").";
+        logMessage(message);
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+            content->updateStatus(message);
+        refreshMidiRecordingUi();
+        return true;
+    }
+
+    void MainComponent::scheduleMidiRecordingPunchBoundary(std::uint64_t generation, bool punchOutBoundary)
+    {
+        if (!currentProject || !midiRecordingPunchRunState.matches(generation) || !midiRecordingPunchRunState.isActive())
+            return;
+        const auto region = midiRecordingPunchRunState.region();
+        if (!mw::midi::isValidMidiRecordingPunchRegion(region))
+            return;
+
+        const auto boundaryTick = punchOutBoundary ? region.outTick : region.inTick;
+        const auto boundarySeconds = mw::midi::midiRecordingProjectSecondsForTick(
+            boundaryTick, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+        const auto nowSeconds = currentMidiRecordingTransportSeconds();
+        const auto remainingSeconds = std::max(0.0, boundarySeconds - nowSeconds);
+        const int delayMs = mw::midi::midiRecordingPunchBoundaryDelayMilliseconds(
+            remainingSeconds, punchOutBoundary);
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        juce::Timer::callAfterDelay(delayMs, [safeThis, generation, punchOutBoundary]() mutable
+        {
+            if (safeThis == nullptr)
+                return;
+            if (punchOutBoundary)
+                safeThis->completeMidiRecordingPunchOut(generation);
+            else
+                safeThis->beginMidiRecordingPunchCapture(generation);
+        });
+    }
+
+    void MainComponent::completeMidiRecordingPunchOut(std::uint64_t generation)
+    {
+        if (!midiRecordingPunchRunState.matches(generation) || !midiRecordingPunchRunState.isActive())
+            return;
+
+        const auto region = midiRecordingPunchRunState.region();
+        if (!currentProject || !mw::midi::isValidMidiRecordingPunchRegion(region))
+        {
+            midiRecordingPunchRunState.cancel();
+            clearMidiRecordingLoopSession();
+            stopMidiRecordingBackingPlayback();
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        const auto outSeconds = mw::midi::midiRecordingProjectSecondsForTick(
+            region.outTick, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+        const auto currentSeconds = currentMidiRecordingTransportSeconds();
+        const auto currentTick = mw::midi::projectTickForTransportSeconds(
+            currentSeconds, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+        if (currentTick < region.outTick)
+        {
+            scheduleMidiRecordingPunchBoundary(generation, true);
+            return;
+        }
+
+        if (midiRecordingLoopRunState.isActive())
+        {
+            const auto loopGeneration = midiRecordingLoopRunState.generation();
+            if (midiRecordingLoopRunState.shouldWrap(loopGeneration, currentTick))
+            {
+                completeMidiRecordingLoopWrap(loopGeneration);
+                return;
+            }
+        }
+
+        if (!midiRecordingPunchRunState.claimPunchOut(generation, currentTick))
+            return;
+
+        const auto boundaryLatenessMs = std::max(0.0, (currentSeconds - outSeconds) * 1000.0);
+        juce::String timingMessage;
+        timingMessage << "MIDI Recording Punch: Punch Out stop claim accepted at tick "
+                      << static_cast<juce::int64>(currentTick)
+                      << "; transport boundary lateness " << juce::String(boundaryLatenessMs, 2) << " ms.";
+        logMessage(timingMessage);
+
+        if (midiRecordingSession.isRecording())
+        {
+            finalizeMidiRecordingAtSeconds(outSeconds, true, true);
+            return;
+        }
+
+        midiRecordingPunchRunState.finish(generation);
+        stopMidiRecordingBackingPlayback(outSeconds);
+        logMessage("MIDI Recording Punch: Punch Out was reached before any punch capture became active; playback stopped without a take.");
+        renderStatusLabel.setText("MIDI punch recording stopped.", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+        refreshMidiRecordingUi();
+    }
+
+    void MainComponent::clearMidiRecordingLoopSession(bool preserveTakeReview) noexcept
+    {
+        midiRecordingLoopRunState.cancel();
+        midiRecordingLoopWrapTransaction.cancel();
+        if (!preserveTakeReview)
+        {
+            midiRecordingLoopTakeReviewState.cancel();
+            midiRecordingLoopCompState.cancel();
+            midiRecordingLoopCompModeEnabled = false;
+            midiRecordingLoopCompSelectedSegmentIndex = 0;
+        }
+        midiRecordingLoopAccumulatedNotes.clear();
+        midiRecordingLoopAccumulatedControllers.clear();
+        midiRecordingLoopAccumulatedPitchBends.clear();
+        midiRecordingLoopAccumulatedProgramChanges.clear();
+        midiRecordingLoopAccumulatedChannelPressures.clear();
+        midiRecordingLoopAccumulatedPolyPressures.clear();
+        midiRecordingLoopAccumulated14BitControllers.clear();
+        midiRecordingLoopAccumulatedRpns.clear();
+        midiRecordingLoopAccumulatedNrpns.clear();
+        midiRecordingLoopFinalizedHeldNoteCount = 0;
+        midiRecordingLoopQuantizedStartCount = 0;
+        midiRecordingLoopBoundaryAdjustmentCount = 0;
+        midiRecordingLoopNoMidiDiagnosticMode = false;
+        midiRecordingLoopSustainDownMask = 0;
+        midiRecordingLoopPendingWrapStartedMs = -1.0;
+        midiRecordingLoopPendingWrapPass = 0;
+        midiRecordingLoopPendingWrapBackend.clear();
+    }
+
+    bool MainComponent::completeMidiRecordingLoopWrap(std::uint64_t generation)
+    {
+        if (!currentProject
+            || !midiRecordingLoopRunState.matches(generation)
+            || !midiRecordingLoopRunState.isActive()
+            || !midiRecordingSession.isRecording())
+        {
+            return false;
+        }
+
+        const auto region = midiRecordingPunchRunState.region();
+        if (!mw::midi::isValidMidiRecordingPunchRegion(region))
+            return false;
+
+        const auto currentSeconds = currentMidiRecordingTransportSeconds();
+        const auto currentTick = mw::midi::projectTickForTransportSeconds(
+            currentSeconds, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+        const int completedPass = midiRecordingLoopRunState.passNumber();
+        if (!midiRecordingLoopWrapTransaction.begin(generation, completedPass, region, currentTick))
+            return false;
+        if (!midiRecordingLoopRunState.claimWrap(generation, currentTick))
+        {
+            midiRecordingLoopWrapTransaction.cancel();
+            return false;
+        }
+
+        const auto outSeconds = mw::midi::midiRecordingProjectSecondsForTick(
+            region.outTick, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+        const auto boundaryLatenessMs = std::max(0.0, (currentSeconds - outSeconds) * 1000.0);
+        const auto wrapStartedMs = juce::Time::getMillisecondCounterHiRes();
+        const auto wrapBackend = midiRecordingFallbackTransportGeneration != 0
+            ? juce::String("rendered/MCI")
+            : ((vstLiveDirectPreviewEngine.status().active
+                    || mixedLiveProjectPreviewEngine.isActive()
+                    || clapLiveDirectPreviewEngine.status().active)
+                ? juce::String("mixed-live")
+                : juce::String("preview"));
+        midiRecordingLoopPendingWrapStartedMs = wrapStartedMs;
+        midiRecordingLoopPendingWrapPass = completedPass;
+        midiRecordingLoopPendingWrapBackend = wrapBackend;
+
+        const auto finalizeStartedMs = juce::Time::getMillisecondCounterHiRes();
+        auto result = midiRecordingSession.stop(outSeconds);
+        const auto finalizeElapsedMs = std::max(0.0,
+            juce::Time::getMillisecondCounterHiRes() - finalizeStartedMs);
+
+        const int appliedQuantizeDivision = mw::midi::sanitizeMidiRecordingQuantizeDivision(
+            midiRecordingQuantizeDivision);
+        midiRecordingLoopQuantizedStartCount += mw::midi::quantizeMidiRecordingTake(
+            result.notes,
+            appliedQuantizeDivision,
+            mw::core::Project::ticksPerQuarterNote);
+        midiRecordingLoopBoundaryAdjustmentCount += mw::midi::constrainMidiRecordingTakeToPunchRegion(
+            result.notes, region);
+        midiRecordingLoopFinalizedHeldNoteCount += result.finalizedHeldNoteCount;
+        if (midiRecordingLoopTakeReviewState.isCollecting())
+        {
+            if (!midiRecordingLoopTakeReviewState.addPass(
+                    generation, completedPass, result.notes,
+                    result.sustainDownMaskAtStart, result.cc64Events, result.controllerEvents, result.pitchBendEvents, result.programChangeEvents, result.channelPressureEvents, result.polyPressureEvents, result.controller14BitEvents, result.rpnEvents, result.nrpnEvents))
+            {
+                logMessage("MIDI Recording Take Review: could not retain completed loop pass identity; Merge data remains available.");
+            }
+        }
+        midiRecordingLoopAccumulatedNotes.insert(
+            midiRecordingLoopAccumulatedNotes.end(), result.notes.begin(), result.notes.end());
+        for (auto event : result.controllerEvents)
+        {
+            event.order = static_cast<std::uint64_t>(midiRecordingLoopAccumulatedControllers.size() + 1U);
+            midiRecordingLoopAccumulatedControllers.push_back(event);
+        }
+        for (auto event : result.pitchBendEvents)
+        {
+            event.order = static_cast<std::uint64_t>(midiRecordingLoopAccumulatedPitchBends.size() + 1U);
+            midiRecordingLoopAccumulatedPitchBends.push_back(event);
+        }
+        for (auto event : result.programChangeEvents)
+        {
+            event.order = static_cast<std::uint64_t>(midiRecordingLoopAccumulatedProgramChanges.size() + 1U);
+            midiRecordingLoopAccumulatedProgramChanges.push_back(event);
+        }
+        for (auto event : result.channelPressureEvents)
+        {
+            event.order = static_cast<std::uint64_t>(midiRecordingLoopAccumulatedChannelPressures.size() + 1U);
+            midiRecordingLoopAccumulatedChannelPressures.push_back(event);
+        }
+        for (auto event : result.polyPressureEvents)
+        {
+            event.order = static_cast<std::uint64_t>(midiRecordingLoopAccumulatedPolyPressures.size() + 1U);
+            midiRecordingLoopAccumulatedPolyPressures.push_back(event);
+        }
+        for (auto event : result.controller14BitEvents)
+        {
+            event.order = static_cast<std::uint64_t>(midiRecordingLoopAccumulated14BitControllers.size() + 1U);
+            midiRecordingLoopAccumulated14BitControllers.push_back(event);
+        }
+        for (auto event : result.rpnEvents)
+        {
+            event.order = static_cast<std::uint64_t>(midiRecordingLoopAccumulatedRpns.size() + 1U);
+            midiRecordingLoopAccumulatedRpns.push_back(event);
+        }
+        for (auto event : result.nrpnEvents)
+        {
+            event.order = static_cast<std::uint64_t>(midiRecordingLoopAccumulatedNrpns.size() + 1U);
+            midiRecordingLoopAccumulatedNrpns.push_back(event);
+        }
+        midiRecordingLoopSustainDownMask = result.sustainDownMaskAtStop;
+
+        if (clapLiveDirectPreviewProjectMode && mixedLiveProjectPreviewEngine.isActive())
+            mixedLiveProjectPreviewEngine.requestLiveMidiPanic(midiRecordingArmedTrackId);
+
+        if (!midiRecordingLoopWrapTransaction.markSeeking(generation, completedPass))
+        {
+            logMessage("MIDI Recording Loop: wrap transaction could not enter seek stage; committing completed passes and stopping.");
+            midiRecordingPlaybackPending = false;
+            finalizeMidiRecordingAtSeconds(outSeconds, true, false);
+            return false;
+        }
+
+        // Re-arm the logical pass before seeking because mixed-live restart paths may
+        // synchronously report Playing and begin the next MidiRecordingSession.
+        if (!midiRecordingLoopRunState.beginNextPass(generation))
+        {
+            midiRecordingLoopWrapTransaction.cancel();
+            logMessage("MIDI Recording Loop: could not arm the next pass after region Out; committing completed passes and stopping.");
+            midiRecordingPlaybackPending = false;
+            finalizeMidiRecordingAtSeconds(outSeconds, true, false);
+            return false;
+        }
+
+        const auto inSeconds = mw::midi::midiRecordingProjectSecondsForTick(
+            region.inTick, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+        midiRecordingRequestedStartSeconds = inSeconds;
+        midiRecordingPlaybackPending = true;
+        midiRecordingOwnsProjectPlayback = true;
+
+        // Deliberate future seam: if native listening later proves sample-boundary loop
+        // continuity is required, keep MidiRecordingLoopWrapTransaction as the logical
+        // generation/pass contract and replace only this backend seek/restart step for
+        // compatible in-process mixed-live playback with an audio-callback boundary
+        // coordinator. Rendered/MCI fallback must keep a separately defined contract;
+        // do not call MCI/UI APIs from an audio callback or add another AudioDeviceManager.
+        const auto seekStartedMs = juce::Time::getMillisecondCounterHiRes();
+        const bool seekSucceeded = seekPianoRollPreviewToSeconds(inSeconds);
+        const auto seekElapsedMs = std::max(0.0,
+            juce::Time::getMillisecondCounterHiRes() - seekStartedMs);
+        if (!seekSucceeded)
+        {
+            midiRecordingLoopWrapTransaction.cancel();
+            midiRecordingPlaybackPending = false;
+            logMessage("MIDI Recording Loop: backing playback could not wrap to region In; committing completed passes and stopping.");
+            finalizeMidiRecordingAtSeconds(outSeconds, true, false);
+            return false;
+        }
+
+        if (!midiRecordingLoopWrapTransaction.markRestarted(generation, completedPass)
+            || !midiRecordingLoopWrapTransaction.finish(generation, completedPass))
+        {
+            midiRecordingLoopWrapTransaction.cancel();
+            logMessage("MIDI Recording Loop: wrap transaction restart acknowledgement was stale; stopping safely.");
+            midiRecordingPlaybackPending = false;
+            finalizeMidiRecordingAtSeconds(outSeconds, true, false);
+            return false;
+        }
+
+        // Pure mixed-live restarts can synchronously begin the next recording pass.
+        // Rendered/MCI and asynchronously prepared mixed-live paths leave playback
+        // pending until the transport reports Playing.
+        if (midiRecordingPlaybackPending)
+        {
+            currentMidiRecordingTransportSeconds();
+            const auto transport = playbackTransportCoordinator.snapshot();
+            if (transport.state == mw::playback::TransportState::Playing)
+                beginMidiRecordingSessionForActivePlayback();
+        }
+
+        const auto wrapCommandElapsedMs = std::max(0.0,
+            juce::Time::getMillisecondCounterHiRes() - wrapStartedMs);
+        juce::String timingMessage;
+        timingMessage << "MIDI Recording Loop Timing: pass " << completedPass
+                      << " backend " << wrapBackend
+                      << "; Out claim tick " << static_cast<juce::int64>(currentTick)
+                      << "; boundary lateness " << juce::String(boundaryLatenessMs, 2) << " ms"
+                      << "; pass finalization " << juce::String(finalizeElapsedMs, 2) << " ms"
+                      << "; seek/restart command " << juce::String(seekElapsedMs, 2) << " ms"
+                      << "; transaction command total " << juce::String(wrapCommandElapsedMs, 2) << " ms"
+                      << "; logical restart tick " << static_cast<juce::int64>(region.inTick) << ".";
+        logMessage(timingMessage);
+
+        juce::String message;
+        message << "MIDI Recording Loop: completed pass " << completedPass
+                << " at exact region Out tick " << static_cast<juce::int64>(region.outTick)
+                << "; wrapped backing to region In tick " << static_cast<juce::int64>(region.inTick)
+                << " for pass " << midiRecordingLoopRunState.passNumber() << ".";
+        logMessage(message);
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+            content->updateStatus(message);
+        refreshMidiRecordingUi();
+        return true;
+    }
+
+
+    void MainComponent::stopMidiRecordingBackingPlayback(double preservedPositionSeconds)
+    {
+        mixedLiveProjectPreviewEngine.setMidiRecordingMetronomeActive(false);
+        midiRecordingMetronomeRunState.stop();
+
+        const bool wasPending = midiRecordingPlaybackPending;
+        const bool ownedPlayback = midiRecordingOwnsProjectPlayback;
+        const auto fallbackGeneration = midiRecordingFallbackTransportGeneration;
+
+        midiRecordingPlaybackPending = false;
+        midiRecordingOwnsProjectPlayback = false;
+        midiRecordingFallbackTransportGeneration = 0;
+
+        if (wasPending && renderingInProgress)
+            cancelRenderRequested = true;
+
+        if (ownedPlayback || wasPending)
+            stopPianoRollPreview();
+
+        if (preservedPositionSeconds >= 0.0)
+            pendingPianoRollPreviewStartSeconds = preservedPositionSeconds;
+
+        if (fallbackGeneration != 0
+            && playbackTransportCoordinator.snapshot().generation == fallbackGeneration)
+        {
+            playbackTransportCoordinator.beginStopping(fallbackGeneration);
+            playbackTransportCoordinator.finishStopped(fallbackGeneration);
+        }
+
+        if (!midiRecordingMetronomeBasePreviewWavPath.empty()
+            && std::filesystem::exists(midiRecordingMetronomeBasePreviewWavPath))
+        {
+            lastPianoRollPreviewWavPath = midiRecordingMetronomeBasePreviewWavPath;
+        }
+        if (!midiRecordingMetronomePreviewWavPath.empty())
+        {
+            std::error_code ignored;
+            std::filesystem::remove(midiRecordingMetronomePreviewWavPath, ignored);
+        }
+        midiRecordingMetronomeBasePreviewWavPath.clear();
+        midiRecordingMetronomePreviewWavPath.clear();
+    }
+
+    void MainComponent::refreshTrackAfterMidiRecordingChange(int trackIndex)
+    {
+        if (!currentProject || trackIndex < 0 || trackIndex >= static_cast<int>(currentProject->getTracks().size()))
+            return;
+
+        expandSequenceEndTickForTrack(trackIndex);
+        syncSequencesToProjectMetadata();
+
+        if (auto* state = findPianoRollEditorWindow(trackIndex); state != nullptr)
+        {
+            if (!state->dirty && !state->hasPendingInstrumentAssignment)
+            {
+                state->suppressDirty = true;
+                state->roll.setNotes(makeSequenceLocalNotesForTrack(trackIndex));
+                state->suppressDirty = false;
+                updatePianoRollPageIndicator(*state);
+                updatePianoRollWindowDirtyIndicator(*state);
+            }
+        }
+
+        if (getSelectedTrackIndex() == trackIndex)
+        {
+            populateNoteEditorFromNotes(currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getNotes());
+            syncPianoRollFromSelectedTrack();
+            syncTrackInspectorFromSelection();
+        }
+
+        updateTrackSummary(*currentProject);
+        refreshTrackManagerText();
+        refreshMainSequenceSelector();
+        updateRenderTargetLabel();
+    }
+
+    void MainComponent::stopMidiRecording(bool commitNotes)
+    {
+        if (midiRecordingLoopTakeReviewState.isReviewActive())
+        {
+            logMessage("MIDI Recording Take Review: resolve the pending review with Keep Selected, Keep All, Keep Comp, or Discard before starting/stopping another recording workflow.");
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        if (midiRecordingCountInState.isActive() || midiRecordingCountInPlayer.isActive())
+        {
+            cancelMidiRecordingCountIn("Stop Recording requested before capture began");
+            return;
+        }
+
+        if (!midiRecordingSession.isRecording())
+        {
+            if (midiRecordingLoopRunState.isActive()
+                && (!midiRecordingLoopAccumulatedNotes.empty() || !midiRecordingLoopAccumulatedControllers.empty() || !midiRecordingLoopAccumulatedPitchBends.empty() || !midiRecordingLoopAccumulatedProgramChanges.empty() || !midiRecordingLoopAccumulatedChannelPressures.empty() || !midiRecordingLoopAccumulatedPolyPressures.empty() || !midiRecordingLoopAccumulated14BitControllers.empty() || !midiRecordingLoopAccumulatedRpns.empty() || !midiRecordingLoopAccumulatedNrpns.empty()))
+            {
+                finalizeMidiRecordingAtSeconds(currentMidiRecordingTransportSeconds(), commitNotes, false);
+                return;
+            }
+
+            const bool punchPreRoll = midiRecordingPunchRunState.isActive();
+            midiRecordingPunchRunState.cancel();
+            clearMidiRecordingLoopSession();
+            if (midiRecordingPlaybackPending || midiRecordingOwnsProjectPlayback)
+            {
+                stopMidiRecordingBackingPlayback();
+                logMessage(punchPreRoll
+                    ? "MIDI Recording Punch/Loop: pre-roll or pending workflow was stopped without creating a take."
+                    : "MIDI Recording: pending project playback/capture was stopped.");
+            }
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        // Manual Stop uses the audible transport position, except that an active punch
+        // region is never permitted to extend note data beyond its exact Punch Out tick.
+        auto stopSeconds = currentMidiRecordingTransportSeconds();
+        if (midiRecordingPunchRunState.isActive() && currentProject)
+        {
+            const auto region = midiRecordingPunchRunState.region();
+            if (mw::midi::isValidMidiRecordingPunchRegion(region))
+            {
+                const auto outSeconds = mw::midi::midiRecordingProjectSecondsForTick(
+                    region.outTick, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+                stopSeconds = std::min(stopSeconds, outSeconds);
+            }
+        }
+        finalizeMidiRecordingAtSeconds(stopSeconds, commitNotes, false);
+    }
+
+    void MainComponent::finalizeMidiRecordingAtSeconds(double stopSeconds,
+                                                        bool commitNotes,
+                                                        bool automaticPunchOut)
+    {
+        const bool loopActive = midiRecordingLoopRunState.isActive();
+        if (!midiRecordingSession.isRecording()
+            && !(loopActive && (!midiRecordingLoopAccumulatedNotes.empty() || !midiRecordingLoopAccumulatedControllers.empty() || !midiRecordingLoopAccumulatedPitchBends.empty() || !midiRecordingLoopAccumulatedProgramChanges.empty() || !midiRecordingLoopAccumulatedChannelPressures.empty() || !midiRecordingLoopAccumulatedPolyPressures.empty() || !midiRecordingLoopAccumulated14BitControllers.empty() || !midiRecordingLoopAccumulatedRpns.empty() || !midiRecordingLoopAccumulatedNrpns.empty())))
+        {
+            return;
+        }
+
+        const auto activePunchRegion = midiRecordingPunchRunState.isActive()
+            ? midiRecordingPunchRunState.region()
+            : mw::midi::MidiRecordingPunchRegion{};
+        const auto activePunchGeneration = midiRecordingPunchRunState.generation();
+        const int completedLoopPasses = midiRecordingLoopRunState.passNumber();
+
+        mw::midi::MidiRecordingStopResult result;
+        if (midiRecordingSession.isRecording())
+            result = midiRecordingSession.stop(stopSeconds);
+
+        const int appliedQuantizeDivision = mw::midi::sanitizeMidiRecordingQuantizeDivision(
+            midiRecordingQuantizeDivision);
+
+        if (loopActive)
+        {
+            midiRecordingLoopQuantizedStartCount += mw::midi::quantizeMidiRecordingTake(
+                result.notes,
+                appliedQuantizeDivision,
+                mw::core::Project::ticksPerQuarterNote);
+            if (activePunchRegion.enabled)
+            {
+                midiRecordingLoopBoundaryAdjustmentCount += mw::midi::constrainMidiRecordingTakeToPunchRegion(
+                    result.notes, activePunchRegion);
+            }
+            midiRecordingLoopFinalizedHeldNoteCount += result.finalizedHeldNoteCount;
+            const auto loopGeneration = midiRecordingLoopRunState.generation();
+            const int finalPassNumber = std::max(1, midiRecordingLoopRunState.passNumber());
+            if (midiRecordingLoopTakeReviewState.isCollecting())
+            {
+                if (!midiRecordingLoopTakeReviewState.addPass(
+                        loopGeneration, finalPassNumber, result.notes,
+                        result.sustainDownMaskAtStart, result.cc64Events, result.controllerEvents, result.pitchBendEvents, result.programChangeEvents, result.channelPressureEvents, result.polyPressureEvents, result.controller14BitEvents, result.rpnEvents, result.nrpnEvents))
+                {
+                    logMessage("MIDI Recording Take Review: final pass identity was already retained or became stale; Merge data remains authoritative.");
+                }
+            }
+            midiRecordingLoopAccumulatedNotes.insert(
+                midiRecordingLoopAccumulatedNotes.end(), result.notes.begin(), result.notes.end());
+            midiRecordingLoopAccumulatedControllers.insert(
+                midiRecordingLoopAccumulatedControllers.end(), result.controllerEvents.begin(), result.controllerEvents.end());
+            midiRecordingLoopAccumulatedPitchBends.insert(
+                midiRecordingLoopAccumulatedPitchBends.end(), result.pitchBendEvents.begin(), result.pitchBendEvents.end());
+            midiRecordingLoopAccumulatedProgramChanges.insert(
+                midiRecordingLoopAccumulatedProgramChanges.end(), result.programChangeEvents.begin(), result.programChangeEvents.end());
+            for (auto event : result.channelPressureEvents)
+            {
+                event.order = static_cast<std::uint64_t>(midiRecordingLoopAccumulatedChannelPressures.size() + 1U);
+                midiRecordingLoopAccumulatedChannelPressures.push_back(event);
+            }
+            for (auto event : result.polyPressureEvents)
+            {
+                event.order = static_cast<std::uint64_t>(midiRecordingLoopAccumulatedPolyPressures.size() + 1U);
+                midiRecordingLoopAccumulatedPolyPressures.push_back(event);
+            }
+            for (auto event : result.controller14BitEvents)
+            {
+                event.order = static_cast<std::uint64_t>(midiRecordingLoopAccumulated14BitControllers.size() + 1U);
+                midiRecordingLoopAccumulated14BitControllers.push_back(event);
+            }
+            for (auto event : result.rpnEvents)
+            {
+                event.order = static_cast<std::uint64_t>(midiRecordingLoopAccumulatedRpns.size() + 1U);
+                midiRecordingLoopAccumulatedRpns.push_back(event);
+            }
+            for (auto event : result.nrpnEvents)
+            {
+                event.order = static_cast<std::uint64_t>(midiRecordingLoopAccumulatedNrpns.size() + 1U);
+                midiRecordingLoopAccumulatedNrpns.push_back(event);
+            }
+
+            if (midiRecordingPunchRunState.isActive())
+                midiRecordingPunchRunState.finish(activePunchGeneration);
+
+            stopMidiRecordingBackingPlayback();
+
+            const auto armedTrackId = midiRecordingArmedTrackId;
+            const int trackIndex = findTrackIndexByStableId(armedTrackId);
+            const auto capturedNotes = midiRecordingLoopAccumulatedNotes.size();
+            const auto capturedControllers = midiRecordingLoopAccumulatedControllers.size();
+            const auto capturedPitchBends = midiRecordingLoopAccumulatedPitchBends.size();
+            const auto capturedProgramChanges = midiRecordingLoopAccumulatedProgramChanges.size();
+            const auto capturedChannelPressures = midiRecordingLoopAccumulatedChannelPressures.size();
+            const auto capturedPolyPressures = midiRecordingLoopAccumulatedPolyPressures.size();
+            const auto captured14BitControllers = midiRecordingLoopAccumulated14BitControllers.size();
+            const auto capturedRpns = midiRecordingLoopAccumulatedRpns.size();
+            const auto capturedNrpns = midiRecordingLoopAccumulatedNrpns.size();
+            const bool noMidiDiagnosticMode = midiRecordingLoopNoMidiDiagnosticMode;
+            const auto finalizedHeldNotes = midiRecordingLoopFinalizedHeldNoteCount;
+            const auto quantizedStarts = midiRecordingLoopQuantizedStartCount;
+            const auto boundaryAdjustments = midiRecordingLoopBoundaryAdjustmentCount;
+
+            const bool canEnterTakeReview = commitNotes
+                && !noMidiDiagnosticMode
+                && (capturedNotes > 0 || capturedControllers > 0 || capturedPitchBends > 0 || capturedProgramChanges > 0 || capturedChannelPressures > 0 || capturedPolyPressures > 0 || captured14BitControllers > 0 || capturedRpns > 0 || capturedNrpns > 0)
+                && currentProject
+                && trackIndex >= 0
+                && midiRecordingLoopTakeReviewEnabled
+                && midiRecordingLoopTakeReviewState.isCollecting()
+                && midiRecordingLoopTakeReviewState.matchesProjectTrack(
+                    currentProject->getStableId(), armedTrackId)
+                && midiRecordingLoopTakeReviewState.finishCollection(loopGeneration);
+
+            if (canEnterTakeReview)
+            {
+                const auto passCount = midiRecordingLoopTakeReviewState.passCount();
+                clearMidiRecordingLoopSession(true);
+                if (!syncPersistentMidiTakeReviewToProject(true))
+                    logMessage("MIDI Recording Take Review: WARNING - pending review could not be mirrored into project persistence.");
+                renderStatusLabel.setText("MIDI loop TAKE REVIEW ready.", juce::dontSendNotification);
+                renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+
+                juce::String message;
+                message << "MIDI Recording Take Review: retained "
+                        << static_cast<int>(passCount) << " pass(es) / "
+                        << static_cast<int>(capturedNotes) << " note(s) / "
+                        << static_cast<int>(capturedControllers) << " controller event(s) / "
+                        << static_cast<int>(capturedPitchBends) << " Pitch Bend event(s) / "
+                        << static_cast<int>(capturedProgramChanges) << " Program Change event(s) / "
+                        << static_cast<int>(capturedChannelPressures) << " Channel Pressure event(s) / "
+                        << static_cast<int>(capturedPolyPressures)
+                        << " Poly Pressure event(s) in persisted Take Review state. Use Whole Pass or Comp review, then Audition, Keep Selected/All/Comp, or Discard. Project notes and Controller Lane data are unchanged until a Keep action; Save Project preserves this unresolved review.";
+                logMessage(message);
+                if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+                    content->updateStatus(message);
+                refreshMidiRecordingUi();
+                return;
+            }
+
+            if (commitNotes && currentProject && trackIndex >= 0
+                && (!midiRecordingLoopAccumulatedNotes.empty() || !midiRecordingLoopAccumulatedControllers.empty() || !midiRecordingLoopAccumulatedPitchBends.empty() || !midiRecordingLoopAccumulatedProgramChanges.empty() || !midiRecordingLoopAccumulatedChannelPressures.empty() || !midiRecordingLoopAccumulatedPolyPressures.empty() || !midiRecordingLoopAccumulated14BitControllers.empty() || !midiRecordingLoopAccumulatedRpns.empty() || !midiRecordingLoopAccumulatedNrpns.empty()))
+            {
+                auto& track = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)];
+                MidiRecordingHistoryEntry undoState;
+                undoState.projectId = currentProject->getStableId();
+                undoState.trackId = track.getStableId();
+                undoState.notes = track.getNotes();
+                undoState.controllerEvents = track.getMidiControllerEvents();
+                undoState.pitchBendEvents = track.getMidiPitchBendEvents();
+                undoState.programChangeEvents = track.getMidiProgramChangeEvents();
+                undoState.channelPressureEvents = track.getMidiChannelPressureEvents();
+                undoState.polyPressureEvents = track.getMidiPolyPressureEvents();
+            undoState.controller14BitEvents = track.getMidi14BitControllerEvents();
+            undoState.rpnEvents = track.getMidiRpnEvents();
+            undoState.nrpnEvents = track.getMidiNrpnEvents();
+                undoState.pendingTakeReview = track.getPendingMidiTakeReview();
+                midiRecordingUndoStack.push_back(std::move(undoState));
+                constexpr std::size_t maxMidiRecordingUndoSteps = 10;
+                if (midiRecordingUndoStack.size() > maxMidiRecordingUndoSteps)
+                    midiRecordingUndoStack.erase(midiRecordingUndoStack.begin());
+                midiRecordingRedoStack.clear();
+
+                auto& projectNotes = track.getNotes();
+                projectNotes.insert(projectNotes.end(),
+                                    midiRecordingLoopAccumulatedNotes.begin(),
+                                    midiRecordingLoopAccumulatedNotes.end());
+                mw::midi::commitRecordedMidiControllerEvents(
+                    *currentProject, track.getStableId(), midiRecordingLoopAccumulatedControllers);
+                mw::midi::commitRecordedMidiPitchBendEvents(
+                    *currentProject, track.getStableId(), midiRecordingLoopAccumulatedPitchBends);
+                mw::midi::commitRecordedMidiProgramChangeEvents(
+                    *currentProject, track.getStableId(), midiRecordingLoopAccumulatedProgramChanges);
+                mw::midi::commitRecordedMidiChannelPressureEvents(
+                    *currentProject, track.getStableId(), midiRecordingLoopAccumulatedChannelPressures);
+                mw::midi::commitRecordedMidiPolyPressureEvents(
+                    *currentProject, track.getStableId(), midiRecordingLoopAccumulatedPolyPressures);
+                mw::midi::commitRecordedMidi14BitControllerEvents(
+                    *currentProject, track.getStableId(), midiRecordingLoopAccumulated14BitControllers);
+                mw::midi::commitRecordedMidiRpnEvents(
+                    *currentProject, track.getStableId(), midiRecordingLoopAccumulatedRpns);
+                mw::midi::commitRecordedMidiNrpnEvents(
+                    *currentProject, track.getStableId(), midiRecordingLoopAccumulatedNrpns);
+                midiRecordingUndoStack.back().expectedControllerEvents = track.getMidiControllerEvents();
+                midiRecordingUndoStack.back().expectedPitchBendEvents = track.getMidiPitchBendEvents();
+                midiRecordingUndoStack.back().expectedProgramChangeEvents = track.getMidiProgramChangeEvents();
+                midiRecordingUndoStack.back().expectedChannelPressureEvents = track.getMidiChannelPressureEvents();
+                midiRecordingUndoStack.back().expectedPolyPressureEvents = track.getMidiPolyPressureEvents();
+            midiRecordingUndoStack.back().expectedController14BitEvents = track.getMidi14BitControllerEvents();
+            midiRecordingUndoStack.back().expectedRpnEvents = track.getMidiRpnEvents();
+            midiRecordingUndoStack.back().expectedNrpnEvents = track.getMidiNrpnEvents();
+                setProjectDirty();
+                refreshTrackAfterMidiRecordingChange(trackIndex);
+            }
+
+            clearMidiRecordingLoopSession();
+
+            if (commitNotes && currentProject && trackIndex >= 0 && capturedNotes == 0 && capturedControllers == 0 && capturedPitchBends == 0 && capturedProgramChanges == 0 && capturedChannelPressures == 0 && capturedPolyPressures == 0 && captured14BitControllers == 0 && capturedRpns == 0 && capturedNrpns == 0)
+            {
+                const auto message = noMidiDiagnosticMode
+                    ? juce::String("MIDI Recording Loop: backing-wrap diagnostic stopped with zero captured MIDI events; project data and Undo history were left unchanged.")
+                    : juce::String("MIDI Recording Loop: session stopped with zero captured notes/controllers/Pitch Bend/Program Change/Channel Pressure/Poly Pressure; project data and Undo history were left unchanged.");
+                logMessage(message);
+                renderStatusLabel.setText("MIDI loop recording stopped.", juce::dontSendNotification);
+                renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+                if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+                    content->updateStatus(message);
+                refreshMidiRecordingUi();
+                return;
+            }
+
+            if (!commitNotes || !currentProject || trackIndex < 0)
+            {
+                logMessage("MIDI Recording Loop: session stopped without committing project notes.");
+                renderStatusLabel.setText("MIDI loop recording stopped.", juce::dontSendNotification);
+                renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+                refreshMidiRecordingUi();
+                return;
+            }
+
+            renderStatusLabel.setText("MIDI loop recording stopped.", juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+
+            juce::String message;
+            message << "MIDI Recording Loop: stopped " << getTrackDisplayName(trackIndex)
+                    << " after pass " << completedLoopPasses
+                    << " at " << formatPreviewClockTime(stopSeconds)
+                    << "; committed " << static_cast<int>(capturedNotes) << " note(s) / "
+                    << static_cast<int>(capturedControllers) << " controller event(s) / "
+                    << static_cast<int>(capturedPitchBends) << " Pitch Bend event(s) / "
+                    << static_cast<int>(capturedProgramChanges) << " Program Change event(s) / "
+                    << static_cast<int>(capturedChannelPressures) << " Channel Pressure event(s) / "
+                    << static_cast<int>(capturedPolyPressures)
+                    << " Poly Pressure event(s) as one Undo Take unit";
+            if (finalizedHeldNotes > 0)
+                message << ", finalized " << static_cast<int>(finalizedHeldNotes) << " held note(s)";
+            if (appliedQuantizeDivision != 0)
+                message << ", quantized " << static_cast<int>(quantizedStarts)
+                        << " start(s) to 1/" << appliedQuantizeDivision;
+            if (boundaryAdjustments > 0)
+                message << ", constrained " << static_cast<int>(boundaryAdjustments)
+                        << " note(s) to the loop region";
+            message << ".";
+            logMessage(message);
+            if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+                content->updateStatus(message);
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        const auto automaticStopBackend = midiRecordingFallbackTransportGeneration != 0
+            ? juce::String("rendered/MCI")
+            : (clapLiveDirectPreviewProjectMode && mixedLiveProjectPreviewEngine.isActive()
+                ? juce::String("mixed-live")
+                : juce::String("preview"));
+        if (midiRecordingPunchRunState.isActive())
+            midiRecordingPunchRunState.finish(activePunchGeneration);
+
+        const auto backingStopStartedMs = juce::Time::getMillisecondCounterHiRes();
+        stopMidiRecordingBackingPlayback(automaticPunchOut ? stopSeconds : -1.0);
+        const auto backingStopElapsedMs = std::max(0.0,
+            juce::Time::getMillisecondCounterHiRes() - backingStopStartedMs);
+        if (automaticPunchOut)
+        {
+            juce::String timingMessage;
+            timingMessage << "MIDI Recording Punch: " << automaticStopBackend
+                          << " backing stop command completed in "
+                          << juce::String(backingStopElapsedMs, 2)
+                          << " ms; logical preview position held at Punch Out.";
+            logMessage(timingMessage);
+        }
+
+        const auto armedTrackId = midiRecordingArmedTrackId;
+        const int trackIndex = findTrackIndexByStableId(armedTrackId);
+
+        if (!commitNotes || !currentProject || trackIndex < 0)
+        {
+            logMessage("MIDI Recording: take stopped without committing project notes.");
+            renderStatusLabel.setText("MIDI recording stopped.", juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        auto& track = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)];
+        const auto quantizedStartCount = mw::midi::quantizeMidiRecordingTake(
+            result.notes,
+            appliedQuantizeDivision,
+            mw::core::Project::ticksPerQuarterNote);
+        const auto punchBoundaryAdjustmentCount = activePunchRegion.enabled
+            ? mw::midi::constrainMidiRecordingTakeToPunchRegion(result.notes, activePunchRegion)
+            : 0u;
+        if (activePunchRegion.enabled)
+        {
+            result.controllerEvents.erase(std::remove_if(result.controllerEvents.begin(), result.controllerEvents.end(), [&](const auto& event)
+            {
+                return event.tick < activePunchRegion.inTick || event.tick >= activePunchRegion.outTick;
+            }), result.controllerEvents.end());
+            result.pitchBendEvents.erase(std::remove_if(result.pitchBendEvents.begin(), result.pitchBendEvents.end(), [&](const auto& event)
+            {
+                return event.tick < activePunchRegion.inTick || event.tick >= activePunchRegion.outTick;
+            }), result.pitchBendEvents.end());
+            result.programChangeEvents.erase(std::remove_if(result.programChangeEvents.begin(), result.programChangeEvents.end(), [&](const auto& event)
+            {
+                return event.tick < activePunchRegion.inTick || event.tick >= activePunchRegion.outTick;
+            }), result.programChangeEvents.end());
+            result.channelPressureEvents.erase(std::remove_if(result.channelPressureEvents.begin(), result.channelPressureEvents.end(), [&](const auto& event)
+            {
+                return event.tick < activePunchRegion.inTick || event.tick >= activePunchRegion.outTick;
+            }), result.channelPressureEvents.end());
+            result.polyPressureEvents.erase(std::remove_if(result.polyPressureEvents.begin(), result.polyPressureEvents.end(), [&](const auto& event)
+            {
+                return event.tick < activePunchRegion.inTick || event.tick >= activePunchRegion.outTick;
+            }), result.polyPressureEvents.end());
+            result.controller14BitEvents.erase(std::remove_if(result.controller14BitEvents.begin(), result.controller14BitEvents.end(), [&](const auto& event)
+            {
+                return event.tick < activePunchRegion.inTick || event.tick >= activePunchRegion.outTick;
+            }), result.controller14BitEvents.end());
+            result.rpnEvents.erase(std::remove_if(result.rpnEvents.begin(), result.rpnEvents.end(), [&](const auto& event)
+            {
+                return event.tick < activePunchRegion.inTick || event.tick >= activePunchRegion.outTick;
+            }), result.rpnEvents.end());
+            result.nrpnEvents.erase(std::remove_if(result.nrpnEvents.begin(), result.nrpnEvents.end(), [&](const auto& event)
+            {
+                return event.tick < activePunchRegion.inTick || event.tick >= activePunchRegion.outTick;
+            }), result.nrpnEvents.end());
+        }
+        if (!result.notes.empty() || !result.controllerEvents.empty() || !result.pitchBendEvents.empty() || !result.programChangeEvents.empty() || !result.channelPressureEvents.empty() || !result.polyPressureEvents.empty() || !result.controller14BitEvents.empty() || !result.rpnEvents.empty() || !result.nrpnEvents.empty())
+        {
+            MidiRecordingHistoryEntry undoState;
+            undoState.projectId = currentProject->getStableId();
+            undoState.trackId = track.getStableId();
+            undoState.notes = track.getNotes();
+            undoState.controllerEvents = track.getMidiControllerEvents();
+            undoState.pitchBendEvents = track.getMidiPitchBendEvents();
+            undoState.programChangeEvents = track.getMidiProgramChangeEvents();
+            undoState.channelPressureEvents = track.getMidiChannelPressureEvents();
+            undoState.polyPressureEvents = track.getMidiPolyPressureEvents();
+            undoState.controller14BitEvents = track.getMidi14BitControllerEvents();
+            undoState.rpnEvents = track.getMidiRpnEvents();
+            undoState.nrpnEvents = track.getMidiNrpnEvents();
+            undoState.pendingTakeReview = track.getPendingMidiTakeReview();
+            midiRecordingUndoStack.push_back(std::move(undoState));
+            constexpr std::size_t maxMidiRecordingUndoSteps = 10;
+            if (midiRecordingUndoStack.size() > maxMidiRecordingUndoSteps)
+                midiRecordingUndoStack.erase(midiRecordingUndoStack.begin());
+            midiRecordingRedoStack.clear();
+
+            auto& projectNotes = track.getNotes();
+            projectNotes.insert(projectNotes.end(), result.notes.begin(), result.notes.end());
+            mw::midi::commitRecordedMidiControllerEvents(*currentProject, track.getStableId(), result.controllerEvents);
+            mw::midi::commitRecordedMidiPitchBendEvents(*currentProject, track.getStableId(), result.pitchBendEvents);
+            mw::midi::commitRecordedMidiProgramChangeEvents(*currentProject, track.getStableId(), result.programChangeEvents);
+            mw::midi::commitRecordedMidiChannelPressureEvents(*currentProject, track.getStableId(), result.channelPressureEvents);
+            mw::midi::commitRecordedMidiPolyPressureEvents(*currentProject, track.getStableId(), result.polyPressureEvents);
+            mw::midi::commitRecordedMidi14BitControllerEvents(*currentProject, track.getStableId(), result.controller14BitEvents);
+            mw::midi::commitRecordedMidiRpnEvents(*currentProject, track.getStableId(), result.rpnEvents);
+            mw::midi::commitRecordedMidiNrpnEvents(*currentProject, track.getStableId(), result.nrpnEvents);
+            midiRecordingUndoStack.back().expectedControllerEvents = track.getMidiControllerEvents();
+            midiRecordingUndoStack.back().expectedPitchBendEvents = track.getMidiPitchBendEvents();
+            midiRecordingUndoStack.back().expectedProgramChangeEvents = track.getMidiProgramChangeEvents();
+            midiRecordingUndoStack.back().expectedChannelPressureEvents = track.getMidiChannelPressureEvents();
+            midiRecordingUndoStack.back().expectedPolyPressureEvents = track.getMidiPolyPressureEvents();
+            midiRecordingUndoStack.back().expectedController14BitEvents = track.getMidi14BitControllerEvents();
+            midiRecordingUndoStack.back().expectedRpnEvents = track.getMidiRpnEvents();
+            midiRecordingUndoStack.back().expectedNrpnEvents = track.getMidiNrpnEvents();
+            setProjectDirty();
+            refreshTrackAfterMidiRecordingChange(trackIndex);
+        }
+
+        renderStatusLabel.setText(automaticPunchOut ? "MIDI punch recording completed." : "MIDI recording stopped.",
+                                  juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+
+        juce::String message;
+        message << "MIDI Recording: " << (automaticPunchOut ? "automatic Punch Out" : "stopped")
+                << " " << getTrackDisplayName(trackIndex)
+                << " at " << formatPreviewClockTime(stopSeconds)
+                << "; captured " << static_cast<int>(result.notes.size()) << " note(s) / "
+                << static_cast<int>(result.controllerEvents.size()) << " controller event(s) / "
+                << static_cast<int>(result.pitchBendEvents.size()) << " Pitch Bend event(s) / "
+                << static_cast<int>(result.programChangeEvents.size()) << " Program Change event(s) / "
+                << static_cast<int>(result.channelPressureEvents.size()) << " Channel Pressure event(s) / "
+                << static_cast<int>(result.polyPressureEvents.size()) << " Poly Pressure event(s)";
+        if (automaticPunchOut && activePunchRegion.enabled)
+            message << " at exact Punch Out tick " << static_cast<juce::int64>(activePunchRegion.outTick);
+        if (result.finalizedHeldNoteCount > 0)
+            message << ", finalized " << static_cast<int>(result.finalizedHeldNoteCount) << " held note(s)";
+        if (appliedQuantizeDivision != 0)
+        {
+            message << ", quantized " << static_cast<int>(quantizedStartCount)
+                    << " start(s) to 1/" << appliedQuantizeDivision;
+        }
+        if (punchBoundaryAdjustmentCount > 0)
+            message << ", constrained " << static_cast<int>(punchBoundaryAdjustmentCount) << " note(s) to the punch region";
+        message << ".";
+        logMessage(message);
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+            content->updateStatus(message);
+        refreshMidiRecordingUi();
+    }
+
+    bool MainComponent::selectMidiRecordingLoopTakeReviewPass(int passNumber)
+    {
+        if (!midiRecordingLoopTakeReviewState.isReviewActive())
+            return false;
+
+        const auto generation = midiRecordingLoopTakeReviewState.generation();
+        if (!midiRecordingLoopTakeReviewState.selectPass(generation, passNumber))
+        {
+            logMessage("MIDI Recording Take Review: the requested pass is not available.");
+            refreshMidiRecordingUi();
+            return false;
+        }
+
+        logMessage("MIDI Recording Take Review: selected pass " + juce::String(passNumber) + ".");
+        syncPersistentMidiTakeReviewToProject(true);
+        refreshMidiRecordingUi();
+        return true;
+    }
+
+    void MainComponent::auditionMidiRecordingLoopTakeReviewPass()
+    {
+        if (!midiRecordingLoopTakeReviewState.isReviewActive())
+        {
+            logMessage("MIDI Recording Take Review: no pending loop takes are available to audition.");
+            return;
+        }
+
+        if (!currentProject
+            || !midiRecordingLoopTakeReviewState.matchesProjectTrack(
+                currentProject->getStableId(), midiRecordingLoopTakeReviewState.trackId()))
+        {
+            logMessage("MIDI Recording Take Review: project identity changed; pending runtime takes were discarded.");
+            midiRecordingLoopTakeReviewState.cancel();
+            midiRecordingLoopCompState.cancel();
+            midiRecordingLoopCompModeEnabled = false;
+            midiRecordingLoopCompSelectedSegmentIndex = 0;
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        const auto* selectedPass = midiRecordingLoopTakeReviewState.selectedPass();
+        if (selectedPass == nullptr)
+        {
+            logMessage("MIDI Recording Take Review: select a pass before auditioning.");
+            return;
+        }
+
+        if (renderingInProgress)
+        {
+            logMessage("MIDI Recording Take Review: wait for the current render/preview to finish before auditioning a pass.");
+            return;
+        }
+
+        const int trackIndex = findTrackIndexByStableId(midiRecordingLoopTakeReviewState.trackId());
+        if (trackIndex < 0)
+        {
+            logMessage("MIDI Recording Take Review: target track is no longer available; pending runtime takes were discarded.");
+            midiRecordingLoopTakeReviewState.cancel();
+            midiRecordingLoopCompState.cancel();
+            midiRecordingLoopCompModeEnabled = false;
+            midiRecordingLoopCompSelectedSegmentIndex = 0;
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        stopLiveMidiMonitoring(true);
+        stopPianoRollPreview();
+        applyTrackInspector();
+        captureOpenVstPluginStatesForPreview("loop take review");
+
+        auto job = createRenderJobSnapshot();
+        auto& tracks = job.project.getTracks();
+        auto snapshotTrackIt = std::find_if(tracks.begin(), tracks.end(), [this](const auto& track)
+        {
+            return track.getStableId() == midiRecordingLoopTakeReviewState.trackId();
+        });
+        if (snapshotTrackIt == tracks.end())
+        {
+            logMessage("MIDI Recording Take Review: target track could not be found in the audition snapshot.");
+            return;
+        }
+
+        const auto effectiveNotes = mw::midi::buildMidiRecordingTakePassNotes(
+            *selectedPass, midiRecordingSustainPedalMode, midiRecordingPunchOutTick);
+        snapshotTrackIt->getNotes().insert(
+            snapshotTrackIt->getNotes().end(),
+            effectiveNotes.begin(),
+            effectiveNotes.end());
+        mw::midi::commitRecordedMidiControllerEvents(
+            job.project, snapshotTrackIt->getStableId(), selectedPass->controllerEvents);
+        mw::midi::commitRecordedMidiPitchBendEvents(
+            job.project, snapshotTrackIt->getStableId(), selectedPass->pitchBendEvents);
+        mw::midi::commitRecordedMidiProgramChangeEvents(
+            job.project, snapshotTrackIt->getStableId(), selectedPass->programChangeEvents);
+        mw::midi::commitRecordedMidiChannelPressureEvents(
+            job.project, snapshotTrackIt->getStableId(), selectedPass->channelPressureEvents);
+        mw::midi::commitRecordedMidiPolyPressureEvents(
+            job.project, snapshotTrackIt->getStableId(), selectedPass->polyPressureEvents);
+
+        setPianoRollPreviewNoteMapFromTracks(job.project.getTracks());
+        setPianoRollPreviewAudioClipMapFromClips(job.project.getAudioClips());
+        std::filesystem::create_directories(mw::app::AppPaths::previewFolder());
+        job.exportFolder = mw::app::AppPaths::previewFolder();
+        job.baseFileName = "preview_loop_take_pass_" + std::to_string(selectedPass->passNumber);
+        job.outputFormat = mw::audio::RenderOutputFormat::Wav;
+        lastPianoRollPreviewScope = 3;
+
+        const auto previewDurationBeats = std::max(
+            tracksEndBeatForPreview(job.project.getTracks()),
+            audioClipsEndBeatForPreview(
+                job.project.getAudioClips(),
+                static_cast<double>(currentProject->getTempoBpm())));
+
+        juce::String label;
+        label << "loop take review pass " << selectedPass->passNumber;
+        logMessage("MIDI Recording Take Review: rendering non-destructive audition for pass "
+                   + juce::String(selectedPass->passNumber)
+                   + "; project notes remain unchanged.");
+        startRenderJobOnBackgroundThread(std::move(job), label, true, previewDurationBeats);
+    }
+
+    void MainComponent::commitMidiRecordingLoopTakeReview(bool keepAll)
+    {
+        if (!midiRecordingLoopTakeReviewState.isReviewActive())
+        {
+            logMessage("MIDI Recording Take Review: no pending loop takes are available to keep.");
+            return;
+        }
+
+        if (!currentProject
+            || !midiRecordingLoopTakeReviewState.matchesProjectTrack(
+                currentProject->getStableId(), midiRecordingLoopTakeReviewState.trackId()))
+        {
+            logMessage("MIDI Recording Take Review: project identity changed; pending runtime takes were discarded.");
+            midiRecordingLoopTakeReviewState.cancel();
+            midiRecordingLoopCompState.cancel();
+            midiRecordingLoopCompModeEnabled = false;
+            midiRecordingLoopCompSelectedSegmentIndex = 0;
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        const int trackIndex = findTrackIndexByStableId(midiRecordingLoopTakeReviewState.trackId());
+        if (trackIndex < 0)
+        {
+            logMessage("MIDI Recording Take Review: target track is no longer available; pending runtime takes were discarded.");
+            midiRecordingLoopTakeReviewState.cancel();
+            midiRecordingLoopCompState.cancel();
+            midiRecordingLoopCompModeEnabled = false;
+            midiRecordingLoopCompSelectedSegmentIndex = 0;
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        if (auto* state = findPianoRollEditorWindow(trackIndex);
+            state != nullptr && (state->dirty || state->hasPendingInstrumentAssignment))
+        {
+            logMessage("MIDI Recording Take Review: apply or discard the open Piano Roll edits before keeping a loop take.");
+            return;
+        }
+
+        std::vector<mw::core::NoteEvent> notesToCommit;
+        std::vector<mw::core::PersistentMidiControllerEvent> controllersToCommit;
+        std::vector<mw::core::PersistentMidiPitchBendEvent> pitchBendsToCommit;
+        std::vector<mw::core::PersistentMidiProgramChangeEvent> programChangesToCommit;
+        std::vector<mw::core::PersistentMidiChannelPressureEvent> channelPressuresToCommit;
+        std::vector<mw::core::PersistentMidiPolyPressureEvent> polyPressuresToCommit;
+        std::vector<mw::core::PersistentMidi14BitControllerEvent> controller14BitsToCommit;
+        std::vector<mw::core::PersistentMidiRpnEvent> rpnsToCommit;
+        std::vector<mw::core::PersistentMidiNrpnEvent> nrpnsToCommit;
+        int selectedPassNumber = 0;
+        if (keepAll)
+        {
+            notesToCommit = midiRecordingLoopTakeReviewState.mergedNotes(
+                midiRecordingSustainPedalMode, midiRecordingPunchOutTick);
+            controllersToCommit = midiRecordingLoopTakeReviewState.mergedControllerEvents();
+            pitchBendsToCommit = midiRecordingLoopTakeReviewState.mergedPitchBendEvents();
+            programChangesToCommit = midiRecordingLoopTakeReviewState.mergedProgramChangeEvents();
+            channelPressuresToCommit = midiRecordingLoopTakeReviewState.mergedChannelPressureEvents();
+            polyPressuresToCommit = midiRecordingLoopTakeReviewState.mergedPolyPressureEvents();
+            controller14BitsToCommit = midiRecordingLoopTakeReviewState.merged14BitControllerEvents();
+            rpnsToCommit = midiRecordingLoopTakeReviewState.mergedRpnEvents();
+            nrpnsToCommit = midiRecordingLoopTakeReviewState.mergedNrpnEvents();
+        }
+        else
+        {
+            const auto* selectedPass = midiRecordingLoopTakeReviewState.selectedPass();
+            if (selectedPass == nullptr)
+            {
+                logMessage("MIDI Recording Take Review: select a pass before choosing Keep Selected.");
+                return;
+            }
+            selectedPassNumber = selectedPass->passNumber;
+            notesToCommit = mw::midi::buildMidiRecordingTakePassNotes(
+                *selectedPass, midiRecordingSustainPedalMode, midiRecordingPunchOutTick);
+            controllersToCommit = mw::midi::normalizeMidiRecordingControllerEvents(selectedPass->controllerEvents);
+            pitchBendsToCommit = mw::midi::normalizeMidiRecordingPitchBendEvents(selectedPass->pitchBendEvents);
+            programChangesToCommit = mw::midi::normalizeMidiRecordingProgramChangeEvents(selectedPass->programChangeEvents);
+            channelPressuresToCommit = mw::midi::normalizeMidiRecordingChannelPressureEvents(selectedPass->channelPressureEvents);
+            polyPressuresToCommit = mw::midi::normalizeMidiRecordingPolyPressureEvents(selectedPass->polyPressureEvents);
+            controller14BitsToCommit = mw::midi::normalizeMidiRecording14BitControllerEvents(selectedPass->controller14BitEvents);
+            rpnsToCommit = mw::midi::normalizeMidiRecordingRpnEvents(selectedPass->rpnEvents);
+            nrpnsToCommit = mw::midi::normalizeMidiRecordingNrpnEvents(selectedPass->nrpnEvents);
+        }
+
+        stopPianoRollPreview();
+
+        if (notesToCommit.empty() && controllersToCommit.empty() && pitchBendsToCommit.empty() && programChangesToCommit.empty() && channelPressuresToCommit.empty() && polyPressuresToCommit.empty()
+            && controller14BitsToCommit.empty() && rpnsToCommit.empty() && nrpnsToCommit.empty())
+        {
+            const auto action = keepAll
+                ? juce::String("Keep All")
+                : juce::String("Keep Selected");
+            logMessage("MIDI Recording Take Review: " + action
+                       + " contained zero notes/controllers/Pitch Bend/Program Change/Channel Pressure/Poly Pressure events; persisted review state was cleared without adding project data or Undo history.");
+            clearPersistentMidiTakeReviewForTrack(trackIndex, true);
+            midiRecordingLoopTakeReviewState.cancel();
+            midiRecordingLoopCompState.cancel();
+            midiRecordingLoopCompModeEnabled = false;
+            midiRecordingLoopCompSelectedSegmentIndex = 0;
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        auto& track = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)];
+        MidiRecordingHistoryEntry undoState;
+        undoState.projectId = currentProject->getStableId();
+        undoState.trackId = track.getStableId();
+        undoState.notes = track.getNotes();
+        undoState.controllerEvents = track.getMidiControllerEvents();
+        undoState.pitchBendEvents = track.getMidiPitchBendEvents();
+        undoState.programChangeEvents = track.getMidiProgramChangeEvents();
+        undoState.channelPressureEvents = track.getMidiChannelPressureEvents();
+        undoState.polyPressureEvents = track.getMidiPolyPressureEvents();
+        undoState.controller14BitEvents = track.getMidi14BitControllerEvents();
+        undoState.rpnEvents = track.getMidiRpnEvents();
+        undoState.nrpnEvents = track.getMidiNrpnEvents();
+        undoState.pendingTakeReview = track.getPendingMidiTakeReview();
+        midiRecordingUndoStack.push_back(std::move(undoState));
+        constexpr std::size_t maxMidiRecordingUndoSteps = 10;
+        if (midiRecordingUndoStack.size() > maxMidiRecordingUndoSteps)
+            midiRecordingUndoStack.erase(midiRecordingUndoStack.begin());
+        midiRecordingRedoStack.clear();
+
+        auto& projectNotes = track.getNotes();
+        projectNotes.insert(projectNotes.end(), notesToCommit.begin(), notesToCommit.end());
+        mw::midi::commitRecordedMidiControllerEvents(*currentProject, track.getStableId(), controllersToCommit);
+        mw::midi::commitRecordedMidiPitchBendEvents(*currentProject, track.getStableId(), pitchBendsToCommit);
+        mw::midi::commitRecordedMidiProgramChangeEvents(*currentProject, track.getStableId(), programChangesToCommit);
+        mw::midi::commitRecordedMidiChannelPressureEvents(*currentProject, track.getStableId(), channelPressuresToCommit);
+        mw::midi::commitRecordedMidiPolyPressureEvents(*currentProject, track.getStableId(), polyPressuresToCommit);
+        mw::midi::commitRecordedMidi14BitControllerEvents(*currentProject, track.getStableId(), controller14BitsToCommit);
+        mw::midi::commitRecordedMidiRpnEvents(*currentProject, track.getStableId(), rpnsToCommit);
+        mw::midi::commitRecordedMidiNrpnEvents(*currentProject, track.getStableId(), nrpnsToCommit);
+        midiRecordingUndoStack.back().expectedControllerEvents = track.getMidiControllerEvents();
+        midiRecordingUndoStack.back().expectedPitchBendEvents = track.getMidiPitchBendEvents();
+        midiRecordingUndoStack.back().expectedProgramChangeEvents = track.getMidiProgramChangeEvents();
+        midiRecordingUndoStack.back().expectedChannelPressureEvents = track.getMidiChannelPressureEvents();
+        midiRecordingUndoStack.back().expectedPolyPressureEvents = track.getMidiPolyPressureEvents();
+        midiRecordingUndoStack.back().expectedController14BitEvents = track.getMidi14BitControllerEvents();
+        midiRecordingUndoStack.back().expectedRpnEvents = track.getMidiRpnEvents();
+        midiRecordingUndoStack.back().expectedNrpnEvents = track.getMidiNrpnEvents();
+        track.clearPendingMidiTakeReview();
+        setProjectDirty();
+        refreshTrackAfterMidiRecordingChange(trackIndex);
+
+        juce::String message;
+        if (keepAll)
+        {
+            message << "MIDI Recording Take Review: Keep All committed "
+                    << static_cast<int>(notesToCommit.size()) << " note(s) / "
+                    << static_cast<int>(controllersToCommit.size()) << " controller event(s) / "
+                    << static_cast<int>(pitchBendsToCommit.size()) << " Pitch Bend event(s) / "
+                    << static_cast<int>(programChangesToCommit.size()) << " Program Change event(s) / "
+                    << static_cast<int>(channelPressuresToCommit.size()) << " Channel Pressure event(s) / "
+                    << static_cast<int>(polyPressuresToCommit.size()) << " Poly Pressure event(s) from "
+                    << static_cast<int>(midiRecordingLoopTakeReviewState.passCount())
+                    << " pass(es) as one Undo Take unit.";
+        }
+        else
+        {
+            message << "MIDI Recording Take Review: Keep Selected committed pass "
+                    << selectedPassNumber << " with "
+                    << static_cast<int>(notesToCommit.size()) << " note(s) / "
+                    << static_cast<int>(controllersToCommit.size()) << " controller event(s) / "
+                    << static_cast<int>(pitchBendsToCommit.size()) << " Pitch Bend event(s) / "
+                    << static_cast<int>(programChangesToCommit.size()) << " Program Change event(s) / "
+                    << static_cast<int>(channelPressuresToCommit.size()) << " Channel Pressure event(s) / "
+                    << static_cast<int>(polyPressuresToCommit.size())
+                    << " Poly Pressure event(s) as one Undo Take unit.";
+        }
+
+        midiRecordingLoopTakeReviewState.cancel();
+        midiRecordingLoopCompState.cancel();
+        midiRecordingLoopCompModeEnabled = false;
+        midiRecordingLoopCompSelectedSegmentIndex = 0;
+        renderStatusLabel.setText("MIDI loop take review committed.", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+        logMessage(message);
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+            content->updateStatus(message);
+        refreshMidiRecordingUi();
+    }
+
+    void MainComponent::discardMidiRecordingLoopTakeReview()
+    {
+        if (!midiRecordingLoopTakeReviewState.isReviewActive())
+            return;
+
+        stopPianoRollPreview();
+        const auto passCount = midiRecordingLoopTakeReviewState.passCount();
+        const auto noteCount = midiRecordingLoopTakeReviewState.totalNoteCount();
+        const int trackIndex = findTrackIndexByStableId(midiRecordingLoopTakeReviewState.trackId());
+        clearPersistentMidiTakeReviewForTrack(trackIndex, true);
+        midiRecordingLoopTakeReviewState.cancel();
+        midiRecordingLoopCompState.cancel();
+        midiRecordingLoopCompModeEnabled = false;
+        midiRecordingLoopCompSelectedSegmentIndex = 0;
+
+        juce::String message;
+        message << "MIDI Recording Take Review: discarded "
+                << static_cast<int>(passCount) << " pass(es) / "
+                << static_cast<int>(noteCount)
+                << " note(s); persisted review state was removed while project notes and Undo history were left unchanged.";
+        renderStatusLabel.setText("MIDI loop take review discarded.", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+        logMessage(message);
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+            content->updateStatus(message);
+        refreshMidiRecordingUi();
+    }
+
+    bool MainComponent::ensureMidiRecordingLoopCompState()
+    {
+        if (!midiRecordingLoopTakeReviewState.isReviewActive() || !currentProject)
+            return false;
+
+        const auto generation = midiRecordingLoopTakeReviewState.generation();
+        const auto projectId = currentProject->getStableId();
+        const auto trackId = midiRecordingLoopTakeReviewState.trackId();
+        if (!midiRecordingLoopTakeReviewState.matchesProjectTrack(projectId, trackId))
+            return false;
+
+        if (midiRecordingLoopCompState.isActive()
+            && midiRecordingLoopCompState.matches(generation)
+            && midiRecordingLoopCompState.matchesProjectTrack(projectId, trackId))
+        {
+            return true;
+        }
+
+        const auto region = currentMidiRecordingPunchRegion();
+        if (!mw::midi::isValidMidiRecordingPunchRegion(region))
+            return false;
+
+        int defaultPass = midiRecordingLoopTakeReviewState.selectedPassNumber();
+        if (defaultPass <= 0 && !midiRecordingLoopTakeReviewState.passes().empty())
+            defaultPass = midiRecordingLoopTakeReviewState.passes().front().passNumber;
+        const auto timeSignature = currentProject->getTimeSignature();
+        const auto started = midiRecordingLoopCompState.begin(
+            projectId,
+            trackId,
+            generation,
+            region.inTick,
+            region.outTick,
+            mw::core::Project::ticksPerQuarterNote,
+            timeSignature.numerator,
+            timeSignature.denominator,
+            mw::midi::MidiRecordingCompGrid::Beat,
+            defaultPass,
+            midiRecordingLoopTakeReviewState.passes());
+        midiRecordingLoopCompSelectedSegmentIndex = 0;
+        if (started != generation)
+            return false;
+        return midiRecordingLoopCompState.setSustainPedalMode(generation, midiRecordingSustainPedalMode);
+    }
+
+    void MainComponent::setMidiRecordingLoopCompMode(bool enabled)
+    {
+        if (!midiRecordingLoopTakeReviewState.isReviewActive())
+            return;
+
+        if (enabled && !ensureMidiRecordingLoopCompState())
+        {
+            midiRecordingLoopCompModeEnabled = false;
+            logMessage("MIDI Recording Comp: could not initialize the current review region/pass map.");
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        midiRecordingLoopCompModeEnabled = enabled;
+        logMessage(juce::String("MIDI Recording Take Review: Review Mode ")
+                   + (enabled ? "Comp." : "Whole Pass."));
+        syncPersistentMidiTakeReviewToProject(true);
+        refreshMidiRecordingUi();
+    }
+
+    void MainComponent::setMidiRecordingLoopCompGrid(int gridId)
+    {
+        if (!midiRecordingLoopTakeReviewState.isReviewActive() || !ensureMidiRecordingLoopCompState())
+            return;
+
+        int defaultPass = midiRecordingLoopTakeReviewState.selectedPassNumber();
+        if (defaultPass <= 0 && !midiRecordingLoopTakeReviewState.passes().empty())
+            defaultPass = midiRecordingLoopTakeReviewState.passes().front().passNumber;
+        const auto grid = gridId == 3
+            ? mw::midi::MidiRecordingCompGrid::Custom
+            : (gridId == 2
+                ? mw::midi::MidiRecordingCompGrid::Bar
+                : mw::midi::MidiRecordingCompGrid::Beat);
+        if (!midiRecordingLoopCompState.setGrid(
+                midiRecordingLoopTakeReviewState.generation(),
+                grid,
+                defaultPass,
+                midiRecordingLoopTakeReviewState.passes()))
+        {
+            logMessage("MIDI Recording Comp: the comp grid could not be rebuilt.");
+            return;
+        }
+
+        midiRecordingLoopCompSelectedSegmentIndex = 0;
+        juce::String gridName = "Beat";
+        if (grid == mw::midi::MidiRecordingCompGrid::Bar)
+            gridName = "Bar";
+        else if (grid == mw::midi::MidiRecordingCompGrid::Custom)
+            gridName = "Custom";
+        logMessage("MIDI Recording Comp: grid changed to " + gridName
+                   + "; all segments reset to the currently selected review pass."
+                   + (grid == mw::midi::MidiRecordingCompGrid::Custom
+                          ? " Add Boundary uses the current Preview Player position."
+                          : ""));
+        syncPersistentMidiTakeReviewToProject(true);
+        refreshMidiRecordingUi();
+    }
+
+    void MainComponent::selectMidiRecordingLoopCompSegment(int segmentIndex)
+    {
+        if (!midiRecordingLoopCompState.isActive())
+            return;
+        const auto count = static_cast<int>(midiRecordingLoopCompState.segments().size());
+        if (segmentIndex < 0 || segmentIndex >= count)
+            return;
+        midiRecordingLoopCompSelectedSegmentIndex = segmentIndex;
+        refreshMidiRecordingUi();
+    }
+
+    void MainComponent::assignMidiRecordingLoopCompPass(int passNumber)
+    {
+        if (!midiRecordingLoopTakeReviewState.isReviewActive() || !ensureMidiRecordingLoopCompState())
+            return;
+
+        if (!midiRecordingLoopCompState.assignPass(
+                midiRecordingLoopTakeReviewState.generation(),
+                static_cast<std::size_t>(std::max(0, midiRecordingLoopCompSelectedSegmentIndex)),
+                passNumber,
+                midiRecordingLoopTakeReviewState.passes()))
+        {
+            logMessage("MIDI Recording Comp: the requested segment/pass assignment was rejected.");
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        logMessage("MIDI Recording Comp: assigned segment "
+                   + juce::String(midiRecordingLoopCompSelectedSegmentIndex + 1)
+                   + " to pass " + juce::String(passNumber) + ".");
+        syncPersistentMidiTakeReviewToProject(true);
+        refreshMidiRecordingUi();
+    }
+
+    void MainComponent::setMidiRecordingLoopCompBoundaryNoteMode(int modeId)
+    {
+        if (!midiRecordingLoopTakeReviewState.isReviewActive() || !ensureMidiRecordingLoopCompState())
+            return;
+
+        const auto mode = modeId == 2
+            ? mw::midi::MidiRecordingCompBoundaryNoteMode::PreserveSamePass
+            : mw::midi::MidiRecordingCompBoundaryNoteMode::Cut;
+        if (!midiRecordingLoopCompState.setBoundaryNoteMode(
+                midiRecordingLoopTakeReviewState.generation(), mode))
+        {
+            logMessage("MIDI Recording Comp: Boundary Notes mode change was rejected.");
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        const juce::String modeName = mode == mw::midi::MidiRecordingCompBoundaryNoteMode::PreserveSamePass
+            ? "Preserve Same Pass"
+            : "Cut";
+        logMessage("MIDI Recording Comp: Boundary Notes = " + modeName + ".");
+        syncPersistentMidiTakeReviewToProject(true);
+        refreshMidiRecordingUi();
+    }
+
+    void MainComponent::setMidiRecordingLoopCompCrossPassNoteMode(int modeId)
+    {
+        if (!midiRecordingLoopTakeReviewState.isReviewActive() || !ensureMidiRecordingLoopCompState())
+            return;
+
+        const auto mode = modeId == 2
+            ? mw::midi::MidiRecordingCompCrossPassNoteMode::BridgeExact
+            : mw::midi::MidiRecordingCompCrossPassNoteMode::Off;
+        if (!midiRecordingLoopCompState.setCrossPassNoteMode(
+                midiRecordingLoopTakeReviewState.generation(), mode))
+        {
+            logMessage("MIDI Recording Comp: Cross-Pass Notes mode change was rejected.");
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        logMessage(juce::String("MIDI Recording Comp: Cross-Pass Notes = ")
+                   + (mode == mw::midi::MidiRecordingCompCrossPassNoteMode::BridgeExact
+                        ? "Bridge Exact." : "Off."));
+        syncPersistentMidiTakeReviewToProject(true);
+        refreshMidiRecordingUi();
+    }
+
+    void MainComponent::setMidiRecordingSustainPedalMode(int modeId)
+    {
+        if (!midiRecordingLoopTakeReviewState.isReviewActive())
+            return;
+
+        const auto mode = modeId == 2
+            ? mw::midi::MidiRecordingSustainPedalMode::ApplyCc64
+            : mw::midi::MidiRecordingSustainPedalMode::Ignore;
+        midiRecordingSustainPedalMode = mode;
+        if (midiRecordingLoopCompState.isActive())
+        {
+            midiRecordingLoopCompState.setSustainPedalMode(
+                midiRecordingLoopTakeReviewState.generation(), mode);
+        }
+        logMessage(juce::String("MIDI Recording Take Review: Sustain Pedal = ")
+                   + (mode == mw::midi::MidiRecordingSustainPedalMode::ApplyCc64 ? "Apply CC64." : "Ignore."));
+        syncPersistentMidiTakeReviewToProject(true);
+        refreshMidiRecordingUi();
+    }
+
+    void MainComponent::addMidiRecordingLoopCompBoundary()
+    {
+        if (!midiRecordingLoopTakeReviewState.isReviewActive() || !ensureMidiRecordingLoopCompState())
+            return;
+        if (midiRecordingLoopCompState.grid() != mw::midi::MidiRecordingCompGrid::Custom)
+        {
+            logMessage("MIDI Recording Comp: Add Boundary is available only with Comp Grid = Custom.");
+            return;
+        }
+        if (!currentProject)
+            return;
+
+        const auto seconds = std::max(0.0, getPianoRollPreviewCurrentSeconds());
+        const auto tick = mw::midi::projectTickForTransportSeconds(
+            seconds, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+        if (!midiRecordingLoopCompState.addCustomBoundary(
+                midiRecordingLoopTakeReviewState.generation(), tick))
+        {
+            juce::String message;
+            message << "MIDI Recording Comp: could not add a Custom boundary at "
+                    << formatPreviewClockTime(seconds) << " / tick " << static_cast<juce::int64>(tick)
+                    << ". Position the Preview Player strictly inside the current In/Out region and avoid an existing boundary.";
+            logMessage(message);
+            if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+                content->updateStatus(message);
+            return;
+        }
+
+        const auto& segments = midiRecordingLoopCompState.segments();
+        const auto right = std::find_if(segments.begin(), segments.end(), [tick](const auto& segment)
+        {
+            return segment.startTick == tick;
+        });
+        if (right != segments.end())
+            midiRecordingLoopCompSelectedSegmentIndex = static_cast<int>(std::distance(segments.begin(), right));
+
+        juce::String message;
+        message << "MIDI Recording Comp: added Custom boundary at "
+                << formatPreviewClockTime(seconds) << " / tick " << static_cast<juce::int64>(tick)
+                << ". Both new sides inherited the previous segment pass assignment.";
+        logMessage(message);
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+            content->updateStatus(message);
+        syncPersistentMidiTakeReviewToProject(true);
+        refreshMidiRecordingUi();
+    }
+
+    void MainComponent::removeMidiRecordingLoopCompBoundary(std::int64_t tick)
+    {
+        if (!midiRecordingLoopTakeReviewState.isReviewActive() || !ensureMidiRecordingLoopCompState())
+            return;
+        if (midiRecordingLoopCompState.grid() != mw::midi::MidiRecordingCompGrid::Custom)
+            return;
+
+        if (!midiRecordingLoopCompState.removeCustomBoundary(
+                midiRecordingLoopTakeReviewState.generation(), tick))
+        {
+            logMessage("MIDI Recording Comp: the selected Custom boundary could not be removed.");
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        const auto count = static_cast<int>(midiRecordingLoopCompState.segments().size());
+        midiRecordingLoopCompSelectedSegmentIndex = count > 0
+            ? juce::jlimit(0, count - 1, midiRecordingLoopCompSelectedSegmentIndex)
+            : 0;
+        juce::String message;
+        message << "MIDI Recording Comp: removed Custom boundary at tick "
+                << static_cast<juce::int64>(tick)
+                << "; the merged segment kept the pass assignment from the left side.";
+        logMessage(message);
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+            content->updateStatus(message);
+        syncPersistentMidiTakeReviewToProject(true);
+        refreshMidiRecordingUi();
+    }
+
+    void MainComponent::auditionMidiRecordingLoopComp()
+    {
+        if (!midiRecordingLoopTakeReviewState.isReviewActive() || !ensureMidiRecordingLoopCompState())
+        {
+            logMessage("MIDI Recording Comp: no valid pending review is available to audition.");
+            return;
+        }
+        if (!currentProject
+            || !midiRecordingLoopCompState.matchesProjectTrack(
+                currentProject->getStableId(), midiRecordingLoopTakeReviewState.trackId()))
+        {
+            logMessage("MIDI Recording Comp: project identity changed; pending runtime review was discarded.");
+            midiRecordingLoopTakeReviewState.cancel();
+            midiRecordingLoopCompState.cancel();
+            midiRecordingLoopCompModeEnabled = false;
+            midiRecordingLoopCompSelectedSegmentIndex = 0;
+            refreshMidiRecordingUi();
+            return;
+        }
+        if (renderingInProgress)
+        {
+            logMessage("MIDI Recording Comp: wait for the current render/preview to finish before auditioning the comp.");
+            return;
+        }
+
+        const int trackIndex = findTrackIndexByStableId(midiRecordingLoopTakeReviewState.trackId());
+        if (trackIndex < 0)
+        {
+            logMessage("MIDI Recording Comp: target track is no longer available; pending runtime review was discarded.");
+            midiRecordingLoopTakeReviewState.cancel();
+            midiRecordingLoopCompState.cancel();
+            midiRecordingLoopCompModeEnabled = false;
+            midiRecordingLoopCompSelectedSegmentIndex = 0;
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        const auto build = midiRecordingLoopCompState.buildNotes(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+        const auto compControllers = midiRecordingLoopCompState.buildControllerEvents(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+        const auto compPitchBends = midiRecordingLoopCompState.buildPitchBendEvents(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+        const auto compProgramChanges = midiRecordingLoopCompState.buildProgramChangeEvents(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+        const auto compChannelPressures = midiRecordingLoopCompState.buildChannelPressureEvents(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+        const auto compPolyPressures = midiRecordingLoopCompState.buildPolyPressureEvents(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+        const auto comp14BitControllers = midiRecordingLoopCompState.build14BitControllerEvents(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+        const auto compRpns = midiRecordingLoopCompState.buildRpnEvents(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+        const auto compNrpns = midiRecordingLoopCompState.buildNrpnEvents(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+
+        stopLiveMidiMonitoring(true);
+        stopPianoRollPreview();
+        applyTrackInspector();
+        captureOpenVstPluginStatesForPreview("loop take comp review");
+
+        auto job = createRenderJobSnapshot();
+        auto& tracks = job.project.getTracks();
+        auto snapshotTrackIt = std::find_if(tracks.begin(), tracks.end(), [this](const auto& track)
+        {
+            return track.getStableId() == midiRecordingLoopTakeReviewState.trackId();
+        });
+        if (snapshotTrackIt == tracks.end())
+        {
+            logMessage("MIDI Recording Comp: target track could not be found in the audition snapshot.");
+            return;
+        }
+
+        snapshotTrackIt->getNotes().insert(
+            snapshotTrackIt->getNotes().end(), build.notes.begin(), build.notes.end());
+        mw::midi::commitRecordedMidiControllerEvents(
+            job.project, snapshotTrackIt->getStableId(), compControllers);
+        mw::midi::commitRecordedMidiPitchBendEvents(
+            job.project, snapshotTrackIt->getStableId(), compPitchBends);
+        mw::midi::commitRecordedMidiProgramChangeEvents(
+            job.project, snapshotTrackIt->getStableId(), compProgramChanges);
+        mw::midi::commitRecordedMidiChannelPressureEvents(
+            job.project, snapshotTrackIt->getStableId(), compChannelPressures);
+        mw::midi::commitRecordedMidiPolyPressureEvents(
+            job.project, snapshotTrackIt->getStableId(), compPolyPressures);
+        mw::midi::commitRecordedMidi14BitControllerEvents(
+            job.project, snapshotTrackIt->getStableId(), comp14BitControllers);
+        mw::midi::commitRecordedMidiRpnEvents(
+            job.project, snapshotTrackIt->getStableId(), compRpns);
+        mw::midi::commitRecordedMidiNrpnEvents(
+            job.project, snapshotTrackIt->getStableId(), compNrpns);
+        setPianoRollPreviewNoteMapFromTracks(job.project.getTracks());
+        setPianoRollPreviewAudioClipMapFromClips(job.project.getAudioClips());
+        std::filesystem::create_directories(mw::app::AppPaths::previewFolder());
+        job.exportFolder = mw::app::AppPaths::previewFolder();
+        job.baseFileName = "preview_loop_take_comp";
+        job.outputFormat = mw::audio::RenderOutputFormat::Wav;
+        lastPianoRollPreviewScope = 3;
+
+        const auto previewDurationBeats = std::max(
+            tracksEndBeatForPreview(job.project.getTracks()),
+            audioClipsEndBeatForPreview(
+                job.project.getAudioClips(),
+                static_cast<double>(currentProject->getTempoBpm())));
+
+        juce::String label = "loop take segment comp";
+        juce::String message;
+        message << "MIDI Recording Comp: rendering non-destructive audition with "
+                << static_cast<int>(build.notes.size()) << " comp note(s) / "
+                << static_cast<int>(compControllers.size()) << " controller event(s) / "
+                << static_cast<int>(compPitchBends.size()) << " Pitch Bend event(s) / "
+                << static_cast<int>(compProgramChanges.size()) << " Program Change event(s) / "
+                << static_cast<int>(compChannelPressures.size()) << " Channel Pressure event(s) / "
+                << static_cast<int>(compPolyPressures.size()) << " Poly Pressure event(s) across "
+                << static_cast<int>(midiRecordingLoopCompState.segments().size())
+                << " segment(s); Boundary Notes = "
+                << (midiRecordingLoopCompState.boundaryNoteMode()
+                        == mw::midi::MidiRecordingCompBoundaryNoteMode::PreserveSamePass
+                    ? "Preserve Same Pass" : "Cut")
+                << "; Cross-Pass Notes = "
+                << (midiRecordingLoopCompState.crossPassNoteMode()
+                        == mw::midi::MidiRecordingCompCrossPassNoteMode::BridgeExact
+                    ? "Bridge Exact" : "Off")
+                << "; " << build.crossPassBridgedNoteCount << " exact cross-pass bridge(s); "
+                << build.clippedNoteCount
+                << " pre-reconstruction boundary clip(s). Project notes, Controller Lane, Pitch Bend Lane, and Program Change Lane data remain unchanged.";
+        logMessage(message);
+        startRenderJobOnBackgroundThread(std::move(job), label, true, previewDurationBeats);
+    }
+
+    void MainComponent::commitMidiRecordingLoopComp()
+    {
+        if (!midiRecordingLoopTakeReviewState.isReviewActive() || !ensureMidiRecordingLoopCompState())
+        {
+            logMessage("MIDI Recording Comp: no valid pending review is available to keep.");
+            return;
+        }
+        if (!currentProject
+            || !midiRecordingLoopCompState.matchesProjectTrack(
+                currentProject->getStableId(), midiRecordingLoopTakeReviewState.trackId()))
+        {
+            logMessage("MIDI Recording Comp: project identity changed; pending runtime review was discarded.");
+            midiRecordingLoopTakeReviewState.cancel();
+            midiRecordingLoopCompState.cancel();
+            midiRecordingLoopCompModeEnabled = false;
+            midiRecordingLoopCompSelectedSegmentIndex = 0;
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        const int trackIndex = findTrackIndexByStableId(midiRecordingLoopTakeReviewState.trackId());
+        if (trackIndex < 0)
+        {
+            logMessage("MIDI Recording Comp: target track is no longer available; pending runtime review was discarded.");
+            midiRecordingLoopTakeReviewState.cancel();
+            midiRecordingLoopCompState.cancel();
+            midiRecordingLoopCompModeEnabled = false;
+            midiRecordingLoopCompSelectedSegmentIndex = 0;
+            refreshMidiRecordingUi();
+            return;
+        }
+        if (auto* state = findPianoRollEditorWindow(trackIndex);
+            state != nullptr && (state->dirty || state->hasPendingInstrumentAssignment))
+        {
+            logMessage("MIDI Recording Comp: apply or discard the open Piano Roll edits before keeping the comp.");
+            return;
+        }
+
+        const auto build = midiRecordingLoopCompState.buildNotes(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+        const auto compControllers = midiRecordingLoopCompState.buildControllerEvents(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+        const auto compPitchBends = midiRecordingLoopCompState.buildPitchBendEvents(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+        const auto compProgramChanges = midiRecordingLoopCompState.buildProgramChangeEvents(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+        const auto compChannelPressures = midiRecordingLoopCompState.buildChannelPressureEvents(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+        const auto compPolyPressures = midiRecordingLoopCompState.buildPolyPressureEvents(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+        const auto comp14BitControllers = midiRecordingLoopCompState.build14BitControllerEvents(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+        const auto compRpns = midiRecordingLoopCompState.buildRpnEvents(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+        const auto compNrpns = midiRecordingLoopCompState.buildNrpnEvents(
+            midiRecordingLoopTakeReviewState.generation(),
+            midiRecordingLoopTakeReviewState.passes());
+        stopPianoRollPreview();
+        if (build.notes.empty() && compControllers.empty() && compPitchBends.empty() && compProgramChanges.empty() && compChannelPressures.empty() && compPolyPressures.empty()
+            && comp14BitControllers.empty() && compRpns.empty() && compNrpns.empty())
+        {
+            logMessage("MIDI Recording Comp: Keep Comp produced zero notes/controllers/Pitch Bend/Program Change/Channel Pressure/Poly Pressure events; persisted review state was cleared without adding project data or Undo history.");
+            clearPersistentMidiTakeReviewForTrack(trackIndex, true);
+            midiRecordingLoopTakeReviewState.cancel();
+            midiRecordingLoopCompState.cancel();
+            midiRecordingLoopCompModeEnabled = false;
+            midiRecordingLoopCompSelectedSegmentIndex = 0;
+            refreshMidiRecordingUi();
+            return;
+        }
+
+        auto& track = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)];
+        MidiRecordingHistoryEntry undoState;
+        undoState.projectId = currentProject->getStableId();
+        undoState.trackId = track.getStableId();
+        undoState.notes = track.getNotes();
+        undoState.controllerEvents = track.getMidiControllerEvents();
+        undoState.pitchBendEvents = track.getMidiPitchBendEvents();
+        undoState.programChangeEvents = track.getMidiProgramChangeEvents();
+        undoState.channelPressureEvents = track.getMidiChannelPressureEvents();
+        undoState.polyPressureEvents = track.getMidiPolyPressureEvents();
+        undoState.controller14BitEvents = track.getMidi14BitControllerEvents();
+        undoState.rpnEvents = track.getMidiRpnEvents();
+        undoState.nrpnEvents = track.getMidiNrpnEvents();
+        undoState.pendingTakeReview = track.getPendingMidiTakeReview();
+        midiRecordingUndoStack.push_back(std::move(undoState));
+        constexpr std::size_t maxMidiRecordingUndoSteps = 10;
+        if (midiRecordingUndoStack.size() > maxMidiRecordingUndoSteps)
+            midiRecordingUndoStack.erase(midiRecordingUndoStack.begin());
+        midiRecordingRedoStack.clear();
+
+        auto& projectNotes = track.getNotes();
+        projectNotes.insert(projectNotes.end(), build.notes.begin(), build.notes.end());
+        mw::midi::commitRecordedMidiControllerEvents(*currentProject, track.getStableId(), compControllers);
+        mw::midi::commitRecordedMidiPitchBendEvents(*currentProject, track.getStableId(), compPitchBends);
+        mw::midi::commitRecordedMidiProgramChangeEvents(*currentProject, track.getStableId(), compProgramChanges);
+        mw::midi::commitRecordedMidiChannelPressureEvents(*currentProject, track.getStableId(), compChannelPressures);
+        mw::midi::commitRecordedMidiPolyPressureEvents(*currentProject, track.getStableId(), compPolyPressures);
+        mw::midi::commitRecordedMidi14BitControllerEvents(*currentProject, track.getStableId(), comp14BitControllers);
+        mw::midi::commitRecordedMidiRpnEvents(*currentProject, track.getStableId(), compRpns);
+        mw::midi::commitRecordedMidiNrpnEvents(*currentProject, track.getStableId(), compNrpns);
+        midiRecordingUndoStack.back().expectedControllerEvents = track.getMidiControllerEvents();
+        midiRecordingUndoStack.back().expectedPitchBendEvents = track.getMidiPitchBendEvents();
+        midiRecordingUndoStack.back().expectedProgramChangeEvents = track.getMidiProgramChangeEvents();
+        midiRecordingUndoStack.back().expectedChannelPressureEvents = track.getMidiChannelPressureEvents();
+        midiRecordingUndoStack.back().expectedPolyPressureEvents = track.getMidiPolyPressureEvents();
+        midiRecordingUndoStack.back().expectedController14BitEvents = track.getMidi14BitControllerEvents();
+        midiRecordingUndoStack.back().expectedRpnEvents = track.getMidiRpnEvents();
+        midiRecordingUndoStack.back().expectedNrpnEvents = track.getMidiNrpnEvents();
+        track.clearPendingMidiTakeReview();
+        setProjectDirty();
+        refreshTrackAfterMidiRecordingChange(trackIndex);
+
+        const auto segmentCount = midiRecordingLoopCompState.segments().size();
+        const auto boundaryNoteMode = midiRecordingLoopCompState.boundaryNoteMode();
+        const auto crossPassNoteMode = midiRecordingLoopCompState.crossPassNoteMode();
+        midiRecordingLoopTakeReviewState.cancel();
+        midiRecordingLoopCompState.cancel();
+        midiRecordingLoopCompModeEnabled = false;
+        midiRecordingLoopCompSelectedSegmentIndex = 0;
+
+        juce::String message;
+        message << "MIDI Recording Comp: Keep Comp committed "
+                << static_cast<int>(build.notes.size()) << " note(s) / "
+                << static_cast<int>(compControllers.size()) << " controller event(s) / "
+                << static_cast<int>(compPitchBends.size()) << " Pitch Bend event(s) / "
+                << static_cast<int>(compProgramChanges.size()) << " Program Change event(s) / "
+                << static_cast<int>(compChannelPressures.size()) << " Channel Pressure event(s) / "
+                << static_cast<int>(compPolyPressures.size()) << " Poly Pressure event(s) from "
+                << static_cast<int>(segmentCount) << " segment(s) as one Undo Take unit; Boundary Notes = "
+                << (boundaryNoteMode == mw::midi::MidiRecordingCompBoundaryNoteMode::PreserveSamePass
+                    ? "Preserve Same Pass" : "Cut")
+                << "; Cross-Pass Notes = "
+                << (crossPassNoteMode == mw::midi::MidiRecordingCompCrossPassNoteMode::BridgeExact
+                    ? "Bridge Exact" : "Off")
+                << "; " << build.crossPassBridgedNoteCount << " exact cross-pass bridge(s); "
+                << build.clippedNoteCount << " pre-reconstruction boundary clip(s).";
+        renderStatusLabel.setText("MIDI loop comp committed.", juce::dontSendNotification);
+        renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+        logMessage(message);
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+            content->updateStatus(message);
+        refreshMidiRecordingUi();
+    }
+
+    bool MainComponent::undoLastMidiRecordingTake()
+    {
+        if (isMidiRecordingBusy())
+        {
+            logMessage("MIDI Recording Undo: stop the current take/count-in first.");
+            return false;
+        }
+        if (!currentProject || midiRecordingUndoStack.empty())
+        {
+            logMessage("MIDI Recording Undo: nothing to undo.");
+            return false;
+        }
+
+        const auto& entry = midiRecordingUndoStack.back();
+        if (entry.projectId != currentProject->getStableId())
+        {
+            logMessage("MIDI Recording Undo: the available take belongs to a different project session.");
+            return false;
+        }
+
+        const int trackIndex = findTrackIndexByStableId(entry.trackId);
+        if (trackIndex < 0)
+        {
+            logMessage("MIDI Recording Undo: the recorded track is no longer available.");
+            return false;
+        }
+
+        const auto& currentTrack = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)];
+        const auto& currentControllerEvents = currentTrack.getMidiControllerEvents();
+        if (!mw::midi::midiControllerEventVectorsEqual(currentControllerEvents, entry.expectedControllerEvents))
+        {
+            logMessage("MIDI Recording Undo: newer Controller Lane edits exist. Undo those CC edits first.");
+            return false;
+        }
+        const auto& currentPitchBendEvents = currentTrack.getMidiPitchBendEvents();
+        if (!mw::midi::midiPitchBendEventVectorsEqual(currentPitchBendEvents, entry.expectedPitchBendEvents))
+        {
+            logMessage("MIDI Recording Undo: newer Pitch Bend Lane edits exist. Undo those Bend edits first.");
+            return false;
+        }
+        const auto& currentProgramChangeEvents = currentTrack.getMidiProgramChangeEvents();
+        if (!mw::midi::midiProgramChangeEventVectorsEqual(currentProgramChangeEvents, entry.expectedProgramChangeEvents))
+        {
+            logMessage("MIDI Recording Undo: newer Program Change Lane edits exist. Undo those Program edits first.");
+            return false;
+        }
+        const auto& currentChannelPressureEvents = currentTrack.getMidiChannelPressureEvents();
+        if (!mw::midi::midiChannelPressureEventVectorsEqual(currentChannelPressureEvents, entry.expectedChannelPressureEvents))
+        {
+            logMessage("MIDI Recording Undo: newer Channel Pressure Lane edits exist. Undo those Pressure edits first.");
+            return false;
+        }
+        const auto& currentPolyPressureEvents = currentTrack.getMidiPolyPressureEvents();
+        if (!mw::midi::midiPolyPressureEventVectorsEqual(currentPolyPressureEvents, entry.expectedPolyPressureEvents))
+        {
+            logMessage("MIDI Recording Undo: newer Poly Pressure Lane edits exist. Undo those Poly Pressure edits first.");
+            return false;
+        }
+        const auto& currentController14BitEvents = currentTrack.getMidi14BitControllerEvents();
+        if (!mw::midi::midi14BitControllerEventVectorsEqual(currentController14BitEvents, entry.expectedController14BitEvents))
+        {
+            logMessage("MIDI Recording Undo: newer 14-bit Controller Lane edits exist. Undo those edits first.");
+            return false;
+        }
+        const auto& currentRpnEvents = currentTrack.getMidiRpnEvents();
+        if (!mw::midi::midiRpnEventVectorsEqual(currentRpnEvents, entry.expectedRpnEvents))
+        {
+            logMessage("MIDI Recording Undo: newer RPN edits exist. Undo those Parameter edits first.");
+            return false;
+        }
+        const auto& currentNrpnEvents = currentTrack.getMidiNrpnEvents();
+        if (!mw::midi::midiNrpnEventVectorsEqual(currentNrpnEvents, entry.expectedNrpnEvents))
+        {
+            logMessage("MIDI Recording Undo: newer NRPN edits exist. Undo those Parameter edits first.");
+            return false;
+        }
+
+        if (auto* state = findPianoRollEditorWindow(trackIndex); state != nullptr && (state->dirty || state->hasPendingInstrumentAssignment))
+        {
+            logMessage("MIDI Recording Undo: apply or discard the open Piano Roll edits before undoing the take.");
+            return false;
+        }
+
+        MidiRecordingHistoryEntry redoState;
+        redoState.projectId = currentProject->getStableId();
+        redoState.trackId = entry.trackId;
+        redoState.notes = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getNotes();
+        redoState.controllerEvents = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getMidiControllerEvents();
+        redoState.expectedControllerEvents = entry.controllerEvents;
+        redoState.pitchBendEvents = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getMidiPitchBendEvents();
+        redoState.expectedPitchBendEvents = entry.pitchBendEvents;
+        redoState.programChangeEvents = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getMidiProgramChangeEvents();
+        redoState.expectedProgramChangeEvents = entry.programChangeEvents;
+        redoState.channelPressureEvents = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getMidiChannelPressureEvents();
+        redoState.expectedChannelPressureEvents = entry.channelPressureEvents;
+        redoState.polyPressureEvents = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getMidiPolyPressureEvents();
+        redoState.expectedPolyPressureEvents = entry.polyPressureEvents;
+        redoState.controller14BitEvents = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getMidi14BitControllerEvents();
+        redoState.expectedController14BitEvents = entry.controller14BitEvents;
+        redoState.rpnEvents = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getMidiRpnEvents();
+        redoState.expectedRpnEvents = entry.rpnEvents;
+        redoState.nrpnEvents = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getMidiNrpnEvents();
+        redoState.expectedNrpnEvents = entry.nrpnEvents;
+        redoState.pendingTakeReview = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getPendingMidiTakeReview();
+
+        auto restoreState = std::move(midiRecordingUndoStack.back());
+        midiRecordingUndoStack.pop_back();
+        midiRecordingRedoStack.push_back(std::move(redoState));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getNotes() = std::move(restoreState.notes);
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setMidiControllerEvents(std::move(restoreState.controllerEvents));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setMidiPitchBendEvents(std::move(restoreState.pitchBendEvents));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setMidiProgramChangeEvents(std::move(restoreState.programChangeEvents));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setMidiChannelPressureEvents(std::move(restoreState.channelPressureEvents));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setMidiPolyPressureEvents(std::move(restoreState.polyPressureEvents));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setMidi14BitControllerEvents(std::move(restoreState.controller14BitEvents));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setMidiRpnEvents(std::move(restoreState.rpnEvents));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setMidiNrpnEvents(std::move(restoreState.nrpnEvents));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setPendingMidiTakeReview(std::move(restoreState.pendingTakeReview));
+        midiRecordingLoopTakeReviewState.cancel();
+        midiRecordingLoopCompState.cancel();
+        midiRecordingLoopCompModeEnabled = false;
+        midiRecordingLoopCompSelectedSegmentIndex = 0;
+        restorePersistentMidiTakeReviewForTrack(trackIndex);
+        setProjectDirty();
+        refreshTrackAfterMidiRecordingChange(trackIndex);
+        logMessage("MIDI Recording Undo: restored the track to its state before the last recorded take.");
+        refreshMidiRecordingUi();
+        return true;
+    }
+
+    bool MainComponent::redoLastMidiRecordingTake()
+    {
+        const bool reviewOnlyBusy = midiRecordingLoopTakeReviewState.isReviewActive()
+            && !midiRecordingCountInState.isActive()
+            && !midiRecordingPlaybackPending
+            && !midiRecordingPunchRunState.isActive()
+            && !midiRecordingSession.isRecording();
+        if (isMidiRecordingBusy() && !reviewOnlyBusy)
+        {
+            logMessage("MIDI Recording Redo: stop the current take/count-in first.");
+            return false;
+        }
+        if (!currentProject || midiRecordingRedoStack.empty())
+        {
+            logMessage("MIDI Recording Redo: nothing to redo.");
+            return false;
+        }
+
+        const auto& entry = midiRecordingRedoStack.back();
+        if (reviewOnlyBusy && midiRecordingLoopTakeReviewState.trackId() != entry.trackId)
+        {
+            logMessage("MIDI Recording Redo: resolve the active Take Review before redoing a different track.");
+            return false;
+        }
+        if (entry.projectId != currentProject->getStableId())
+        {
+            logMessage("MIDI Recording Redo: the available take belongs to a different project session.");
+            return false;
+        }
+
+        const int trackIndex = findTrackIndexByStableId(entry.trackId);
+        if (trackIndex < 0)
+        {
+            logMessage("MIDI Recording Redo: the recorded track is no longer available.");
+            return false;
+        }
+
+        const auto& currentTrack = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)];
+        const auto& currentControllerEvents = currentTrack.getMidiControllerEvents();
+        if (!mw::midi::midiControllerEventVectorsEqual(currentControllerEvents, entry.expectedControllerEvents))
+        {
+            logMessage("MIDI Recording Redo: newer Controller Lane edits exist. Restore the expected CC state first.");
+            return false;
+        }
+        const auto& currentPitchBendEvents = currentTrack.getMidiPitchBendEvents();
+        if (!mw::midi::midiPitchBendEventVectorsEqual(currentPitchBendEvents, entry.expectedPitchBendEvents))
+        {
+            logMessage("MIDI Recording Redo: newer Pitch Bend Lane edits exist. Restore the expected Bend state first.");
+            return false;
+        }
+        const auto& currentProgramChangeEvents = currentTrack.getMidiProgramChangeEvents();
+        if (!mw::midi::midiProgramChangeEventVectorsEqual(currentProgramChangeEvents, entry.expectedProgramChangeEvents))
+        {
+            logMessage("MIDI Recording Redo: newer Program Change Lane edits exist. Restore the expected Program state first.");
+            return false;
+        }
+        const auto& currentChannelPressureEvents = currentTrack.getMidiChannelPressureEvents();
+        if (!mw::midi::midiChannelPressureEventVectorsEqual(currentChannelPressureEvents, entry.expectedChannelPressureEvents))
+        {
+            logMessage("MIDI Recording Redo: newer Channel Pressure Lane edits exist. Restore the expected Pressure state first.");
+            return false;
+        }
+        const auto& currentPolyPressureEvents = currentTrack.getMidiPolyPressureEvents();
+        if (!mw::midi::midiPolyPressureEventVectorsEqual(currentPolyPressureEvents, entry.expectedPolyPressureEvents))
+        {
+            logMessage("MIDI Recording Redo: newer Poly Pressure Lane edits exist. Restore the expected Poly Pressure state first.");
+            return false;
+        }
+        const auto& currentController14BitEvents = currentTrack.getMidi14BitControllerEvents();
+        if (!mw::midi::midi14BitControllerEventVectorsEqual(currentController14BitEvents, entry.expectedController14BitEvents))
+        {
+            logMessage("MIDI Recording Redo: newer 14-bit Controller Lane edits exist. Restore the expected 14-bit state first.");
+            return false;
+        }
+        const auto& currentRpnEvents = currentTrack.getMidiRpnEvents();
+        if (!mw::midi::midiRpnEventVectorsEqual(currentRpnEvents, entry.expectedRpnEvents))
+        {
+            logMessage("MIDI Recording Redo: newer RPN edits exist. Restore the expected RPN state first.");
+            return false;
+        }
+        const auto& currentNrpnEvents = currentTrack.getMidiNrpnEvents();
+        if (!mw::midi::midiNrpnEventVectorsEqual(currentNrpnEvents, entry.expectedNrpnEvents))
+        {
+            logMessage("MIDI Recording Redo: newer NRPN edits exist. Restore the expected NRPN state first.");
+            return false;
+        }
+
+        if (auto* state = findPianoRollEditorWindow(trackIndex); state != nullptr && (state->dirty || state->hasPendingInstrumentAssignment))
+        {
+            logMessage("MIDI Recording Redo: apply or discard the open Piano Roll edits before redoing the take.");
+            return false;
+        }
+
+        MidiRecordingHistoryEntry undoState;
+        undoState.projectId = currentProject->getStableId();
+        undoState.trackId = entry.trackId;
+        undoState.notes = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getNotes();
+        undoState.controllerEvents = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getMidiControllerEvents();
+        undoState.expectedControllerEvents = entry.controllerEvents;
+        undoState.pitchBendEvents = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getMidiPitchBendEvents();
+        undoState.expectedPitchBendEvents = entry.pitchBendEvents;
+        undoState.programChangeEvents = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getMidiProgramChangeEvents();
+        undoState.expectedProgramChangeEvents = entry.programChangeEvents;
+        undoState.channelPressureEvents = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getMidiChannelPressureEvents();
+        undoState.expectedChannelPressureEvents = entry.channelPressureEvents;
+        undoState.polyPressureEvents = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getMidiPolyPressureEvents();
+        undoState.expectedPolyPressureEvents = entry.polyPressureEvents;
+        undoState.controller14BitEvents = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getMidi14BitControllerEvents();
+        undoState.expectedController14BitEvents = entry.controller14BitEvents;
+        undoState.rpnEvents = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getMidiRpnEvents();
+        undoState.expectedRpnEvents = entry.rpnEvents;
+        undoState.nrpnEvents = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getMidiNrpnEvents();
+        undoState.expectedNrpnEvents = entry.nrpnEvents;
+        undoState.pendingTakeReview = currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getPendingMidiTakeReview();
+
+        auto restoreState = std::move(midiRecordingRedoStack.back());
+        midiRecordingRedoStack.pop_back();
+        midiRecordingUndoStack.push_back(std::move(undoState));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].getNotes() = std::move(restoreState.notes);
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setMidiControllerEvents(std::move(restoreState.controllerEvents));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setMidiPitchBendEvents(std::move(restoreState.pitchBendEvents));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setMidiProgramChangeEvents(std::move(restoreState.programChangeEvents));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setMidiChannelPressureEvents(std::move(restoreState.channelPressureEvents));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setMidiPolyPressureEvents(std::move(restoreState.polyPressureEvents));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setMidi14BitControllerEvents(std::move(restoreState.controller14BitEvents));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setMidiRpnEvents(std::move(restoreState.rpnEvents));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setMidiNrpnEvents(std::move(restoreState.nrpnEvents));
+        currentProject->getTracks()[static_cast<std::size_t>(trackIndex)].setPendingMidiTakeReview(std::move(restoreState.pendingTakeReview));
+        midiRecordingLoopTakeReviewState.cancel();
+        midiRecordingLoopCompState.cancel();
+        midiRecordingLoopCompModeEnabled = false;
+        midiRecordingLoopCompSelectedSegmentIndex = 0;
+        restorePersistentMidiTakeReviewForTrack(trackIndex);
+        setProjectDirty();
+        refreshTrackAfterMidiRecordingChange(trackIndex);
+        logMessage("MIDI Recording Redo: restored the recorded take.");
+        refreshMidiRecordingUi();
+        return true;
+    }
+
+    bool MainComponent::startLiveMidiMonitoringForSelectedTrack(const mw::midi::MidiInputSelection* requestedSelection)
+    {
+        return startLiveMidiMonitoringForTrack(getSelectedTrackIndex(), requestedSelection);
+    }
+
+    bool MainComponent::startLiveMidiMonitoringForTrack(int index, const mw::midi::MidiInputSelection* requestedSelection)
+    {
+        if (requestedSelection != nullptr && !applyMidiInputSelectionAndPersist(*requestedSelection))
+            return false;
+
+        if (!midiInputCoordinator.isOpen())
+        {
+            logMessage("Live MIDI Monitor: choose and apply a MIDI input device first.");
+            if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+                content->updateStatus("Choose and apply a MIDI input device first.");
+            return false;
+        }
+
+        if (renderingInProgress)
+        {
+            logMessage("Live MIDI Monitor: cannot start while a render is in progress.");
+            return false;
+        }
+
+        if (audioClipRecorder && audioClipRecorder->isRecording())
+        {
+            logMessage("Live MIDI Monitor: stop AudioClip recording before starting instrument monitoring.");
+            return false;
+        }
+
+        if (!currentProject)
+        {
+            logMessage("Live MIDI Monitor: no project loaded.");
+            return false;
+        }
+
+        if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+        {
+            logMessage("Live MIDI Monitor: choose a valid VST3 or CLAP instrument track first.");
+            return false;
+        }
+
+        const auto& track = currentProject->getTracks()[static_cast<std::size_t>(index)];
+        const auto assignment = track.getInstrument();
+        if ((assignment.backendType != mw::core::SampleBackendType::VST3
+             && assignment.backendType != mw::core::SampleBackendType::CLAP)
+            || !assignment.vst3.hasPluginIdentity())
+        {
+            logMessage("Live MIDI Monitor: selected track must have a VST3 or CLAP instrument assigned.");
+            return false;
+        }
+
+        stopLiveMidiMonitoring(true);
+        if (audioRecorderTestActive || audioRecorderTestPlaybackActive)
+            cancelAudioRecorderTestAndCleanup();
+        stopClapInstrumentLiveAudition(true);
+        stopVstInstrumentLiveAudition(true);
+
+        bool started = false;
+        LiveMidiMonitorBackend backend = LiveMidiMonitorBackend::None;
+        if (assignment.backendType == mw::core::SampleBackendType::VST3)
+        {
+            showVstExperimentalWarningIfNeeded();
+            started = startSelectedTrackVstDirectAudition(index, true);
+            backend = LiveMidiMonitorBackend::Vst3;
+        }
+        else
+        {
+            showClapExperimentalWarningIfNeeded();
+            if (!(clapLiveInstrumentSession != nullptr
+                  && clapLiveInstrumentSession->isOpen()
+                  && clapLiveEngineArmedSession
+                  && clapLiveEngineArmedSession->trackIndex == index))
+            {
+                armSelectedTrackClapLiveEngineSession();
+            }
+
+            if (clapLiveInstrumentSession != nullptr
+                && clapLiveInstrumentSession->isOpen()
+                && clapLiveEngineArmedSession
+                && clapLiveEngineArmedSession->trackIndex == index)
+            {
+                started = startSelectedTrackClapDirectAudition(index, true);
+            }
+            backend = LiveMidiMonitorBackend::Clap;
+        }
+
+        if (!started)
+        {
+            logMessage("Live MIDI Monitor: selected instrument could not enter the direct monitoring path.");
+            if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+                content->updateStatus("Monitor start failed. Check the log and plugin/effect compatibility.");
+            return false;
+        }
+
+        {
+            const std::scoped_lock lock(liveMidiRouteMutex);
+            liveMidiMonitoringActive = true;
+            liveMidiMonitorBackend = backend;
+            liveMidiTargetTrackId = track.getStableId();
+            liveMidiTargetTrackIndex = index;
+        }
+
+        const auto selection = midiInputCoordinator.selection();
+        juce::String message = "Live MIDI Monitor: " + selection.deviceName
+            + (selection.channel == 0 ? " / Omni" : " / Channel " + juce::String(selection.channel))
+            + " -> " + getTrackDisplayName(index) + ".";
+        logMessage(message);
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+            content->updateStatus(message);
+        refreshMidiRecordingUi();
+        return true;
+    }
+
+    void MainComponent::handleIncomingLiveMidiMessage(const juce::MidiMessage& message)
+    {
+        const bool punchWorkflowActive = midiRecordingPunchRunState.isActive()
+            && midiRecordingOwnsProjectPlayback
+            && currentProject.has_value();
+        double eventTime = 0.0;
+        std::int64_t eventTick = 0;
+        if (midiRecordingSession.isRecording() || punchWorkflowActive)
+        {
+            eventTime = currentMidiRecordingTransportSeconds();
+            if (currentProject)
+            {
+                eventTick = mw::midi::projectTickForTransportSeconds(
+                    eventTime, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+            }
+        }
+
+        if (punchWorkflowActive)
+        {
+            const auto generation = midiRecordingPunchRunState.generation();
+            if (midiRecordingPunchRunState.shouldPunchOut(generation, eventTick))
+            {
+                completeMidiRecordingPunchOut(generation);
+                return;
+            }
+            if (midiRecordingPunchRunState.isPreRoll())
+            {
+                const auto region = midiRecordingPunchRunState.region();
+                if (eventTick >= region.inTick)
+                    beginMidiRecordingPunchCapture(generation);
+            }
+        }
+
+        if (midiRecordingSession.isRecording())
+        {
+            if (eventTime <= 0.0)
+                eventTime = currentMidiRecordingTransportSeconds();
+            if (message.isNoteOn())
+            {
+                midiRecordingSession.noteOn(message.getChannel(),
+                                            message.getNoteNumber(),
+                                            static_cast<int>(message.getVelocity()),
+                                            eventTime);
+            }
+            else if (message.isNoteOff())
+            {
+                midiRecordingSession.noteOff(message.getChannel(),
+                                             message.getNoteNumber(),
+                                             eventTime);
+            }
+            else if (message.isController())
+            {
+                midiRecordingSession.controller(message.getChannel(),
+                                                message.getControllerNumber(),
+                                                message.getControllerValue(),
+                                                eventTime);
+            }
+            else if (message.isPitchWheel())
+            {
+                midiRecordingSession.pitchBend(message.getChannel(),
+                                               message.getPitchWheelValue() - 8192,
+                                               eventTime);
+            }
+            else if (message.isProgramChange())
+            {
+                midiRecordingSession.programChange(message.getChannel(),
+                                                    message.getProgramChangeNumber(),
+                                                    eventTime);
+            }
+            else if (message.isChannelPressure())
+            {
+                midiRecordingSession.channelPressure(message.getChannel(),
+                                                      message.getChannelPressureValue(),
+                                                      eventTime);
+            }
+            else if (message.isAftertouch())
+            {
+                midiRecordingSession.polyPressure(message.getChannel(),
+                                                   message.getNoteNumber(),
+                                                   message.getAfterTouchValue(),
+                                                   eventTime);
+            }
+        }
+
+        const bool mixedPunchOrRecordingMonitor = midiRecordingOwnsProjectPlayback
+            && clapLiveDirectPreviewProjectMode
+            && mixedLiveProjectPreviewEngine.isActive()
+            && (midiRecordingSession.isRecording() || midiRecordingPunchRunState.isPreRoll());
+        if (mixedPunchOrRecordingMonitor)
+        {
+            mixedLiveProjectPreviewEngine.submitLiveMidiMessage(midiRecordingArmedTrackId, message);
+            return;
+        }
+
+        LiveMidiMonitorBackend backend = LiveMidiMonitorBackend::None;
+        {
+            const std::scoped_lock lock(liveMidiRouteMutex);
+            if (!liveMidiMonitoringActive)
+                return;
+            backend = liveMidiMonitorBackend;
+        }
+
+        if (backend == LiveMidiMonitorBackend::Vst3)
+            vstLiveDirectPreviewEngine.submitLiveMidiMessage(message);
+        else if (backend == LiveMidiMonitorBackend::Clap)
+            clapLiveDirectPreviewEngine.submitLiveMidiMessage(message);
+    }
+
+    void MainComponent::panicLiveMidiMonitoring()
+    {
+        if (midiRecordingCountInState.isActive() || midiRecordingCountInPlayer.isActive())
+        {
+            cancelMidiRecordingCountIn("Panic requested during count-in");
+            logMessage("Live MIDI Monitor: Panic cancelled the MIDI recording count-in; no take was created.");
+            return;
+        }
+
+        const auto finalizedRecordedNotes = midiRecordingSession.isRecording()
+            ? midiRecordingSession.releaseActiveNotes(currentMidiRecordingTransportSeconds())
+            : 0u;
+
+        const bool mixedRecordingMonitor = (midiRecordingSession.isRecording() || midiRecordingPunchRunState.isPreRoll())
+            && midiRecordingOwnsProjectPlayback
+            && clapLiveDirectPreviewProjectMode
+            && mixedLiveProjectPreviewEngine.isActive();
+        if (mixedRecordingMonitor)
+            mixedLiveProjectPreviewEngine.requestLiveMidiPanic(midiRecordingArmedTrackId);
+        if (midiRecordingPunchRunState.isPreRoll() && !midiRecordingSession.isRecording())
+            logMessage("MIDI Recording Punch: Panic during punch pre-roll sent monitoring All Notes Off; no recorded notes were created.");
+
+        LiveMidiMonitorBackend backend = LiveMidiMonitorBackend::None;
+        bool monitorActive = false;
+        {
+            const std::scoped_lock lock(liveMidiRouteMutex);
+            monitorActive = liveMidiMonitoringActive;
+            backend = liveMidiMonitorBackend;
+        }
+
+        if (monitorActive)
+        {
+            if (backend == LiveMidiMonitorBackend::Vst3)
+                vstLiveDirectPreviewEngine.requestLiveMidiPanic();
+            else if (backend == LiveMidiMonitorBackend::Clap)
+                clapLiveDirectPreviewEngine.requestLiveMidiPanic();
+        }
+
+        if (!mixedRecordingMonitor && !monitorActive && finalizedRecordedNotes == 0)
+        {
+            logMessage("Live MIDI Monitor: Panic ignored because monitoring and MIDI recording are not active.");
+            return;
+        }
+
+        juce::String message = "Live MIDI Monitor: Panic / All Notes Off requested.";
+        if (finalizedRecordedNotes > 0)
+            message += " MIDI Recording finalized " + juce::String(static_cast<int>(finalizedRecordedNotes)) + " held note(s) at the Panic position.";
+        logMessage(message);
+    }
+
+    void MainComponent::stopLiveMidiMonitoring(bool sendPanic)
+    {
+        // Playback/device/project transitions already use this stop path. Cancel a
+        // pre-roll count-in before transport capture begins, or finalize an active
+        // take so held notes are not silently lost.
+        if (midiRecordingCountInState.isActive() || midiRecordingCountInPlayer.isActive())
+            cancelMidiRecordingCountIn("live MIDI monitoring stopped");
+        if (midiRecordingSession.isRecording())
+            stopMidiRecording(true);
+
+        LiveMidiMonitorBackend backend = LiveMidiMonitorBackend::None;
+        bool wasActive = false;
+        {
+            const std::scoped_lock lock(liveMidiRouteMutex);
+            wasActive = liveMidiMonitoringActive;
+            if (!wasActive)
+                return;
+            backend = liveMidiMonitorBackend;
+            liveMidiMonitoringActive = false;
+            liveMidiMonitorBackend = LiveMidiMonitorBackend::None;
+            liveMidiTargetTrackId = 0;
+            liveMidiTargetTrackIndex = -1;
+        }
+
+        if (sendPanic)
+        {
+            if (backend == LiveMidiMonitorBackend::Vst3)
+                vstLiveDirectPreviewEngine.requestLiveMidiPanic();
+            else if (backend == LiveMidiMonitorBackend::Clap)
+                clapLiveDirectPreviewEngine.requestLiveMidiPanic();
+        }
+
+        if (backend == LiveMidiMonitorBackend::Vst3)
+            stopVstInstrumentLiveAudition(true);
+        else if (backend == LiveMidiMonitorBackend::Clap)
+            stopClapInstrumentLiveAudition(true);
+
+        if (wasActive)
+        {
+            renderStatusLabel.setText("Live MIDI monitoring stopped.", juce::dontSendNotification);
+            renderStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+            logMessage("Live MIDI Monitor: stopped; active notes were released.");
+            if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+                content->updateStatus(midiInputCoordinator.statusSummary() + " Monitor stopped.");
+        }
+        refreshMidiRecordingUi();
+    }
+
+    void MainComponent::restartLiveMidiMonitoringForSelectedTrack()
+    {
+        // While recording, the armed stable track is the routing owner. A UI selection
+        // change must not steal live Note Off events or redirect the performance.
+        if (isMidiRecordingBusy())
+            return;
+
+        mw::core::StableId previousTrackId = 0;
+        {
+            const std::scoped_lock lock(liveMidiRouteMutex);
+            if (!liveMidiMonitoringActive)
+                return;
+            previousTrackId = liveMidiTargetTrackId;
+        }
+
+        if (!currentProject)
+        {
+            stopLiveMidiMonitoring(true);
+            return;
+        }
+
+        const int selectedIndex = getSelectedTrackIndex();
+        if (selectedIndex < 0 || selectedIndex >= static_cast<int>(currentProject->getTracks().size()))
+        {
+            stopLiveMidiMonitoring(true);
+            return;
+        }
+
+        const auto& selectedTrack = currentProject->getTracks()[static_cast<std::size_t>(selectedIndex)];
+        if (selectedTrack.getStableId() == previousTrackId)
+            return;
+
+        logMessage("Live MIDI Monitor: selected track changed; releasing the previous target before rerouting.");
+        stopLiveMidiMonitoring(true);
+        startLiveMidiMonitoringForSelectedTrack();
+    }
+
+    void MainComponent::handleMidiInputDisconnected(const juce::String& deviceName)
+    {
+        if ((midiRecordingCountInState.isActive() || midiRecordingPlaybackPending || midiRecordingPunchRunState.isPreRoll())
+            && !midiRecordingSession.isRecording())
+            stopMidiRecording(false);
+        stopLiveMidiMonitoring(true);
+        const juce::String message = "Live MIDI Monitor: MIDI input disconnected"
+            + (deviceName.isNotEmpty() ? (" - " + deviceName) : juce::String()) + ".";
+        logMessage(message);
+        if (auto* content = dynamic_cast<MidiInputSettingsContent*>(midiInputSettingsContent.get()))
+            content->updateStatus(message + " Refresh devices to reconnect.");
+        refreshMidiRecordingUi();
+    }
+
 
     void MainComponent::closeRenderSettingsWindow()
     {
@@ -22930,6 +30160,7 @@ void MainComponent::openAudioRecorderWindow()
             return;
         }
 
+        stopLiveMidiMonitoring(true);
         applyTrackInspector();
         updateRenderTargetLabel();
 
@@ -22992,6 +30223,7 @@ void MainComponent::openAudioRecorderWindow()
             return;
         }
 
+        stopLiveMidiMonitoring(true);
         rebuildSectionsFromTracksIfNeeded();
         updateRenderTargetLabel();
 
@@ -23107,6 +30339,7 @@ void MainComponent::openAudioRecorderWindow()
             return;
         }
 
+        stopLiveMidiMonitoring(true);
         const auto index = getSelectedTrackIndex();
 
         if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
@@ -23207,6 +30440,7 @@ void MainComponent::openAudioRecorderWindow()
             return;
         }
 
+        stopLiveMidiMonitoring(true);
         rebuildSectionsFromTracksIfNeeded();
 
         auto sequenceNumber = trackManagerSectionBox.getText().getIntValue();
@@ -23321,6 +30555,7 @@ void MainComponent::openAudioRecorderWindow()
             return;
         }
 
+        stopLiveMidiMonitoring(true);
         applyTrackInspector();
         updateRenderTargetLabel();
         cleanupPianoRollPreviewFiles();
@@ -26074,7 +33309,20 @@ void MainComponent::refreshSoundFontList()
         return false;
     }
 
+mw::core::TrackSelectionSnapshot MainComponent::captureCurrentTrackSelection() const
+    {
+        if (!currentProject)
+            return {};
+
+        return mw::core::captureTrackSelection(currentProject->getTracks(), getSelectedTrackIndex());
+    }
+
 void MainComponent::refreshTrackSelector()
+    {
+        refreshTrackSelector(captureCurrentTrackSelection());
+    }
+
+void MainComponent::refreshTrackSelector(const mw::core::TrackSelectionSnapshot& selection)
     {
         trackCombo.clear(juce::dontSendNotification);
 
@@ -26096,8 +33344,9 @@ void MainComponent::refreshTrackSelector()
             trackCombo.addItem(label, i + 1);
         }
 
-        if (!tracks.empty())
-            trackCombo.setSelectedId(1, juce::dontSendNotification);
+        const int resolvedIndex = mw::core::resolveTrackSelection(tracks, selection);
+        if (resolvedIndex >= 0)
+            trackCombo.setSelectedId(resolvedIndex + 1, juce::dontSendNotification);
 
         refreshMainSequenceSelector();
         refreshActiveSequenceThoughtsEditor();
@@ -33568,6 +40817,443 @@ void MainComponent::openTrackManagerWindow()
         pianoRollPreviewPlayerWindow.reset(window);
     }
 
+    mw::core::StableId MainComponent::getSelectedTrackStableId() const
+    {
+        if (!currentProject)
+            return 0;
+        const auto index = getSelectedTrackIndex();
+        if (index < 0 || index >= static_cast<int>(currentProject->getTracks().size()))
+            return 0;
+        return currentProject->getTracks()[static_cast<std::size_t>(index)].getStableId();
+    }
+
+    std::int64_t MainComponent::getControllerLanePreviewTick() const
+    {
+        if (!currentProject)
+            return 0;
+        const auto seconds = std::max(0.0, getPianoRollPreviewCurrentSeconds());
+        const auto tempo = std::max(1, currentProject->getTempoBpm());
+        return std::max<std::int64_t>(0, static_cast<std::int64_t>(std::llround(
+            seconds * static_cast<double>(tempo) * static_cast<double>(mw::core::Project::ticksPerQuarterNote) / 60.0)));
+    }
+
+    void MainComponent::openMidiControllerLaneWindow()
+    {
+        if (midiControllerLaneWindow != nullptr)
+        {
+            if (auto* content = dynamic_cast<MidiControllerLaneComponent*>(midiControllerLaneWindow->getContentComponent()))
+                content->refreshNow();
+            midiControllerLaneWindow->toFront(true);
+            return;
+        }
+
+        MidiControllerLaneComponent::Callbacks callbacks;
+        callbacks.project = [this]() -> mw::core::Project*
+        {
+            return currentProject ? &(*currentProject) : nullptr;
+        };
+        callbacks.selectedTrackId = [this]
+        {
+            return getSelectedTrackStableId();
+        };
+        callbacks.previewTick = [this]
+        {
+            return getControllerLanePreviewTick();
+        };
+        callbacks.markProjectDirty = [this](mw::core::StableId trackId)
+        {
+            const auto trackIndex = findTrackIndexByStableId(trackId);
+            if (trackIndex >= 0)
+                recordExternalTrackStateUpdate(trackIndex, true);
+            setProjectDirty();
+            refreshTrackManagerText();
+            if (currentProject)
+                updateTrackSummary(*currentProject);
+        };
+        callbacks.log = [this](const juce::String& message)
+        {
+            logMessage("MIDI Controller Lane: " + message);
+        };
+
+        auto closeWindow = [this]
+        {
+            closeMidiControllerLaneWindow();
+        };
+
+        auto* content = new MidiControllerLaneComponent(std::move(callbacks));
+        auto* window = new PianoRollDocumentWindow("MIDI Controller Lane", closeWindow);
+        applyPoorMansStudioCustomTitleBar(*window);
+        window->setResizable(true, true);
+        window->setResizeLimits(700, 620, 1600, 1200);
+        window->setContentOwned(content, true);
+        window->centreWithSize(860, 760);
+        window->setVisible(true);
+        applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::PianoRoll);
+        midiControllerLaneWindow.reset(window);
+        logMessage("Opened MIDI Controller Lane for the selected track.");
+    }
+
+    void MainComponent::closeMidiControllerLaneWindow()
+    {
+        if (midiControllerLaneWindow == nullptr)
+            return;
+        midiControllerLaneWindow->setVisible(false);
+        midiControllerLaneWindow.reset();
+        logMessage("Closed MIDI Controller Lane.");
+    }
+
+    void MainComponent::openMidiPitchBendLaneWindow()
+    {
+        if (midiPitchBendLaneWindow != nullptr)
+        {
+            if (auto* content = dynamic_cast<MidiPitchBendLaneComponent*>(midiPitchBendLaneWindow->getContentComponent()))
+                content->refreshNow();
+            midiPitchBendLaneWindow->toFront(true);
+            return;
+        }
+
+        MidiPitchBendLaneComponent::Callbacks callbacks;
+        callbacks.project = [this]() -> mw::core::Project*
+        {
+            return currentProject ? &(*currentProject) : nullptr;
+        };
+        callbacks.selectedTrackId = [this]
+        {
+            return getSelectedTrackStableId();
+        };
+        callbacks.previewTick = [this]
+        {
+            return getControllerLanePreviewTick();
+        };
+        callbacks.markProjectDirty = [this](mw::core::StableId trackId)
+        {
+            const auto trackIndex = findTrackIndexByStableId(trackId);
+            if (trackIndex >= 0)
+                recordExternalTrackStateUpdate(trackIndex, true);
+            setProjectDirty();
+            refreshTrackManagerText();
+            if (currentProject)
+                updateTrackSummary(*currentProject);
+        };
+        callbacks.log = [this](const juce::String& message)
+        {
+            logMessage("MIDI Pitch Bend Lane: " + message);
+        };
+
+        auto closeWindow = [this]
+        {
+            closeMidiPitchBendLaneWindow();
+        };
+
+        auto* content = new MidiPitchBendLaneComponent(std::move(callbacks));
+        auto* window = new PianoRollDocumentWindow("MIDI Pitch Bend Lane", closeWindow);
+        applyPoorMansStudioCustomTitleBar(*window);
+        window->setResizable(true, true);
+        window->setResizeLimits(700, 620, 1600, 1200);
+        window->setContentOwned(content, true);
+        window->centreWithSize(860, 760);
+        window->setVisible(true);
+        applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::PianoRoll);
+        midiPitchBendLaneWindow.reset(window);
+        logMessage("Opened MIDI Pitch Bend Lane for the selected track.");
+    }
+
+    void MainComponent::closeMidiPitchBendLaneWindow()
+    {
+        if (midiPitchBendLaneWindow == nullptr)
+            return;
+        midiPitchBendLaneWindow->setVisible(false);
+        midiPitchBendLaneWindow.reset();
+        logMessage("Closed MIDI Pitch Bend Lane.");
+    }
+
+    void MainComponent::openMidiProgramChangeLaneWindow()
+    {
+        if (midiProgramChangeLaneWindow != nullptr)
+        {
+            if (auto* content = dynamic_cast<MidiProgramChangeLaneComponent*>(midiProgramChangeLaneWindow->getContentComponent()))
+                content->refreshNow();
+            midiProgramChangeLaneWindow->toFront(true);
+            return;
+        }
+
+        MidiProgramChangeLaneComponent::Callbacks callbacks;
+        callbacks.project = [this]() -> mw::core::Project*
+        {
+            return currentProject ? &(*currentProject) : nullptr;
+        };
+        callbacks.selectedTrackId = [this]
+        {
+            return getSelectedTrackStableId();
+        };
+        callbacks.previewTick = [this]
+        {
+            return getControllerLanePreviewTick();
+        };
+        callbacks.markProjectDirty = [this](mw::core::StableId trackId)
+        {
+            const auto trackIndex = findTrackIndexByStableId(trackId);
+            if (trackIndex >= 0)
+                recordExternalTrackStateUpdate(trackIndex, true);
+            setProjectDirty();
+            refreshTrackManagerText();
+            if (currentProject)
+                updateTrackSummary(*currentProject);
+        };
+        callbacks.log = [this](const juce::String& message)
+        {
+            logMessage("MIDI Program Change Lane: " + message);
+        };
+
+        auto closeWindow = [this]
+        {
+            closeMidiProgramChangeLaneWindow();
+        };
+
+        auto* content = new MidiProgramChangeLaneComponent(std::move(callbacks));
+        auto* window = new PianoRollDocumentWindow("MIDI Program Change Lane", closeWindow);
+        applyPoorMansStudioCustomTitleBar(*window);
+        window->setResizable(true, true);
+        window->setResizeLimits(700, 620, 1600, 1200);
+        window->setContentOwned(content, true);
+        window->centreWithSize(860, 760);
+        window->setVisible(true);
+        applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::PianoRoll);
+        midiProgramChangeLaneWindow.reset(window);
+        logMessage("Opened MIDI Program Change Lane for the selected track.");
+    }
+
+    void MainComponent::closeMidiProgramChangeLaneWindow()
+    {
+        if (midiProgramChangeLaneWindow == nullptr)
+            return;
+        midiProgramChangeLaneWindow->setVisible(false);
+        midiProgramChangeLaneWindow.reset();
+        logMessage("Closed MIDI Program Change Lane.");
+    }
+
+    void MainComponent::openMidiChannelPressureLaneWindow()
+    {
+        if (midiChannelPressureLaneWindow != nullptr)
+        {
+            if (auto* content = dynamic_cast<MidiChannelPressureLaneComponent*>(midiChannelPressureLaneWindow->getContentComponent()))
+                content->refreshNow();
+            midiChannelPressureLaneWindow->toFront(true);
+            return;
+        }
+
+        MidiChannelPressureLaneComponent::Callbacks callbacks;
+        callbacks.project = [this]() -> mw::core::Project*
+        {
+            return currentProject ? &(*currentProject) : nullptr;
+        };
+        callbacks.selectedTrackId = [this]
+        {
+            return getSelectedTrackStableId();
+        };
+        callbacks.previewTick = [this]
+        {
+            return getControllerLanePreviewTick();
+        };
+        callbacks.markProjectDirty = [this](mw::core::StableId trackId)
+        {
+            const auto trackIndex = findTrackIndexByStableId(trackId);
+            if (trackIndex >= 0)
+                recordExternalTrackStateUpdate(trackIndex, true);
+            setProjectDirty();
+            refreshTrackManagerText();
+            if (currentProject)
+                updateTrackSummary(*currentProject);
+        };
+        callbacks.log = [this](const juce::String& message)
+        {
+            logMessage("MIDI Channel Pressure Lane: " + message);
+        };
+
+        auto closeWindow = [this]
+        {
+            closeMidiChannelPressureLaneWindow();
+        };
+
+        auto* content = new MidiChannelPressureLaneComponent(std::move(callbacks));
+        auto* window = new PianoRollDocumentWindow("MIDI Channel Pressure Lane", closeWindow);
+        applyPoorMansStudioCustomTitleBar(*window);
+        window->setResizable(true, true);
+        window->setResizeLimits(700, 620, 1600, 1200);
+        window->setContentOwned(content, true);
+        window->centreWithSize(860, 760);
+        window->setVisible(true);
+        applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::PianoRoll);
+        midiChannelPressureLaneWindow.reset(window);
+        logMessage("Opened MIDI Channel Pressure Lane for the selected track.");
+    }
+
+    void MainComponent::closeMidiChannelPressureLaneWindow()
+    {
+        if (midiChannelPressureLaneWindow == nullptr)
+            return;
+        midiChannelPressureLaneWindow->setVisible(false);
+        midiChannelPressureLaneWindow.reset();
+        logMessage("Closed MIDI Channel Pressure Lane.");
+    }
+
+    void MainComponent::openMidiPolyPressureLaneWindow()
+    {
+        if (midiPolyPressureLaneWindow != nullptr)
+        {
+            if (auto* content = dynamic_cast<MidiPolyPressureLaneComponent*>(midiPolyPressureLaneWindow->getContentComponent()))
+                content->refreshNow();
+            midiPolyPressureLaneWindow->toFront(true);
+            return;
+        }
+
+        MidiPolyPressureLaneComponent::Callbacks callbacks;
+        callbacks.project = [this]() -> mw::core::Project*
+        {
+            return currentProject ? &(*currentProject) : nullptr;
+        };
+        callbacks.selectedTrackId = [this]
+        {
+            return getSelectedTrackStableId();
+        };
+        callbacks.previewTick = [this]
+        {
+            return getControllerLanePreviewTick();
+        };
+        callbacks.markProjectDirty = [this](mw::core::StableId trackId)
+        {
+            const auto trackIndex = findTrackIndexByStableId(trackId);
+            if (trackIndex >= 0)
+                recordExternalTrackStateUpdate(trackIndex, true);
+            setProjectDirty();
+            refreshTrackManagerText();
+            if (currentProject)
+                updateTrackSummary(*currentProject);
+        };
+        callbacks.log = [this](const juce::String& message)
+        {
+            logMessage("MIDI Poly Pressure Lane: " + message);
+        };
+
+        auto closeWindow = [this]
+        {
+            closeMidiPolyPressureLaneWindow();
+        };
+
+        auto* content = new MidiPolyPressureLaneComponent(std::move(callbacks));
+        auto* window = new PianoRollDocumentWindow("MIDI Poly Pressure Lane", closeWindow);
+        applyPoorMansStudioCustomTitleBar(*window);
+        window->setResizable(true, true);
+        window->setResizeLimits(700, 620, 1600, 1200);
+        window->setContentOwned(content, true);
+        window->centreWithSize(860, 760);
+        window->setVisible(true);
+        applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::PianoRoll);
+        midiPolyPressureLaneWindow.reset(window);
+        logMessage("Opened MIDI Poly Pressure Lane for the selected track.");
+    }
+
+    void MainComponent::closeMidiPolyPressureLaneWindow()
+    {
+        if (midiPolyPressureLaneWindow == nullptr)
+            return;
+        midiPolyPressureLaneWindow->setVisible(false);
+        midiPolyPressureLaneWindow.reset();
+        logMessage("Closed MIDI Poly Pressure Lane.");
+    }
+
+    void MainComponent::openMidi14BitControllerLaneWindow()
+    {
+        if (midi14BitControllerLaneWindow != nullptr)
+        {
+            if (auto* content = dynamic_cast<Midi14BitControllerLaneComponent*>(midi14BitControllerLaneWindow->getContentComponent()))
+                content->refreshNow();
+            midi14BitControllerLaneWindow->toFront(true);
+            return;
+        }
+
+        Midi14BitControllerLaneComponent::Callbacks callbacks;
+        callbacks.project = [this]() -> mw::core::Project* { return currentProject ? &(*currentProject) : nullptr; };
+        callbacks.selectedTrackId = [this] { return getSelectedTrackStableId(); };
+        callbacks.previewTick = [this] { return getControllerLanePreviewTick(); };
+        callbacks.markProjectDirty = [this](mw::core::StableId trackId)
+        {
+            const auto trackIndex = findTrackIndexByStableId(trackId);
+            if (trackIndex >= 0) recordExternalTrackStateUpdate(trackIndex, true);
+            setProjectDirty();
+            refreshTrackManagerText();
+            if (currentProject) updateTrackSummary(*currentProject);
+        };
+        callbacks.log = [this](const juce::String& message) { logMessage("MIDI 14-bit Controller Lane: " + message); };
+
+        auto closeWindow = [this] { closeMidi14BitControllerLaneWindow(); };
+        auto* content = new Midi14BitControllerLaneComponent(std::move(callbacks));
+        auto* window = new PianoRollDocumentWindow("MIDI 14-bit Controller Lane", closeWindow);
+        applyPoorMansStudioCustomTitleBar(*window);
+        window->setResizable(true, true);
+        window->setResizeLimits(700, 620, 1600, 1200);
+        window->setContentOwned(content, true);
+        window->centreWithSize(860, 760);
+        window->setVisible(true);
+        applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::PianoRoll);
+        midi14BitControllerLaneWindow.reset(window);
+        logMessage("Opened MIDI 14-bit Controller Lane for the selected track.");
+    }
+
+    void MainComponent::closeMidi14BitControllerLaneWindow()
+    {
+        if (midi14BitControllerLaneWindow == nullptr) return;
+        midi14BitControllerLaneWindow->setVisible(false);
+        midi14BitControllerLaneWindow.reset();
+        logMessage("Closed MIDI 14-bit Controller Lane.");
+    }
+
+    void MainComponent::openMidiParameterLaneWindow()
+    {
+        if (midiParameterLaneWindow != nullptr)
+        {
+            if (auto* content = dynamic_cast<MidiParameterLaneComponent*>(midiParameterLaneWindow->getContentComponent()))
+                content->refreshNow();
+            midiParameterLaneWindow->toFront(true);
+            return;
+        }
+
+        MidiParameterLaneComponent::Callbacks callbacks;
+        callbacks.project = [this]() -> mw::core::Project* { return currentProject ? &(*currentProject) : nullptr; };
+        callbacks.selectedTrackId = [this] { return getSelectedTrackStableId(); };
+        callbacks.previewTick = [this] { return getControllerLanePreviewTick(); };
+        callbacks.markProjectDirty = [this](mw::core::StableId trackId)
+        {
+            const auto trackIndex = findTrackIndexByStableId(trackId);
+            if (trackIndex >= 0) recordExternalTrackStateUpdate(trackIndex, true);
+            setProjectDirty();
+            refreshTrackManagerText();
+            if (currentProject) updateTrackSummary(*currentProject);
+        };
+        callbacks.log = [this](const juce::String& message) { logMessage("MIDI Parameter Lane: " + message); };
+
+        auto closeWindow = [this] { closeMidiParameterLaneWindow(); };
+        auto* content = new MidiParameterLaneComponent(std::move(callbacks));
+        auto* window = new PianoRollDocumentWindow("MIDI Parameter Lane (RPN / NRPN)", closeWindow);
+        applyPoorMansStudioCustomTitleBar(*window);
+        window->setResizable(true, true);
+        window->setResizeLimits(760, 420, 1700, 1000);
+        window->setContentOwned(content, true);
+        window->centreWithSize(1040, 600);
+        window->setVisible(true);
+        applyPoorMansStudioWindowIcon(*window, PoorMansStudioWindowIcon::PianoRoll);
+        midiParameterLaneWindow.reset(window);
+        logMessage("Opened MIDI Parameter Lane for the selected track.");
+    }
+
+    void MainComponent::closeMidiParameterLaneWindow()
+    {
+        if (midiParameterLaneWindow == nullptr) return;
+        midiParameterLaneWindow->setVisible(false);
+        midiParameterLaneWindow.reset();
+        logMessage("Closed MIDI Parameter Lane.");
+    }
+
 void MainComponent::openPianoRollWindow()
     {
         if (!ensureSelectedTrackHasSequenceForPianoRoll())
@@ -34012,6 +41698,8 @@ void MainComponent::openPianoRollWindow()
                     }
 
                     logMessage(message);
+                    if (midiRecordingPlaybackPending)
+                        stopMidiRecording(false);
                     return;
                 }
             }
@@ -34037,6 +41725,35 @@ void MainComponent::openPianoRollWindow()
             const auto remainingBeats = std::max(0.01, lastPianoRollPreviewDurationBeats - startBeat);
             pianoRoll.startPreviewPlayhead(lastPianoRollPreviewTempoBpm, remainingBeats, startBeat);
 
+            if (midiRecordingPlaybackPending && currentProject)
+            {
+                const int transportSampleRate = sampleRateCombo.getText().getIntValue() > 0
+                    ? sampleRateCombo.getText().getIntValue()
+                    : 48000;
+                const int transportBlockSize = 512;
+                const auto totalTransportSeconds = std::max(startSeconds, getPianoRollPreviewTotalSeconds());
+                const auto startSample = static_cast<std::int64_t>(std::llround(startSeconds * transportSampleRate));
+                const auto totalSample = static_cast<std::int64_t>(std::llround(totalTransportSeconds * transportSampleRate));
+                midiRecordingFallbackTransportGeneration = playbackTransportCoordinator.beginPreparing(
+                    currentProject->getStableId(),
+                    startSample,
+                    transportSampleRate,
+                    transportBlockSize,
+                    { midiRecordingArmedTrackId });
+                if (!playbackTransportCoordinator.beginPlayingWithAudioFormat(
+                        midiRecordingFallbackTransportGeneration,
+                        startSample,
+                        std::max(startSample, totalSample),
+                        transportSampleRate,
+                        transportBlockSize)
+                    || !beginMidiRecordingSessionForActivePlayback())
+                {
+                    logMessage("MIDI Recording: rendered backing playback started, but transport-synchronized capture could not start.");
+                    stopMidiRecording(false);
+                    return;
+                }
+            }
+
             logMessage(
                 "Playing Piano Roll preview from "
                 + formatPreviewClockTime(startSeconds)
@@ -34048,6 +41765,8 @@ void MainComponent::openPianoRollWindow()
         {
             mciSendStringW(L"close PoorMansStudioPianoRollPreview", nullptr, 0, nullptr);
             logMessage("ERROR: Windows could not play the Piano Roll preview WAV: " + previewPath.string());
+            if (midiRecordingPlaybackPending)
+                stopMidiRecording(false);
         }
 #else
         logMessage("Embedded preview playback is currently only available on Windows.");
@@ -34205,7 +41924,7 @@ void MainComponent::openPianoRollWindow()
             return std::max(0.0, pendingPianoRollPreviewStartSeconds);
 
         if (pianoRoll.isPreviewPlayheadActive())
-            return std::max(0.0, pianoRoll.getPreviewPlayheadBeat() * 60.0 / lastPianoRollPreviewTempoBpm);
+            return std::max(0.0, pianoRoll.getPreviewPlayheadBeatNow() * 60.0 / lastPianoRollPreviewTempoBpm);
 
         return std::max(0.0, pendingPianoRollPreviewStartSeconds);
     }
@@ -34353,6 +42072,7 @@ void MainComponent::openPianoRollWindow()
 
     void MainComponent::stopProjectPreview()
     {
+        stopLiveMidiMonitoring(true);
         stopClapInstrumentLiveAudition(true);
         stopVstInstrumentLiveAudition(true);
 #if JUCE_WINDOWS
@@ -34414,7 +42134,7 @@ void MainComponent::renderPianoRollPreview()
             currentProject = mw::core::Project("Piano Roll Preview Project");
             currentProject->addTrack("Piano Roll Track");
             baseNameBox.setText("piano_roll_preview_project");
-            refreshTrackSelector();
+            refreshTrackSelector({});
             trackCombo.setSelectedId(1, juce::sendNotification);
             logMessage("Created temporary project for piano roll preview.");
         }
@@ -34640,7 +42360,7 @@ void MainComponent::renderPianoRollPreview()
         logMessage("Preview temporary MIDI: " + previewMidiPath.string());
         logMessage("Preview temporary WAV: " + previewWavPath.string());
 
-        if (!mw::midi::MidiExporter::exportToFile(previewProject, previewMidiPath))
+        if (!mw::midi::MidiExporter::exportToFile(previewProject, previewMidiPath, { mw::midi::MidiExportPurpose::InternalRender }))
         {
             logMessage("ERROR: Failed to export preview MIDI.");
             return;

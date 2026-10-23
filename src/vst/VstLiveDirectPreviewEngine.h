@@ -1,5 +1,6 @@
 #pragma once
 
+#include "audio/ApplicationAudioService.h"
 #include "audio/GainLimits.h"
 #include "clap/ClapLiveCallbackBridge.h"
 #include "core/StableId.h"
@@ -32,9 +33,18 @@ namespace mw::vst
         VstLiveInstrumentSession* session = nullptr;
         std::mutex* sessionProcessMutex = nullptr;
         std::vector<mw::clap::ClapLivePlaybackNote> notes;
+        std::vector<mw::clap::ClapLivePlaybackControllerEvent> controllers;
+        std::vector<mw::clap::ClapLivePlaybackPitchBendEvent> pitchBends;
+        std::vector<mw::clap::ClapLivePlaybackProgramChangeEvent> programChanges;
+        std::vector<mw::clap::ClapLivePlaybackChannelPressureEvent> channelPressures;
+        std::vector<mw::clap::ClapLivePlaybackPolyPressureEvent> polyPressures;
+        std::vector<mw::clap::ClapLivePlayback14BitControllerEvent> controller14Bits;
+        std::vector<mw::clap::ClapLivePlaybackRpnEvent> rpns;
+        std::vector<mw::clap::ClapLivePlaybackNrpnEvent> nrpns;
         mw::clap::ClapLiveCallbackBridgeConfig config;
         std::vector<VstLiveDirectPreviewEffectRequest> effects;
         float outputGain = 1.0f;
+        bool liveMidiInput = false;
     };
 
     struct VstLiveDirectPreviewStartResult
@@ -111,7 +121,7 @@ namespace mw::vst
     class VstLiveDirectPreviewEngine final
     {
     public:
-        VstLiveDirectPreviewEngine();
+        explicit VstLiveDirectPreviewEngine(mw::audio::ApplicationAudioService& audioService);
         ~VstLiveDirectPreviewEngine();
 
         VstLiveDirectPreviewEngine(const VstLiveDirectPreviewEngine&) = delete;
@@ -123,13 +133,17 @@ namespace mw::vst
         VstLiveDirectPreviewStatus status() const;
         bool isActive() const noexcept;
         int activeTrackIndex() const noexcept;
+        bool submitLiveMidiMessage(const juce::MidiMessage& message) noexcept;
+        void requestLiveMidiPanic() noexcept;
 
     private:
         class DirectPreviewAudioCallback;
 
-        juce::AudioDeviceManager deviceManager_;
+        mw::audio::ApplicationAudioService& audioService_;
         std::unique_ptr<DirectPreviewAudioCallback> callback_;
+        mutable std::mutex callbackAccessMutex_;
         int activeTrackIndex_ = -1;
         bool active_ = false;
+        mw::audio::ApplicationAudioPlaybackOwner activeOwner_ = mw::audio::ApplicationAudioPlaybackOwner::None;
     };
 }

@@ -451,6 +451,106 @@ namespace
         return event;
     }
 
+    ScheduledLiveEvent makeClapLiveControllerEvent(const mw::clap::ClapLiveControllerEvent& source, std::uint32_t portIndex, int frameCount)
+    {
+        ScheduledLiveEvent event;
+        event.encoding = ScheduledEventEncoding::Midi;
+        auto& midi = event.midi;
+        midi.header.size = sizeof(clap_event_midi_t);
+        midi.header.time = static_cast<std::uint32_t>(std::clamp<int>(static_cast<int>(source.frameOffset), 0, std::max(0, frameCount - 1)));
+        midi.header.space_id = clapCoreEventSpaceId; midi.header.type = clapEventMidi; midi.header.flags = 0;
+        midi.port_index = static_cast<std::uint16_t>(std::min<std::uint32_t>(portIndex, 65535u));
+        const auto channel = static_cast<std::uint8_t>(std::clamp(source.midiChannel - 1, 0, 15));
+        midi.data[0] = static_cast<std::uint8_t>(0xB0 | channel);
+        midi.data[1] = static_cast<std::uint8_t>(std::clamp(source.controller, 0, 127));
+        midi.data[2] = static_cast<std::uint8_t>(std::clamp(source.value, 0, 127));
+        return event;
+    }
+
+    ScheduledLiveEvent makeClapLivePitchBendEvent(const mw::clap::ClapLivePitchBendEvent& source, std::uint32_t portIndex, int frameCount)
+    {
+        ScheduledLiveEvent event;
+        event.encoding = ScheduledEventEncoding::Midi;
+        auto& midi = event.midi;
+        midi.header.size = sizeof(clap_event_midi_t);
+        midi.header.time = static_cast<std::uint32_t>(std::clamp<int>(static_cast<int>(source.frameOffset), 0, std::max(0, frameCount - 1)));
+        midi.header.space_id = clapCoreEventSpaceId; midi.header.type = clapEventMidi; midi.header.flags = 0;
+        midi.port_index = static_cast<std::uint16_t>(std::min<std::uint32_t>(portIndex, 65535u));
+        const auto channel = static_cast<std::uint8_t>(std::clamp(source.midiChannel - 1, 0, 15));
+        const int raw = std::clamp(source.value + 8192, 0, 16383);
+        midi.data[0] = static_cast<std::uint8_t>(0xE0 | channel);
+        midi.data[1] = static_cast<std::uint8_t>(raw & 0x7F);
+        midi.data[2] = static_cast<std::uint8_t>((raw >> 7) & 0x7F);
+        return event;
+    }
+
+    ScheduledLiveEvent makeClapLiveProgramChangeEvent(const mw::clap::ClapLiveProgramChangeEvent& source, std::uint32_t portIndex, int frameCount)
+    {
+        ScheduledLiveEvent event;
+        event.encoding = ScheduledEventEncoding::Midi;
+        auto& midi = event.midi;
+        midi.header.size = sizeof(clap_event_midi_t);
+        midi.header.time = static_cast<std::uint32_t>(std::clamp<int>(static_cast<int>(source.frameOffset), 0, std::max(0, frameCount - 1)));
+        midi.header.space_id = clapCoreEventSpaceId; midi.header.type = clapEventMidi; midi.header.flags = 0;
+        midi.port_index = static_cast<std::uint16_t>(std::min<std::uint32_t>(portIndex, 65535u));
+        const auto channel = static_cast<std::uint8_t>(std::clamp(source.midiChannel - 1, 0, 15));
+        midi.data[0] = static_cast<std::uint8_t>(0xC0 | channel);
+        midi.data[1] = static_cast<std::uint8_t>(std::clamp(source.program, 0, 127));
+        midi.data[2] = 0;
+        return event;
+    }
+
+    ScheduledLiveEvent makeClapLiveChannelPressureEvent(const mw::clap::ClapLiveChannelPressureEvent& source, std::uint32_t portIndex, int frameCount)
+    {
+        ScheduledLiveEvent event;
+        event.encoding = ScheduledEventEncoding::Midi;
+        auto& midi = event.midi;
+        midi.header.size = sizeof(clap_event_midi_t);
+        midi.header.time = static_cast<std::uint32_t>(std::clamp<int>(static_cast<int>(source.frameOffset), 0, std::max(0, frameCount - 1)));
+        midi.header.space_id = clapCoreEventSpaceId; midi.header.type = clapEventMidi; midi.header.flags = 0;
+        midi.port_index = static_cast<std::uint16_t>(std::min<std::uint32_t>(portIndex, 65535u));
+        const auto channel = static_cast<std::uint8_t>(std::clamp(source.midiChannel - 1, 0, 15));
+        midi.data[0] = static_cast<std::uint8_t>(0xD0 | channel);
+        midi.data[1] = static_cast<std::uint8_t>(std::clamp(source.pressure, 0, 127));
+        midi.data[2] = 0;
+        return event;
+    }
+
+    ScheduledLiveEvent makeClapLivePolyPressureEvent(const mw::clap::ClapLivePolyPressureEvent& source, std::uint32_t portIndex, int frameCount)
+    {
+        ScheduledLiveEvent event;
+        event.encoding = ScheduledEventEncoding::Midi;
+        auto& midi = event.midi;
+        midi.header.size = sizeof(clap_event_midi_t);
+        midi.header.time = static_cast<std::uint32_t>(std::clamp<int>(static_cast<int>(source.frameOffset), 0, std::max(0, frameCount - 1)));
+        midi.header.space_id = clapCoreEventSpaceId; midi.header.type = clapEventMidi; midi.header.flags = 0;
+        midi.port_index = static_cast<std::uint16_t>(std::min<std::uint32_t>(portIndex, 65535u));
+        const auto channel = static_cast<std::uint8_t>(std::clamp(source.midiChannel - 1, 0, 15));
+        midi.data[0] = static_cast<std::uint8_t>(0xA0 | channel);
+        midi.data[1] = static_cast<std::uint8_t>(std::clamp(source.noteNumber, 0, 127));
+        midi.data[2] = static_cast<std::uint8_t>(std::clamp(source.pressure, 0, 127));
+        return event;
+    }
+
+    int liveEventPriority(const ScheduledLiveEvent& event)
+    {
+        if (event.encoding == ScheduledEventEncoding::Midi)
+        {
+            const auto status = static_cast<int>(event.midi.data[0] & 0xF0u);
+            if (status == 0xB0) return 0;
+            if (status == 0xC0) return 1;
+            if (status == 0xE0) return 2;
+            if (status == 0xD0) return 3;
+            if (status == 0x80) return 4;
+            if (status == 0x90) return event.midi.data[2] == 0 ? 4 : 5;
+            if (status == 0xA0) return 6;
+            return 7;
+        }
+        if (event.note.header.type == clapEventNoteOff) return 1;
+        if (event.note.header.type == clapEventNoteOn) return 2;
+        return 3;
+    }
+
     struct LiveOutputStorage
     {
         std::vector<std::vector<float>> samples;
@@ -863,17 +963,25 @@ namespace mw::clap
             const int frames = std::clamp(request.frameCount > 0 ? request.frameCount : infoState.blockSize, 1, std::max(1, infoState.blockSize));
 
             LiveEventBlock eventBlock;
-            eventBlock.events.reserve(request.noteEvents.size());
+            eventBlock.events.reserve(request.controllerEvents.size() + request.programChangeEvents.size() + request.pitchBendEvents.size() + request.channelPressureEvents.size() + request.polyPressureEvents.size() + request.noteEvents.size());
+            for (const auto& controllerEvent : request.controllerEvents)
+                eventBlock.events.push_back(makeClapLiveControllerEvent(controllerEvent, noteDialectSelection.portIndex, frames));
+            for (const auto& programEvent : request.programChangeEvents)
+                eventBlock.events.push_back(makeClapLiveProgramChangeEvent(programEvent, noteDialectSelection.portIndex, frames));
+            for (const auto& pitchBendEvent : request.pitchBendEvents)
+                eventBlock.events.push_back(makeClapLivePitchBendEvent(pitchBendEvent, noteDialectSelection.portIndex, frames));
+            for (const auto& pressureEvent : request.channelPressureEvents)
+                eventBlock.events.push_back(makeClapLiveChannelPressureEvent(pressureEvent, noteDialectSelection.portIndex, frames));
             for (const auto& noteEvent : request.noteEvents)
                 eventBlock.events.push_back(makeClapLiveNoteEvent(noteEvent, noteDialectSelection.dialect, noteDialectSelection.portIndex, frames));
+            for (const auto& polyEvent : request.polyPressureEvents)
+                eventBlock.events.push_back(makeClapLivePolyPressureEvent(polyEvent, noteDialectSelection.portIndex, frames));
 
-            std::sort(eventBlock.events.begin(), eventBlock.events.end(), [](const auto& a, const auto& b)
+            std::stable_sort(eventBlock.events.begin(), eventBlock.events.end(), [](const auto& a, const auto& b)
             {
-                const auto* ah = a.header();
-                const auto* bh = b.header();
-                if (ah->time != bh->time)
-                    return ah->time < bh->time;
-                return ah->type < bh->type;
+                const auto* ah = a.header(); const auto* bh = b.header();
+                if (ah->time != bh->time) return ah->time < bh->time;
+                return liveEventPriority(a) < liveEventPriority(b);
             });
 
             clap_input_events_t inputEvents {};

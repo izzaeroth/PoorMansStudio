@@ -2,10 +2,12 @@
 
 #include <juce_core/juce_core.h>
 
+#include "app/VersionNumber.h"
+
 namespace mw::app
 {
-    inline constexpr const char* appVersion = "0.66.8";
-    inline constexpr const char* appVersionLabel = "v0.66.8";
+    inline constexpr const char* appVersion = versionNumber;
+    inline constexpr const char* appVersionLabel = versionLabel;
 
     inline juce::String applicationTitle()
     {

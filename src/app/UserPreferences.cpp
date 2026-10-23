@@ -98,6 +98,21 @@ namespace
         }
     }
 
+    int sanitizeMidiRecordingQuantizeDivisionPreference(int division) noexcept
+    {
+        switch (division)
+        {
+            case 4:
+            case 8:
+            case 16:
+            case 32:
+            case 64:
+                return division;
+            default:
+                return 0;
+        }
+    }
+
     int parseStemFileMask(const std::string& rawValue, int fallback)
     {
         const auto value = trim(rawValue);
@@ -196,6 +211,34 @@ namespace mw::app
         preferences.clapMaxOpenPluginWindows = loadedMaxOpenClapPluginWindows <= 0
             ? preferences.clapMaxOpenPluginWindows
             : std::clamp(loadedMaxOpenClapPluginWindows, 1, 16);
+
+        preferences.audioDeviceTypeName = getString(values, "audioDeviceTypeName", preferences.audioDeviceTypeName);
+        preferences.audioInputDeviceName = getString(values, "audioInputDeviceName", preferences.audioInputDeviceName);
+        preferences.audioOutputDeviceName = getString(values, "audioOutputDeviceName", preferences.audioOutputDeviceName);
+        preferences.audioSampleRate = std::max(0, getInt(values, "audioSampleRate", preferences.audioSampleRate));
+        preferences.audioBufferSize = std::max(0, getInt(values, "audioBufferSize", preferences.audioBufferSize));
+        preferences.audioInputMode = getInt(values, "audioInputMode", preferences.audioInputMode) == 2 ? 2 : 1;
+        preferences.audioInputChannelIndex = std::max(0, getInt(values, "audioInputChannelIndex", preferences.audioInputChannelIndex));
+        preferences.midiInputDeviceIdentifier = getString(values, "midiInputDeviceIdentifier", preferences.midiInputDeviceIdentifier);
+        preferences.midiInputDeviceName = getString(values, "midiInputDeviceName", preferences.midiInputDeviceName);
+        preferences.midiInputChannel = std::clamp(getInt(values, "midiInputChannel", preferences.midiInputChannel), 0, 16);
+        preferences.midiRecordingCountInBars = std::clamp(getInt(values, "midiRecordingCountInBars", preferences.midiRecordingCountInBars), 0, 2);
+        preferences.midiRecordingQuantizeDivision = sanitizeMidiRecordingQuantizeDivisionPreference(
+            getInt(values, "midiRecordingQuantizeDivision", preferences.midiRecordingQuantizeDivision));
+        preferences.midiRecordingMetronomeEnabled = getInt(
+            values, "midiRecordingMetronomeEnabled", preferences.midiRecordingMetronomeEnabled ? 1 : 0) != 0;
+        preferences.midiRecordingRecordControllers = getInt(
+            values, "midiRecordingRecordControllers", preferences.midiRecordingRecordControllers ? 1 : 0) != 0;
+        preferences.midiRecordingRecordPitchBend = getInt(
+            values, "midiRecordingRecordPitchBend", preferences.midiRecordingRecordPitchBend ? 1 : 0) != 0;
+        preferences.midiRecordingRecordProgramChange = getInt(
+            values, "midiRecordingRecordProgramChange", preferences.midiRecordingRecordProgramChange ? 1 : 0) != 0;
+        preferences.midiRecordingRecordChannelPressure = getInt(
+            values, "midiRecordingRecordChannelPressure", preferences.midiRecordingRecordChannelPressure ? 1 : 0) != 0;
+        preferences.midiRecordingRecordPolyPressure = getInt(
+            values, "midiRecordingRecordPolyPressure", preferences.midiRecordingRecordPolyPressure ? 1 : 0) != 0;
+        preferences.midiRecordingRecordAdvancedParameters = getInt(
+            values, "midiRecordingRecordAdvancedParameters", preferences.midiRecordingRecordAdvancedParameters ? 1 : 0) != 0;
 
         return preferences;
     }
@@ -337,6 +380,26 @@ namespace mw::app
         file << "clapCompatibilityWarningsEnabled=" << (preferences.clapCompatibilityWarningsEnabled ? 1 : 0) << "\n";
         file << "clapSafePluginUiMode=" << (preferences.clapSafePluginUiMode ? 1 : 0) << "\n";
         file << "clapMaxOpenPluginWindows=" << std::clamp(preferences.clapMaxOpenPluginWindows, 1, 16) << "\n";
+        file << "audioDeviceTypeName=" << preferences.audioDeviceTypeName << "\n";
+        file << "audioInputDeviceName=" << preferences.audioInputDeviceName << "\n";
+        file << "audioOutputDeviceName=" << preferences.audioOutputDeviceName << "\n";
+        file << "audioSampleRate=" << std::max(0, preferences.audioSampleRate) << "\n";
+        file << "audioBufferSize=" << std::max(0, preferences.audioBufferSize) << "\n";
+        file << "audioInputMode=" << (preferences.audioInputMode == 2 ? 2 : 1) << "\n";
+        file << "audioInputChannelIndex=" << std::max(0, preferences.audioInputChannelIndex) << "\n";
+        file << "midiInputDeviceIdentifier=" << preferences.midiInputDeviceIdentifier << "\n";
+        file << "midiInputDeviceName=" << preferences.midiInputDeviceName << "\n";
+        file << "midiInputChannel=" << std::clamp(preferences.midiInputChannel, 0, 16) << "\n";
+        file << "midiRecordingCountInBars=" << std::clamp(preferences.midiRecordingCountInBars, 0, 2) << "\n";
+        file << "midiRecordingQuantizeDivision="
+             << sanitizeMidiRecordingQuantizeDivisionPreference(preferences.midiRecordingQuantizeDivision) << "\n";
+        file << "midiRecordingMetronomeEnabled=" << (preferences.midiRecordingMetronomeEnabled ? 1 : 0) << "\n";
+        file << "midiRecordingRecordControllers=" << (preferences.midiRecordingRecordControllers ? 1 : 0) << "\n";
+        file << "midiRecordingRecordPitchBend=" << (preferences.midiRecordingRecordPitchBend ? 1 : 0) << "\n";
+        file << "midiRecordingRecordProgramChange=" << (preferences.midiRecordingRecordProgramChange ? 1 : 0) << "\n";
+        file << "midiRecordingRecordChannelPressure=" << (preferences.midiRecordingRecordChannelPressure ? 1 : 0) << "\n";
+        file << "midiRecordingRecordPolyPressure=" << (preferences.midiRecordingRecordPolyPressure ? 1 : 0) << "\n";
+        file << "midiRecordingRecordAdvancedParameters=" << (preferences.midiRecordingRecordAdvancedParameters ? 1 : 0) << "\n";
 
         return file.good();
     }

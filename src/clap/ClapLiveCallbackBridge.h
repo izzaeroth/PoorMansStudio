@@ -40,6 +40,29 @@ namespace mw::clap
         ClapLiveCallbackBridge() = default;
 
         void prepare(std::vector<ClapLivePlaybackNote> notes, ClapLiveCallbackBridgeConfig config);
+        void prepare(std::vector<ClapLivePlaybackNote> notes, std::vector<ClapLivePlaybackControllerEvent> controllerEvents, ClapLiveCallbackBridgeConfig config);
+        void prepare(std::vector<ClapLivePlaybackNote> notes, std::vector<ClapLivePlaybackControllerEvent> controllerEvents,
+                     std::vector<ClapLivePlaybackPitchBendEvent> pitchBendEvents, ClapLiveCallbackBridgeConfig config);
+        void prepare(std::vector<ClapLivePlaybackNote> notes, std::vector<ClapLivePlaybackControllerEvent> controllerEvents,
+                     std::vector<ClapLivePlaybackPitchBendEvent> pitchBendEvents,
+                     std::vector<ClapLivePlaybackProgramChangeEvent> programChangeEvents, ClapLiveCallbackBridgeConfig config);
+        void prepare(std::vector<ClapLivePlaybackNote> notes, std::vector<ClapLivePlaybackControllerEvent> controllerEvents,
+                     std::vector<ClapLivePlaybackPitchBendEvent> pitchBendEvents,
+                     std::vector<ClapLivePlaybackProgramChangeEvent> programChangeEvents,
+                     std::vector<ClapLivePlaybackChannelPressureEvent> channelPressureEvents, ClapLiveCallbackBridgeConfig config);
+        void prepare(std::vector<ClapLivePlaybackNote> notes, std::vector<ClapLivePlaybackControllerEvent> controllerEvents,
+                     std::vector<ClapLivePlaybackPitchBendEvent> pitchBendEvents,
+                     std::vector<ClapLivePlaybackProgramChangeEvent> programChangeEvents,
+                     std::vector<ClapLivePlaybackChannelPressureEvent> channelPressureEvents,
+                     std::vector<ClapLivePlaybackPolyPressureEvent> polyPressureEvents, ClapLiveCallbackBridgeConfig config);
+        void prepare(std::vector<ClapLivePlaybackNote> notes, std::vector<ClapLivePlaybackControllerEvent> controllerEvents,
+                     std::vector<ClapLivePlaybackPitchBendEvent> pitchBendEvents,
+                     std::vector<ClapLivePlaybackProgramChangeEvent> programChangeEvents,
+                     std::vector<ClapLivePlaybackChannelPressureEvent> channelPressureEvents,
+                     std::vector<ClapLivePlaybackPolyPressureEvent> polyPressureEvents,
+                     std::vector<ClapLivePlayback14BitControllerEvent> controller14BitEvents,
+                     std::vector<ClapLivePlaybackRpnEvent> rpnEvents,
+                     std::vector<ClapLivePlaybackNrpnEvent> nrpnEvents, ClapLiveCallbackBridgeConfig config);
         bool isPrepared() const;
         bool isFinished() const;
         const ClapLiveProcessRequest& nextRequest();

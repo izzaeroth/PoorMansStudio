@@ -1,6 +1,7 @@
 #include "vst/VstInstrumentHost.h"
 
 #include "clap/ClapEffectHost.h"
+#include "audio/TailPolicy.h"
 #include "core/Project.h"
 
 #include <algorithm>
@@ -162,29 +163,6 @@ namespace
         return AudioFileMetrics { reader->sampleRate, static_cast<std::int64_t>(reader->lengthInSamples) };
     }
 
-    struct EffectChainTailTrackingSettings
-    {
-        float silenceThreshold = 1.0e-4f;
-        double silenceHoldSeconds = 0.30;
-        double tailPadSeconds = 0.05;
-        const char* policyName = "preview";
-        const char* thresholdDescription = "-80 dBFS";
-    };
-
-    EffectChainTailTrackingSettings effectChainTailTrackingSettings(mw::vst::EffectTailPolicy policy)
-    {
-        if (policy == mw::vst::EffectTailPolicy::Preview)
-            return {};
-
-        EffectChainTailTrackingSettings settings;
-        settings.silenceThreshold = 1.5848932e-5f; // Approximately -96 dBFS.
-        settings.silenceHoldSeconds = 1.0;
-        settings.tailPadSeconds = 0.15;
-        settings.policyName = "render";
-        settings.thresholdDescription = "-96 dBFS";
-        return settings;
-    }
-
     bool trimEffectChainTail(const std::filesystem::path& wavPath,
                              double sourceDurationSeconds,
                              double maximumTailSeconds,
@@ -193,7 +171,10 @@ namespace
                              std::string& error)
     {
         constexpr int scanBlockSize = 32768;
-        const auto settings = effectChainTailTrackingSettings(policy);
+        const auto policyMode = policy == mw::vst::EffectTailPolicy::Preview
+            ? mw::audio::TailPolicyMode::Preview
+            : mw::audio::TailPolicyMode::Render;
+        const auto settings = mw::audio::tailTrackingSettings(policyMode);
 
         juce::AudioFormatManager formatManager;
         formatManager.registerBasicFormats();
@@ -212,13 +193,9 @@ namespace
             static_cast<std::int64_t>(std::llround(std::max(0.0, sourceDurationSeconds) * static_cast<double>(sampleRate))),
             0,
             totalSamples);
-        const auto maximumTailSamples = static_cast<std::int64_t>(
-            std::ceil(std::max(0.0, maximumTailSeconds) * static_cast<double>(sampleRate)));
-        const auto scanEndSamples = std::min<std::int64_t>(totalSamples, sourceSamples + maximumTailSamples);
-        const auto silenceHoldSamples = std::max<std::int64_t>(1, static_cast<std::int64_t>(
-            std::ceil(settings.silenceHoldSeconds * static_cast<double>(sampleRate))));
-        const auto tailPadSamples = std::max<std::int64_t>(0, static_cast<std::int64_t>(
-            std::ceil(settings.tailPadSeconds * static_cast<double>(sampleRate))));
+        const auto tailPlan = mw::audio::makeTailScanPlan(
+            totalSamples, sourceSamples, sampleRate, maximumTailSeconds, policyMode);
+        const auto scanEndSamples = tailPlan.scanEndSamples;
 
         juce::AudioBuffer<float> buffer(channelCount, scanBlockSize);
         std::int64_t position = sourceSamples;
@@ -263,17 +240,12 @@ namespace
             position += blockSamples;
         }
 
-        const bool endedInConfirmedSilence = consecutiveSilentSamples >= silenceHoldSamples;
+        const auto tailDecision = mw::audio::finalizeTailScan(
+            tailPlan, totalSamples, lastAudibleSample, consecutiveSilentSamples);
+        const bool endedInConfirmedSilence = tailDecision.endedInConfirmedSilence;
+        const auto keepSamples = tailDecision.keepSamples;
+        const auto trimmedSamples = tailDecision.trimmedSamples;
         reader.reset();
-
-        const auto lastAudibleKeep = endedInConfirmedSilence
-            ? (lastAudibleSample >= 0 ? lastAudibleSample + 1 + tailPadSamples : sourceSamples)
-            : scanEndSamples;
-        const auto keepSamples = std::clamp<std::int64_t>(
-            std::max<std::int64_t>(sourceSamples, lastAudibleKeep),
-            0,
-            scanEndSamples);
-        const auto trimmedSamples = std::max<std::int64_t>(0, totalSamples - keepSamples);
 
         if (trimmedSamples > 0
             && !rewriteWavTrimmedToSamples(wavPath, keepSamples, channelCount, sampleRate, error))

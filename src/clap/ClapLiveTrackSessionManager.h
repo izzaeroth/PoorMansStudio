@@ -24,9 +24,18 @@ namespace mw::clap
         std::string trackName;
         ClapLiveInstrumentSessionConfig sessionConfig;
         std::vector<ClapLivePlaybackNote> notes;
+        std::vector<ClapLivePlaybackControllerEvent> controllers;
+        std::vector<ClapLivePlaybackPitchBendEvent> pitchBends;
+        std::vector<ClapLivePlaybackProgramChangeEvent> programChanges;
+        std::vector<ClapLivePlaybackChannelPressureEvent> channelPressures;
+        std::vector<ClapLivePlaybackPolyPressureEvent> polyPressures;
+        std::vector<ClapLivePlayback14BitControllerEvent> controller14Bits;
+        std::vector<ClapLivePlaybackRpnEvent> rpns;
+        std::vector<ClapLivePlaybackNrpnEvent> nrpns;
         ClapLiveCallbackBridgeConfig bridgeConfig;
         std::vector<ClapLiveManagedEffectConfig> effects;
         float outputGain = 1.0f;
+        bool liveMidiInput = false;
     };
 
     struct ClapLiveTrackSessionPrepareResult

@@ -55,10 +55,52 @@ namespace mw::clap
         int midiChannel = 1;
     };
 
+    struct ClapLiveControllerEvent
+    {
+        std::uint32_t frameOffset = 0;
+        int midiChannel = 1;
+        int controller = 0;
+        int value = 0;
+    };
+
+    struct ClapLivePitchBendEvent
+    {
+        std::uint32_t frameOffset = 0;
+        int midiChannel = 1;
+        int value = 0; // signed project representation: -8192..+8191
+    };
+
+    struct ClapLiveProgramChangeEvent
+    {
+        std::uint32_t frameOffset = 0;
+        int midiChannel = 1;
+        int program = 0;
+    };
+
+    struct ClapLiveChannelPressureEvent
+    {
+        std::uint32_t frameOffset = 0;
+        int midiChannel = 1;
+        int pressure = 0;
+    };
+
+    struct ClapLivePolyPressureEvent
+    {
+        std::uint32_t frameOffset = 0;
+        int midiChannel = 1;
+        int noteNumber = 60;
+        int pressure = 0;
+    };
+
     struct ClapLiveProcessRequest
     {
         int frameCount = 0;
         std::vector<ClapLiveNoteEvent> noteEvents;
+        std::vector<ClapLiveControllerEvent> controllerEvents;
+        std::vector<ClapLivePitchBendEvent> pitchBendEvents;
+        std::vector<ClapLiveProgramChangeEvent> programChangeEvents;
+        std::vector<ClapLiveChannelPressureEvent> channelPressureEvents;
+        std::vector<ClapLivePolyPressureEvent> polyPressureEvents;
     };
 
     struct ClapLiveProcessResult

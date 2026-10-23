@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(PoorMansStudio VERSION 0.66.8)
+project(PoorMansStudio VERSION 0.67.44)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,7 +23,7 @@ add_subdirectory(${JUCE_DIR} external/JUCE-build)
 juce_add_gui_app(PoorMansStudio
     PRODUCT_NAME "Poor Man's Studio"
     COMPANY_NAME "PoorMansStudio"
-    VERSION "0.66.8"
+    VERSION "0.67.44"
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/resources/app_icon_512.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/resources/app_icon_256.png"
 )
@@ -43,6 +43,9 @@ target_sources(PoorMansStudio PRIVATE
     src/app/UserPreferences.cpp
     src/app/TempCleaner.cpp
 
+    src/audio/ApplicationAudioService.cpp
+    src/audio/TailPolicy.cpp
+    src/audio/ProjectContentEnding.cpp
     src/audio/RenderJob.cpp
     src/audio/ExternalFluidSynthRenderer.cpp
     src/audio/ExternalFfmpegEncoder.cpp
@@ -77,6 +80,7 @@ target_sources(PoorMansStudio PRIVATE
     src/vst/VstSnapshotStore.cpp
 
     src/core/InstrumentNameMatcher.cpp
+    src/core/TrackSelectionPolicy.cpp
 
     src/playback/PlaybackTransportCoordinator.cpp
     src/playback/MixedLiveProjectPreviewEngine.cpp
@@ -87,10 +91,41 @@ target_sources(PoorMansStudio PRIVATE
     src/import_export/MidiImporter.cpp
 
     src/midi/MidiExporter.cpp
+    src/midi/MidiControllerLane.cpp
+    src/midi/MidiPitchBendLane.cpp
+    src/midi/MidiProgramChangeLane.cpp
+    src/midi/MidiChannelPressureLane.cpp
+    src/midi/MidiPolyPressureLane.cpp
+    src/midi/Midi14BitControllerLane.cpp
+    src/midi/MidiAdvancedParameterDecoder.cpp
+    src/midi/MidiParameterLane.cpp
+    src/midi/MidiInputCoordinator.cpp
+    src/midi/MidiRecordingSession.cpp
+    src/midi/MidiRecordingTransportSync.cpp
+    src/midi/MidiRecordingCountIn.cpp
+    src/midi/MidiRecordingCountInPlayer.cpp
+    src/midi/MidiRecordingQuantizer.cpp
+    src/midi/MidiRecordingMetronome.cpp
+    src/midi/MidiRecordingMetronomeAudio.cpp
+    src/midi/MidiRecordingControlPolicy.cpp
+    src/midi/MidiRecordingPunch.cpp
+    src/midi/MidiRecordingLoop.cpp
+    src/midi/MidiRecordingTakeReview.cpp
+    src/midi/MidiRecordingComp.cpp
+    src/midi/MidiPendingTakeReviewManager.cpp
+
+    src/simulation/SimulationRegressionSuite.cpp
 
     src/serialization/ProjectSerializer.cpp
 
     src/gui/MainComponent.cpp
+    src/gui/MidiControllerLaneComponent.cpp
+    src/gui/MidiPitchBendLaneComponent.cpp
+    src/gui/MidiProgramChangeLaneComponent.cpp
+    src/gui/MidiChannelPressureLaneComponent.cpp
+    src/gui/MidiPolyPressureLaneComponent.cpp
+    src/gui/Midi14BitControllerLaneComponent.cpp
+    src/gui/MidiParameterLaneComponent.cpp
     src/gui/AudioClipEditorComponent.cpp
     src/gui/PianoRollComponent.cpp
 )
@@ -117,10 +152,57 @@ target_link_libraries(PoorMansStudio PRIVATE
     ${CMAKE_DL_LIBS}
 )
 
+
+# Hardware/plugin-free deterministic regression runner. This target intentionally
+# uses only standard C++ plus the JUCE-independent MIDI recording core so it can
+# exercise Stages A-E contracts without physical devices or third-party plugins.
+add_executable(PoorMansStudioSim
+    src/simulation/PoorMansStudioSimMain.cpp
+    src/simulation/SimulationRegressionSuite.cpp
+    src/audio/TailPolicy.cpp
+    src/audio/ProjectContentEnding.cpp
+    src/core/TrackSelectionPolicy.cpp
+    src/core/InstrumentNameMatcher.cpp
+    src/import_export/MidiImporter.cpp
+    src/midi/MidiExporter.cpp
+    src/playback/PlaybackTransportCoordinator.cpp
+    src/midi/MidiRecordingSession.cpp
+    src/midi/MidiRecordingTransportSync.cpp
+    src/midi/MidiRecordingCountIn.cpp
+    src/midi/MidiRecordingQuantizer.cpp
+    src/midi/MidiRecordingMetronome.cpp
+    src/midi/MidiRecordingControlPolicy.cpp
+    src/midi/MidiRecordingPunch.cpp
+    src/midi/MidiRecordingLoop.cpp
+    src/midi/MidiRecordingTakeReview.cpp
+    src/midi/MidiRecordingComp.cpp
+    src/midi/MidiPendingTakeReviewManager.cpp
+    src/midi/MidiControllerLane.cpp
+    src/midi/MidiPitchBendLane.cpp
+    src/midi/MidiProgramChangeLane.cpp
+    src/midi/MidiChannelPressureLane.cpp
+    src/midi/MidiPolyPressureLane.cpp
+    src/midi/Midi14BitControllerLane.cpp
+    src/midi/MidiAdvancedParameterDecoder.cpp
+    src/midi/MidiParameterLane.cpp
+    src/clap/ClapLivePlaybackScheduler.cpp
+    src/serialization/ProjectSerializer.cpp
+)
+
+target_include_directories(PoorMansStudioSim PRIVATE
+    src
+)
+
+if (MSVC)
+    target_compile_options(PoorMansStudioSim PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(PoorMansStudioSim PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 juce_add_console_app(PoorMansStudioVstHost
     PRODUCT_NAME "PoorMansStudioVstHost"
     COMPANY_NAME "PoorMansStudio"
-    VERSION "0.66.8"
+    VERSION "0.67.44"
 )
 
 target_sources(PoorMansStudioVstHost PRIVATE
@@ -158,7 +240,7 @@ target_link_libraries(PoorMansStudioVstHost PRIVATE
 juce_add_console_app(PoorMansStudioClapHost
     PRODUCT_NAME "PoorMansStudioClapHost"
     COMPANY_NAME "PoorMansStudio"
-    VERSION "0.66.8"
+    VERSION "0.67.44"
 )
 
 target_sources(PoorMansStudioClapHost PRIVATE
@@ -194,7 +276,7 @@ if (WIN32)
     target_link_libraries(PoorMansStudioClapHost PRIVATE winmm)
 endif()
 
-message(STATUS "PoorMansStudio v0.66.8 configured successfully")
+message(STATUS "PoorMansStudio v0.67.44 configured successfully")
 
 
 # Copy the built executable to a stable runtime location.
@@ -207,6 +289,18 @@ add_custom_command(TARGET PoorMansStudio POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "$<TARGET_FILE:PoorMansStudio>"
         "${CMAKE_CURRENT_SOURCE_DIR}/workspace/program/$<TARGET_FILE_NAME:PoorMansStudio>"
+)
+
+
+# Copy the simulation/regression runner to:
+#   workspace/simulation/PoorMansStudioSim.exe
+add_custom_command(TARGET PoorMansStudioSim POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/workspace/simulation"
+
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_FILE:PoorMansStudioSim>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/workspace/simulation/$<TARGET_FILE_NAME:PoorMansStudioSim>"
 )
 
 # Copy the VST host helper to its reserved runtime/helper location:

@@ -92,13 +92,15 @@ Editor-only Aux source
 ----------------------
 An Aux source is an external audio file loaded only inside the AudioClip Editor to help build a mixed Main/Aux arrangement. It is not added as a project track and is not saved as its own project media. After an Aux trim is appended to the main arrangement, the arranged Aux block keeps its own source path and trim range for preview and Render To Track. Keep the original Aux file available until you render the arrangement.
 
-Dry and wet AudioClip audio
----------------------------
-Imported AudioClip files remain dry. Recorded AudioClip files can be dry or wet depending on the selected track's VST Effect Enable state at recording time. If an enabled, applied, non-bypassed track effect is active, that effect is printed into the recorded take. If you want a dry recording, leave the effect slot's Enable box unchecked before recording. Original imported source media is not overwritten by effect rendering.
+Dry project AudioClip sources and wet monitoring
+-------------------------------------------------
+Imported AudioClip files remain dry. Normal AudioClip recording also writes the dry input signal to the project take. Track effects, track volume, master volume, and wet-monitor gain are not printed into the project source file. This keeps the take non-destructive so effects and levels can be changed later.
+
+When Track Live Effects is enabled, the monitor path can pass the input through Effect Slot 1, then Effect Slot 2, track volume, and master volume before reaching the output device. The WAV writer still receives the dry pre-fader input. Record Test may create a disposable wet WAV for immediate audition, but that temporary file is not attached to the project.
 
 Offline processing
 ------------------
-Preview, Test Effect, selected-track render, selected-sequence render, AudioClip enhancement preview, AudioClip arrangement preview, and final export use offline render paths. Track Live Effect monitoring is separate from whether recording is printed wet; it controls whether you hear the wet track effect while recording. Final MP3 renders can embed selected album art; non-MP3 outputs leave album art unavailable.
+Preview, Test Effect, selected-track render, selected-sequence render, AudioClip enhancement preview, AudioClip arrangement preview, and final export use offline render paths. Track Live Effects controls what you hear while recording; it does not change the dry project-capture contract. Final MP3 renders can embed selected album art; non-MP3 outputs leave album art unavailable.
 
 3. Main Window Reference
 ========================
@@ -158,6 +160,8 @@ Export MIDI | Write MIDI data for external use. | Move note data into another se
 Cancel Render | Request cancellation of a running render. | Stop a long render after noticing a wrong setting.
 Preview Latest | Play the most recent rendered WAV where available. | Quickly audition the latest export.
 Render Settings | Open options for stem retention and output cleanup. | Keep stems for mixing or delete temporary stem files automatically.
+
+Rendered previews use one tail detector after the complete Effect Slot 1 -> Effect Slot 2 chain and final project mix. Preview output uses an approximately -80 dBFS threshold, 0.30 seconds of confirmed ending silence, 0.05 seconds of end padding, and one four-second maximum tail. Final render/export output uses an approximately -96 dBFS threshold, 1.0 second of confirmed ending silence, 0.15 seconds of padding, and one 12-second maximum tail. Both policies inspect the full tail window so delayed repeats after quiet gaps remain detectable.
 
 Status, track summary, and log
 ------------------------------
@@ -362,7 +366,7 @@ If the project is already saved, the new rendered arrangement media is written u
 
 10. AudioClip Recorder Workflow
 ===============================
-The AudioClip Recorder records into a project-session staging area, then lets you apply, redo, or discard the take. Save / Apply attaches a stopped take to the current project in memory; Save Project commits attached takes into the saved project folder. Recording can be dry or wet depending on the selected track's enabled VST effect state.
+The AudioClip Recorder records a dry project take into a project-session staging area, then lets you apply, redo, or discard it. Save / Apply attaches a stopped take to the current project in memory; Save Project commits attached takes into the saved project folder. Optional Track Live Effects provide wet monitoring without printing effects or fader levels into the project source file.
 
 Recorder buttons and settings
 -----------------------------
@@ -376,19 +380,20 @@ Discard Take | Delete or abandon the current stopped take. | Use when you know t
 Format | Choose WAV/FLAC/MP3/OGG media format. | WAV/FLAC are lossless; MP3/OGG use the quality setting.
 Quality | Choose bitrate for compressed formats. | Ignored for lossless formats.
 Mic Gain | Adjust input gain before recording. | Avoid clipping before recording.
-Track Live Effect | Optional monitor path. | Controls whether you hear the enabled track effect while recording; it does not decide whether the effect is printed.
+Track Live Effects | Optional two-slot monitor path. | Controls whether you hear Slot 1 then Slot 2 while recording; the project take remains dry.
 Record Test | Record a short temporary test and play it back. | The test file is deleted automatically.
 
-Recording wet/dry behavior
---------------------------
+Dry recording and wet-monitor behavior
+--------------------------------------
 State | Result | Best practice
 --- | --- | ---
-VST Effect slot enabled, applied, and not bypassed | The enabled effect is printed into the recorded take. | Use this when you want a wet AudioClip file.
-VST Effect Enable unchecked | The take records dry. | Use this when you want to preserve an unprocessed source recording.
-Track Live Effect checked | You hear the wet effect while recording when monitoring is available. | This is monitoring only.
-Track Live Effect unchecked | You do not hear the wet monitoring path. | The recording can still be wet if the track effect is enabled.
+Normal project recording | The WAV writer receives dry pre-fader input. | Keep the original take flexible for later editing and mixing.
+Track Live Effects checked with a valid chain | You hear Input -> Slot 1 -> Slot 2 -> Track Volume -> Master Volume. | Use for performance monitoring while preserving a dry take.
+A required monitor effect fails | The complete wet monitor chain stops, but dry recording continues. | Check the log and effect compatibility before another take.
+Track Live Effects unchecked | No wet monitor chain is added. | Use hardware direct monitoring or normal dry monitoring as appropriate.
+Record Test | A disposable wet test WAV may be created for audition. | It is temporary and is not attached to the project.
 
-To record dry audio, leave the VST Effect Enable box unchecked before recording. To record wet audio, assign the effect, check Enable, click Apply Track Settings, use Apply Changes inside the VST editor after parameter edits, and then record.
+The two slots are treated as one intended monitor chain. Poor Man's Studio does not silently continue with only part of the requested chain when a required stage fails.
 
 Recording commit model
 ----------------------
@@ -443,6 +448,30 @@ Load | Load a snapshot into the current editor and apply it. | Check the compact
 Save | Save the current plugin state to the selected snapshot. | Useful for reusable favorite settings.
 Clear Current | Clear the selected snapshot slot. | Asks for confirmation.
 Clear All | Clear all five snapshot slots for that plugin/role. | Asks for confirmation.
+
+Plugin Editor Default Button
+----------------------------
+Every VST3 and CLAP instrument/effect editor toolbar includes Default beside Apply Changes. Default resets the owning plugin to the state of a newly created instance without removing the track or effect assignment.
+
+After confirmation, Poor Man's Studio:
+- stops active playback before changing project plugin state;
+- clears only the owning instrument/effect state;
+- preserves plugin identity, backend, track, effect slot, chain order, Enable, and Bypass;
+- preserves all Snapshot files;
+- closes the old editor safely and reopens the same owner as a fresh plugin instance;
+- marks the project dirty so the reset can be saved normally.
+
+The confirmation warns that current unapplied editor changes and the applied project state will be discarded. Cancel makes no change. Default does not delete Snapshots or automatically save the project.
+
+Recommended test:
+1. Change a plugin parameter and click Apply Changes.
+2. Save a Snapshot.
+3. Click Default and confirm.
+4. Verify the same track/slot and plugin reopen at new-instance settings.
+5. Verify the Snapshot still loads and Enable/Bypass/slot order are unchanged.
+6. Save and reopen the project to confirm the reset state persists.
+
+For two effect slots using the same plugin, reset each slot separately and use the toolbar/title context to confirm which owner is being changed. The reset reopens the editor by its owning track and slot, not by whichever track is currently selected in the main window.
 
 Effect chain troubleshooting checklist
 --------------------------------------
@@ -538,7 +567,7 @@ MIDI + SF2/SF3 | Render MIDI through FluidSynth | Process enabled slot 1 then sl
 MIDI + SFZ | Render MIDI through sfizz | Process enabled slot 1 then slot 2 | Mix/export
 MIDI + VST3 instrument | Render MIDI through VST3 instrument | Process enabled slot 1 then slot 2 | Mix/export
 Imported AudioClip | Read staged/committed source audio | Create temporary processed WAV through slot chain | Mix/export; source stays dry
-Recorded AudioClip | Read staged/committed take, which may already be dry or wet depending on recording settings | Create temporary processed WAV through slot chain when track effects are enabled for offline render | Mix/export without rewriting the source take
+Recorded AudioClip | Read the dry staged/committed project take | Create temporary processed WAV through slot chain when track effects are enabled for offline render | Mix/export without rewriting the source take
 
 15. Clean Temp And Media Safety
 ===============================
@@ -561,6 +590,41 @@ New Project, Open Project, Start From File, and Exit discard paths should remove
 
 16. Settings, Themes, And Helper Bubbles
 ========================================
+
+Audio Settings
+--------------
+Open Project > Audio Settings or Window > Audio Settings to configure the application-owned JUCE audio device used by preview playback and AudioClip recording. Applying a new configuration safely stops active real-time playback or recording before the hardware is reopened.
+
+Setting | Purpose | Notes
+--- | --- | ---
+Driver / Type | Chooses the JUCE audio backend exposed on the computer. | Available choices depend on the Windows system and installed drivers.
+Output Device | Chooses the physical playback device. | Preview, mixed playback, Record Test, and wet monitoring share this output.
+Input Device | Chooses the physical recording device. | The selected device is used when AudioClip recording begins.
+Sample Rate | Requests the hardware sample rate. | The accepted rate is displayed after Apply / Save; unsupported requests may fall back.
+Buffer Size | Requests the hardware block size. | Lower values may reduce latency but can increase dropout risk.
+Recording Mode | Chooses Mono or Stereo adjacent pair. | Stereo uses two neighboring physical input channels.
+Input Assignment | Chooses one physical mono input or the first channel of an adjacent stereo pair. | Examples: Mono Input 2 or Stereo Input 3-4.
+Refresh Devices | Rescans available JUCE device types and device names. | Use after connecting or disconnecting hardware.
+Apply / Save | Applies the requested setup and persists the accepted configuration. | The actual accepted setup, latency, and Dropouts/XRuns are shown in the window.
+
+The accepted configuration is restored at application launch. Output normally remains available for preview. Input channels are enabled when recording or input monitoring begins and return to output-only operation after recording stops. Hardware controls such as phantom power, analog preamp gain, mic/line/instrument mode, and direct-monitor blend remain on the interface or its driver panel.
+
+Live MIDI Monitoring
+--------------------
+Open Project > MIDI Input / Live Monitor or Window > MIDI Input / Live Monitor to play the selected VST3 or CLAP instrument track from a physical MIDI keyboard or pad. This is live monitoring only; controller performances are not yet written into Piano Roll/project note data.
+
+Control | Purpose | Notes
+--- | --- | ---
+MIDI Input Device | Selects one physical MIDI input exposed by JUCE. | Use Refresh Devices after connecting or disconnecting hardware.
+MIDI Channel | Chooses Omni or one channel from 1 through 16. | Omni accepts Note On/Off events from every MIDI channel; a numbered channel filters other channels.
+Apply / Save | Opens the selected device, applies the channel filter, and persists the accepted selection. | If monitoring is already active, held notes are released before the device or channel changes.
+Start Monitor | Routes Note On/Off and velocity to the currently selected VST3 or CLAP instrument track. | The track must have a valid assigned instrument plugin.
+Panic | Releases currently active controller notes. | Use this if a controller or plugin leaves a note sounding.
+Stop Monitor | Releases active notes and stops live instrument monitoring. | The MIDI device may remain selected for a later Start Monitor.
+
+Changing the selected track while live monitoring is active releases the old target before attempting to route to the new selected VST3 or CLAP instrument track. If the new selection cannot support live MIDI monitoring, the monitor stops instead of leaving the old track active. Project replacement and other playback/render transitions also stop the live route.
+
+If the selected MIDI device disconnects, Poor Man's Studio stops live monitoring and clears the active route. Reconnect the device, click Refresh Devices, and apply the selection again. Enabled same-backend effect slots remain in their normal Slot 1 -> Slot 2 order. A live MIDI request with an enabled cross-backend effect chain is refused rather than silently bypassing part of the intended chain.
 
 CLAP Settings / Compatibility includes Plugin Graphics Adapter, Refresh Adapter List, Max Open CLAP Windows, Safe CLAP Plugin UI Mode, and compatibility/details text for detected graphics adapters. Max Open CLAP Windows counts only CLAP instrument and effect editors and accepts values from 1 through 16.
 
@@ -784,7 +848,7 @@ Target status | Shows the selected recording target and active sequence. | Make 
 Format/quality | Chooses the media format for new takes. | Use WAV/FLAC for archival takes; compressed formats save space.
 Mic gain | Adjusts input gain before recording. | Keep peaks below clipping.
 Record controls | Record, stop, save/apply, redo, or discard a take. | Save / Apply attaches to the project in memory; Save Project commits it.
-Track Live Effect | Optional monitoring path through the active track effect. | Controls what you hear while recording; wet/dry recording is controlled by the track effect Enable state.
+Track Live Effects | Optional monitoring through the complete ordered effect chain. | Controls what you hear while recording; the project take remains dry.
 Record Test | Short temporary recording test with automatic playback/cleanup. | Use before recording important takes.
 
 Render Settings window
@@ -862,12 +926,25 @@ Clip Quality | Bitrate choices for compressed formats | Ignored by lossless form
 Channels | Mono/stereo render target | AudioClip source may be converted during processing/export.
 Sample Rate | Common rates such as 44100/48000/96000 | External tools and VST processing use render/request sample rates.
 
+Audio hardware settings
+-----------------------
+Setting | Values | Notes
+--- | --- | ---
+Driver / Type | Installed JUCE device types | Determines which input and output device names are available.
+Output Device | System Default or named device | Shared by all real-time preview owners and wet monitoring.
+Input Device | System Default or named device | Activated for AudioClip recording.
+Sample Rate | Device-supported rate | The accepted value is persisted and shown after application.
+Buffer Size | Device-supported block size | The accepted value is persisted and shown after application.
+Recording Mode | Mono or Stereo adjacent pair | Stereo requires at least two adjacent input channels.
+Input Assignment | Physical channel or adjacent pair | Uses zero-based storage internally but displays user-facing channel numbers starting at 1.
+Latency / Dropouts | Read-only device diagnostics | Useful when investigating clicks, late monitoring, or unstable drivers.
+
 VST settings
 ------------
 Setting | Values | Notes
 --- | --- | ---
 Max open VST windows | 1-16 | Limits VST3 instrument and effect editors only; CLAP editor windows use their own independent setting.
-Experimental acknowledgement | OK-only prompt | Shown from VST enable/open actions to remind users of plugin risk.
+Experimental acknowledgement | OK-only prompt | Shown once from VST3 or CLAP enable/open actions; acknowledging either format suppresses the shared warning for both.
 Graphics adapter preference | Compact numeric preference | Stored separately from the adapter cache list.
 Plugin classification | Instrument, Effect, Warning, Unsupported | Controls where plugins appear in assignment dropdowns.
 

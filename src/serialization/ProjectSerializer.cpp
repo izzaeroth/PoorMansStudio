@@ -7,6 +7,7 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 namespace
@@ -156,6 +157,59 @@ namespace
         return text.substr(pos, end - pos + 1);
     }
 
+    std::string extractArrayStrict(const std::string& text, const std::string& key)
+    {
+        const auto pattern = "\"" + key + "\":";
+        auto pos = text.find(pattern);
+        if (pos == std::string::npos)
+            return {};
+        pos += pattern.size();
+        while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
+            ++pos;
+        if (pos >= text.size() || text[pos] != '[')
+            return {};
+        const auto end = findMatching(text, pos, '[', ']');
+        if (end == std::string::npos)
+            return {};
+        return text.substr(pos, end - pos + 1);
+    }
+
+    std::string getStringStrict(const std::string& text, const std::string& key, const std::string& fallback = {})
+    {
+        const auto pattern = "\"" + key + "\":";
+        auto pos = text.find(pattern);
+        if (pos == std::string::npos)
+            return fallback;
+        pos += pattern.size();
+        while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
+            ++pos;
+        if (pos >= text.size() || text[pos] != '"')
+            return fallback;
+
+        std::string value;
+        bool escaping = false;
+        for (std::size_t i = pos + 1; i < text.size(); ++i)
+        {
+            const char c = text[i];
+            if (escaping)
+            {
+                value += '\\';
+                value += c;
+                escaping = false;
+                continue;
+            }
+            if (c == '\\')
+            {
+                escaping = true;
+                continue;
+            }
+            if (c == '"')
+                return unescapeJsonString(value);
+            value += c;
+        }
+        return fallback;
+    }
+
     std::vector<std::string> splitTopLevelObjects(const std::string& arrayText)
     {
         std::vector<std::string> objects;
@@ -171,6 +225,66 @@ namespace
         }
 
         return objects;
+    }
+
+    std::vector<std::string> parseStringArray(const std::string& arrayText)
+    {
+        std::vector<std::string> values;
+        std::unordered_set<std::string> seen;
+        bool inString = false;
+        bool escaping = false;
+        std::string current;
+        for (char c : arrayText)
+        {
+            if (!inString)
+            {
+                if (c == '"')
+                {
+                    inString = true;
+                    escaping = false;
+                    current.clear();
+                }
+                continue;
+            }
+
+            if (escaping)
+            {
+                current += '\\';
+                current += c;
+                escaping = false;
+                continue;
+            }
+            if (c == '\\')
+            {
+                escaping = true;
+                continue;
+            }
+            if (c == '"')
+            {
+                auto value = unescapeJsonString(current);
+                auto first = value.begin();
+                while (first != value.end() && std::isspace(static_cast<unsigned char>(*first)))
+                    ++first;
+                auto last = value.end();
+                while (last != first && std::isspace(static_cast<unsigned char>(*(last - 1))))
+                    --last;
+                value = std::string(first, last);
+                if (!value.empty())
+                {
+                    auto key = value;
+                    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char ch)
+                    {
+                        return static_cast<char>(std::tolower(ch));
+                    });
+                    if (seen.insert(key).second)
+                        values.push_back(std::move(value));
+                }
+                inString = false;
+                continue;
+            }
+            current += c;
+        }
+        return values;
     }
 
     std::string getString(const std::string& text, const std::string& key, const std::string& fallback = {})
@@ -380,6 +494,688 @@ namespace
     void writeStringField(std::ofstream& file, const std::string& key, const std::string& value, bool comma = true)
     {
         file << "    \"" << key << "\": \"" << escapeJsonString(value) << "\"" << (comma ? "," : "") << "\n";
+    }
+
+    const char* persistentReviewModeToString(mw::core::PersistentMidiTakeReviewMode mode) noexcept
+    {
+        return mode == mw::core::PersistentMidiTakeReviewMode::Comp ? "Comp" : "WholePass";
+    }
+
+    mw::core::PersistentMidiTakeReviewMode persistentReviewModeFromString(const std::string& value) noexcept
+    {
+        return value == "Comp"
+            ? mw::core::PersistentMidiTakeReviewMode::Comp
+            : mw::core::PersistentMidiTakeReviewMode::WholePass;
+    }
+
+    const char* persistentCompGridToString(mw::core::PersistentMidiCompGrid grid) noexcept
+    {
+        switch (grid)
+        {
+            case mw::core::PersistentMidiCompGrid::Bar: return "Bar";
+            case mw::core::PersistentMidiCompGrid::Custom: return "Custom";
+            case mw::core::PersistentMidiCompGrid::Beat:
+            default: return "Beat";
+        }
+    }
+
+    mw::core::PersistentMidiCompGrid persistentCompGridFromString(const std::string& value) noexcept
+    {
+        if (value == "Bar") return mw::core::PersistentMidiCompGrid::Bar;
+        if (value == "Custom") return mw::core::PersistentMidiCompGrid::Custom;
+        return mw::core::PersistentMidiCompGrid::Beat;
+    }
+
+    const char* persistentCompBoundaryNoteModeToString(
+        mw::core::PersistentMidiCompBoundaryNoteMode mode) noexcept
+    {
+        return mode == mw::core::PersistentMidiCompBoundaryNoteMode::PreserveSamePass
+            ? "PreserveSamePass"
+            : "Cut";
+    }
+
+    mw::core::PersistentMidiCompBoundaryNoteMode persistentCompBoundaryNoteModeFromString(
+        const std::string& value) noexcept
+    {
+        return value == "PreserveSamePass"
+            ? mw::core::PersistentMidiCompBoundaryNoteMode::PreserveSamePass
+            : mw::core::PersistentMidiCompBoundaryNoteMode::Cut;
+    }
+
+    const char* persistentSustainPedalModeToString(
+        mw::core::PersistentMidiSustainPedalMode mode) noexcept
+    {
+        return mode == mw::core::PersistentMidiSustainPedalMode::ApplyCc64
+            ? "ApplyCc64"
+            : "Ignore";
+    }
+
+    mw::core::PersistentMidiSustainPedalMode persistentSustainPedalModeFromString(
+        const std::string& value) noexcept
+    {
+        return value == "ApplyCc64"
+            ? mw::core::PersistentMidiSustainPedalMode::ApplyCc64
+            : mw::core::PersistentMidiSustainPedalMode::Ignore;
+    }
+
+    const char* persistentCompCrossPassNoteModeToString(
+        mw::core::PersistentMidiCompCrossPassNoteMode mode) noexcept
+    {
+        return mode == mw::core::PersistentMidiCompCrossPassNoteMode::BridgeExact
+            ? "BridgeExact"
+            : "Off";
+    }
+
+    mw::core::PersistentMidiCompCrossPassNoteMode persistentCompCrossPassNoteModeFromString(
+        const std::string& value) noexcept
+    {
+        return value == "BridgeExact"
+            ? mw::core::PersistentMidiCompCrossPassNoteMode::BridgeExact
+            : mw::core::PersistentMidiCompCrossPassNoteMode::Off;
+    }
+
+    void writeNoteObject(std::ofstream& file, const mw::core::NoteEvent& note)
+    {
+        file << "{ \"pitch\": " << note.pitch
+             << ", \"velocity\": " << note.velocity
+             << ", \"startTick\": " << note.startTick
+             << ", \"durationTicks\": " << note.durationTicks
+             << ", \"midiChannel\": " << note.midiChannel
+             << ", \"articulation\": \"" << mw::core::articulationToString(note.articulation) << "\" }";
+    }
+
+    void writePersistentMidiTakeReviewObject(std::ofstream& file,
+                                                const mw::core::PersistentMidiTakeReview& pendingReview,
+                                                const std::string& indent)
+    {
+        file << indent << "{\n";
+        file << indent << "  \"active\": true,\n";
+        file << indent << "  \"reviewSessionId\": " << pendingReview.reviewSessionId << ",\n";
+        file << indent << "  \"reviewName\": \"" << escapeJsonString(pendingReview.reviewName) << "\",\n";
+        file << indent << "  \"tags\": [";
+        for (std::size_t tagIndex = 0; tagIndex < pendingReview.reviewTags.size(); ++tagIndex)
+        {
+            if (tagIndex > 0) file << ", ";
+            file << "\"" << escapeJsonString(pendingReview.reviewTags[tagIndex]) << "\"";
+        }
+        file << "],\n";
+        file << indent << "  \"reviewNotes\": \"" << escapeJsonString(pendingReview.reviewNotes) << "\",\n";
+        file << indent << "  \"regionInTick\": " << pendingReview.regionInTick << ",\n";
+        file << indent << "  \"regionOutTick\": " << pendingReview.regionOutTick << ",\n";
+        file << indent << "  \"selectedPassNumber\": " << pendingReview.selectedPassNumber << ",\n";
+        file << indent << "  \"reviewMode\": \"" << persistentReviewModeToString(pendingReview.reviewMode) << "\",\n";
+        file << indent << "  \"compGrid\": \"" << persistentCompGridToString(pendingReview.compGrid) << "\",\n";
+        file << indent << "  \"boundaryNoteMode\": \""
+             << persistentCompBoundaryNoteModeToString(pendingReview.boundaryNoteMode) << "\",\n";
+        file << indent << "  \"sustainPedalMode\": \""
+             << persistentSustainPedalModeToString(pendingReview.sustainPedalMode) << "\",\n";
+        file << indent << "  \"crossPassNoteMode\": \""
+             << persistentCompCrossPassNoteModeToString(pendingReview.crossPassNoteMode) << "\",\n";
+        file << indent << "  \"passes\": [\n";
+        for (std::size_t passIndex = 0; passIndex < pendingReview.passes.size(); ++passIndex)
+        {
+            const auto& pass = pendingReview.passes[passIndex];
+            file << indent << "    {\n";
+            file << indent << "      \"passNumber\": " << pass.passNumber << ",\n";
+            file << indent << "      \"sustainDownMaskAtStart\": " << pass.sustainDownMaskAtStart << ",\n";
+            file << indent << "      \"cc64Events\": [\n";
+            for (std::size_t ccIndex = 0; ccIndex < pass.cc64Events.size(); ++ccIndex)
+            {
+                const auto& event = pass.cc64Events[ccIndex];
+                file << indent << "        { \"tick\": " << event.tick
+                     << ", \"midiChannel\": " << event.midiChannel
+                     << ", \"value\": " << event.value
+                     << ", \"order\": " << event.order << " }"
+                     << (ccIndex + 1 < pass.cc64Events.size() ? "," : "") << "\n";
+            }
+            file << indent << "      ],\n";
+            file << indent << "      \"controllerEvents\": [\n";
+            for (std::size_t controllerIndex = 0; controllerIndex < pass.controllerEvents.size(); ++controllerIndex)
+            {
+                const auto& event = pass.controllerEvents[controllerIndex];
+                file << indent << "        { \"tick\": " << event.tick
+                     << ", \"midiChannel\": " << event.midiChannel
+                     << ", \"controller\": " << event.controller
+                     << ", \"value\": " << event.value
+                     << ", \"order\": " << event.order << " }"
+                     << (controllerIndex + 1 < pass.controllerEvents.size() ? "," : "") << "\n";
+            }
+            file << indent << "      ],\n";
+            file << indent << "      \"pitchBendEvents\": [\n";
+            for (std::size_t bendIndex = 0; bendIndex < pass.pitchBendEvents.size(); ++bendIndex)
+            {
+                const auto& event = pass.pitchBendEvents[bendIndex];
+                file << indent << "        { \"tick\": " << event.tick
+                     << ", \"midiChannel\": " << event.midiChannel
+                     << ", \"value\": " << event.value
+                     << ", \"order\": " << event.order << " }"
+                     << (bendIndex + 1 < pass.pitchBendEvents.size() ? "," : "") << "\n";
+            }
+            file << indent << "      ],\n";
+            file << indent << "      \"programChangeEvents\": [\n";
+            for (std::size_t programIndex = 0; programIndex < pass.programChangeEvents.size(); ++programIndex)
+            {
+                const auto& event = pass.programChangeEvents[programIndex];
+                file << indent << "        { \"tick\": " << event.tick
+                     << ", \"midiChannel\": " << event.midiChannel
+                     << ", \"program\": " << event.program
+                     << ", \"order\": " << event.order << " }"
+                     << (programIndex + 1 < pass.programChangeEvents.size() ? "," : "") << "\n";
+            }
+            file << indent << "      ],\n";
+            file << indent << "      \"channelPressureEvents\": [\n";
+            for (std::size_t pressureIndex = 0; pressureIndex < pass.channelPressureEvents.size(); ++pressureIndex)
+            {
+                const auto& event = pass.channelPressureEvents[pressureIndex];
+                file << indent << "        { \"tick\": " << event.tick
+                     << ", \"midiChannel\": " << event.midiChannel
+                     << ", \"pressure\": " << event.pressure
+                     << ", \"order\": " << event.order << " }"
+                     << (pressureIndex + 1 < pass.channelPressureEvents.size() ? "," : "") << "\n";
+            }
+            file << indent << "      ],\n";
+            file << indent << "      \"polyPressureEvents\": [\n";
+            for (std::size_t polyIndex = 0; polyIndex < pass.polyPressureEvents.size(); ++polyIndex)
+            {
+                const auto& event = pass.polyPressureEvents[polyIndex];
+                file << indent << "        { \"tick\": " << event.tick
+                     << ", \"midiChannel\": " << event.midiChannel
+                     << ", \"noteNumber\": " << event.noteNumber
+                     << ", \"pressure\": " << event.pressure
+                     << ", \"order\": " << event.order << " }"
+                     << (polyIndex + 1 < pass.polyPressureEvents.size() ? "," : "") << "\n";
+            }
+            file << indent << "      ],\n";
+            file << indent << "      \"controller14BitEvents\": [\n";
+            for (std::size_t eventIndex = 0; eventIndex < pass.controller14BitEvents.size(); ++eventIndex)
+            {
+                const auto& event = pass.controller14BitEvents[eventIndex];
+                file << indent << "        { \"tick\": " << event.tick
+                     << ", \"midiChannel\": " << event.midiChannel
+                     << ", \"controllerMsb\": " << event.controllerMsb
+                     << ", \"value\": " << event.value
+                     << ", \"order\": " << event.order << " }"
+                     << (eventIndex + 1 < pass.controller14BitEvents.size() ? "," : "") << "\n";
+            }
+            file << indent << "      ],\n";
+            file << indent << "      \"rpnEvents\": [\n";
+            for (std::size_t eventIndex = 0; eventIndex < pass.rpnEvents.size(); ++eventIndex)
+            {
+                const auto& event = pass.rpnEvents[eventIndex];
+                file << indent << "        { \"tick\": " << event.tick
+                     << ", \"midiChannel\": " << event.midiChannel
+                     << ", \"parameter\": " << event.parameter
+                     << ", \"value\": " << event.value
+                     << ", \"order\": " << event.order << " }"
+                     << (eventIndex + 1 < pass.rpnEvents.size() ? "," : "") << "\n";
+            }
+            file << indent << "      ],\n";
+            file << indent << "      \"nrpnEvents\": [\n";
+            for (std::size_t eventIndex = 0; eventIndex < pass.nrpnEvents.size(); ++eventIndex)
+            {
+                const auto& event = pass.nrpnEvents[eventIndex];
+                file << indent << "        { \"tick\": " << event.tick
+                     << ", \"midiChannel\": " << event.midiChannel
+                     << ", \"parameter\": " << event.parameter
+                     << ", \"value\": " << event.value
+                     << ", \"order\": " << event.order << " }"
+                     << (eventIndex + 1 < pass.nrpnEvents.size() ? "," : "") << "\n";
+            }
+            file << indent << "      ],\n";
+            file << indent << "      \"takeNotes\": [\n";
+            for (std::size_t noteIndex = 0; noteIndex < pass.notes.size(); ++noteIndex)
+            {
+                file << indent << "        ";
+                writeNoteObject(file, pass.notes[noteIndex]);
+                file << (noteIndex + 1 < pass.notes.size() ? "," : "") << "\n";
+            }
+            file << indent << "      ]\n";
+            file << indent << "    }" << (passIndex + 1 < pendingReview.passes.size() ? "," : "") << "\n";
+        }
+        file << indent << "  ],\n";
+        file << indent << "  \"segments\": [\n";
+        for (std::size_t segmentIndex = 0; segmentIndex < pendingReview.segments.size(); ++segmentIndex)
+        {
+            const auto& segment = pendingReview.segments[segmentIndex];
+            file << indent << "    { \"startTick\": " << segment.startTick
+                 << ", \"endTick\": " << segment.endTick
+                 << ", \"selectedPassNumber\": " << segment.selectedPassNumber << " }"
+                 << (segmentIndex + 1 < pendingReview.segments.size() ? "," : "") << "\n";
+        }
+        file << indent << "  ]\n";
+        file << indent << "}";
+    }
+
+    bool containsPersistentPass(const std::vector<mw::core::PersistentMidiTakePass>& passes, int passNumber) noexcept
+    {
+        return std::any_of(passes.begin(), passes.end(), [passNumber](const auto& pass)
+        {
+            return pass.passNumber == passNumber;
+        });
+    }
+
+    std::optional<mw::core::PersistentMidiTakeReview> parsePersistentMidiTakeReviewObject(
+        const std::string& objectText, int fallbackMidiChannel, int sourceFormatVersion)
+    {
+        if (objectText.empty() || !getBool(objectText, "active", false))
+            return std::nullopt;
+
+        mw::core::PersistentMidiTakeReview review;
+        review.active = true;
+        review.reviewSessionId = static_cast<mw::core::StableId>(std::max<long long>(0, getLongLong(objectText, "reviewSessionId", 0)));
+        review.reviewName = getString(objectText, "reviewName");
+        review.reviewTags = parseStringArray(extractArrayStrict(objectText, "tags"));
+        review.reviewNotes = getStringStrict(objectText, "reviewNotes");
+        review.regionInTick = getLongLong(objectText, "regionInTick", -1);
+        review.regionOutTick = getLongLong(objectText, "regionOutTick", -1);
+        review.selectedPassNumber = getInt(objectText, "selectedPassNumber", 0);
+        review.reviewMode = persistentReviewModeFromString(getString(objectText, "reviewMode", "WholePass"));
+        review.compGrid = persistentCompGridFromString(getString(objectText, "compGrid", "Beat"));
+        review.boundaryNoteMode = persistentCompBoundaryNoteModeFromString(
+            getString(objectText, "boundaryNoteMode", "Cut"));
+        review.sustainPedalMode = persistentSustainPedalModeFromString(
+            getString(objectText, "sustainPedalMode", "Ignore"));
+        review.crossPassNoteMode = persistentCompCrossPassNoteModeFromString(
+            getString(objectText, "crossPassNoteMode", "Off"));
+
+        if (review.regionInTick < 0 || review.regionOutTick <= review.regionInTick)
+            return std::nullopt;
+
+        const auto passesArray = extractArray(objectText, "passes");
+        const auto passObjects = splitTopLevelObjects(passesArray);
+        int previousPassNumber = 0;
+        std::size_t totalNotes = 0;
+        std::size_t totalControllers = 0;
+        for (const auto& passObject : passObjects)
+        {
+            mw::core::PersistentMidiTakePass pass;
+            pass.passNumber = getInt(passObject, "passNumber", 0);
+            if (pass.passNumber <= previousPassNumber)
+                return std::nullopt;
+            previousPassNumber = pass.passNumber;
+            const auto sustainMaskRaw = getLongLong(passObject, "sustainDownMaskAtStart", 0);
+            pass.sustainDownMaskAtStart = static_cast<std::uint16_t>(
+                std::clamp<long long>(sustainMaskRaw, 0, 65535));
+
+            const auto cc64Array = extractArray(passObject, "cc64Events");
+            std::uint64_t fallbackOrder = 1;
+            for (const auto& ccObject : splitTopLevelObjects(cc64Array))
+            {
+                mw::core::PersistentMidiCc64Event event;
+                event.tick = getLongLong(ccObject, "tick", -1);
+                event.midiChannel = getInt(ccObject, "midiChannel", fallbackMidiChannel);
+                event.value = getInt(ccObject, "value", -1);
+                const auto parsedOrder = getLongLong(ccObject, "order", static_cast<long long>(fallbackOrder));
+                event.order = parsedOrder > 0 ? static_cast<std::uint64_t>(parsedOrder) : fallbackOrder;
+                ++fallbackOrder;
+
+                // Malformed controller metadata must not invalidate otherwise usable notes.
+                // Ignore only the bad CC64 event and preserve the retained pass itself.
+                if (event.tick < review.regionInTick || event.tick > review.regionOutTick
+                    || event.midiChannel < 1 || event.midiChannel > 16
+                    || event.value < 0 || event.value > 127)
+                {
+                    continue;
+                }
+                pass.cc64Events.push_back(event);
+            }
+            std::stable_sort(pass.cc64Events.begin(), pass.cc64Events.end(), [](const auto& lhs, const auto& rhs)
+            {
+                if (lhs.tick != rhs.tick)
+                    return lhs.tick < rhs.tick;
+                return lhs.order < rhs.order;
+            });
+
+            if (sourceFormatVersion >= 17)
+            {
+                const auto controllerArray = extractArray(passObject, "controllerEvents");
+                std::uint64_t controllerFallbackOrder = 1;
+                for (const auto& controllerObject : splitTopLevelObjects(controllerArray))
+                {
+                    mw::core::PersistentMidiControllerEvent event;
+                    event.tick = getLongLong(controllerObject, "tick", -1);
+                    event.midiChannel = getInt(controllerObject, "midiChannel", fallbackMidiChannel);
+                    event.controller = getInt(controllerObject, "controller", -1);
+                    event.value = getInt(controllerObject, "value", -1);
+                    const auto parsedOrder = getLongLong(
+                        controllerObject, "order", static_cast<long long>(controllerFallbackOrder));
+                    event.order = parsedOrder > 0
+                        ? static_cast<std::uint64_t>(parsedOrder)
+                        : controllerFallbackOrder;
+                    ++controllerFallbackOrder;
+                    if (event.tick < review.regionInTick || event.tick >= review.regionOutTick
+                        || event.midiChannel < 1 || event.midiChannel > 16
+                        || event.controller < 0 || event.controller > 127
+                        || event.value < 0 || event.value > 127)
+                    {
+                        continue;
+                    }
+                    pass.controllerEvents.push_back(event);
+                }
+
+                std::stable_sort(pass.controllerEvents.begin(), pass.controllerEvents.end(), [](const auto& lhs, const auto& rhs)
+                {
+                    if (lhs.tick != rhs.tick)
+                        return lhs.tick < rhs.tick;
+                    if (lhs.midiChannel != rhs.midiChannel)
+                        return lhs.midiChannel < rhs.midiChannel;
+                    if (lhs.controller != rhs.controller)
+                        return lhs.controller < rhs.controller;
+                    return lhs.order < rhs.order;
+                });
+
+                std::vector<mw::core::PersistentMidiControllerEvent> collapsedControllers;
+                for (const auto& event : pass.controllerEvents)
+                {
+                    if (!collapsedControllers.empty())
+                    {
+                        auto& previous = collapsedControllers.back();
+                        if (previous.tick == event.tick
+                            && previous.midiChannel == event.midiChannel
+                            && previous.controller == event.controller)
+                        {
+                            previous = event;
+                            continue;
+                        }
+                    }
+                    collapsedControllers.push_back(event);
+                }
+                pass.controllerEvents = std::move(collapsedControllers);
+            }
+
+            if (sourceFormatVersion >= 18)
+            {
+                const auto bendArray = extractArray(passObject, "pitchBendEvents");
+                std::uint64_t bendFallbackOrder = 1;
+                for (const auto& bendObject : splitTopLevelObjects(bendArray))
+                {
+                    mw::core::PersistentMidiPitchBendEvent event;
+                    event.tick = getLongLong(bendObject, "tick", -1);
+                    event.midiChannel = getInt(bendObject, "midiChannel", fallbackMidiChannel);
+                    event.value = getInt(bendObject, "value", 99999);
+                    const auto parsedOrder = getLongLong(bendObject, "order", static_cast<long long>(bendFallbackOrder));
+                    event.order = parsedOrder > 0 ? static_cast<std::uint64_t>(parsedOrder) : bendFallbackOrder;
+                    ++bendFallbackOrder;
+                    if (event.tick < review.regionInTick || event.tick >= review.regionOutTick
+                        || event.midiChannel < 1 || event.midiChannel > 16
+                        || event.value < mw::core::midiPitchBendMinimum || event.value > mw::core::midiPitchBendMaximum)
+                        continue;
+                    pass.pitchBendEvents.push_back(event);
+                }
+                std::stable_sort(pass.pitchBendEvents.begin(), pass.pitchBendEvents.end(), [](const auto& a, const auto& b)
+                {
+                    if (a.tick != b.tick) return a.tick < b.tick;
+                    if (a.midiChannel != b.midiChannel) return a.midiChannel < b.midiChannel;
+                    return a.order < b.order;
+                });
+                std::vector<mw::core::PersistentMidiPitchBendEvent> collapsedBends;
+                for (const auto& event : pass.pitchBendEvents)
+                {
+                    if (!collapsedBends.empty() && collapsedBends.back().tick == event.tick
+                        && collapsedBends.back().midiChannel == event.midiChannel)
+                    {
+                        collapsedBends.back() = event;
+                        continue;
+                    }
+                    collapsedBends.push_back(event);
+                }
+                pass.pitchBendEvents = std::move(collapsedBends);
+            }
+
+            if (sourceFormatVersion >= 19)
+            {
+                const auto programArray = extractArray(passObject, "programChangeEvents");
+                std::uint64_t programFallbackOrder = 1;
+                for (const auto& programObject : splitTopLevelObjects(programArray))
+                {
+                    mw::core::PersistentMidiProgramChangeEvent event;
+                    event.tick = getLongLong(programObject, "tick", -1);
+                    event.midiChannel = getInt(programObject, "midiChannel", fallbackMidiChannel);
+                    event.program = getInt(programObject, "program", -1);
+                    const auto parsedOrder = getLongLong(programObject, "order", static_cast<long long>(programFallbackOrder));
+                    event.order = parsedOrder > 0 ? static_cast<std::uint64_t>(parsedOrder) : programFallbackOrder;
+                    ++programFallbackOrder;
+                    if (event.tick < review.regionInTick || event.tick >= review.regionOutTick
+                        || event.midiChannel < 1 || event.midiChannel > 16
+                        || event.program < 0 || event.program > 127)
+                        continue;
+                    pass.programChangeEvents.push_back(event);
+                }
+                std::stable_sort(pass.programChangeEvents.begin(), pass.programChangeEvents.end(), [](const auto& a, const auto& b)
+                {
+                    if (a.tick != b.tick) return a.tick < b.tick;
+                    if (a.midiChannel != b.midiChannel) return a.midiChannel < b.midiChannel;
+                    return a.order < b.order;
+                });
+                std::vector<mw::core::PersistentMidiProgramChangeEvent> collapsedPrograms;
+                for (const auto& event : pass.programChangeEvents)
+                {
+                    if (!collapsedPrograms.empty() && collapsedPrograms.back().tick == event.tick
+                        && collapsedPrograms.back().midiChannel == event.midiChannel)
+                        collapsedPrograms.back() = event;
+                    else
+                        collapsedPrograms.push_back(event);
+                }
+                pass.programChangeEvents = std::move(collapsedPrograms);
+            }
+
+            if (sourceFormatVersion >= 20)
+            {
+                const auto pressureArray = extractArray(passObject, "channelPressureEvents");
+                std::uint64_t pressureFallbackOrder = 1;
+                for (const auto& pressureObject : splitTopLevelObjects(pressureArray))
+                {
+                    mw::core::PersistentMidiChannelPressureEvent event;
+                    event.tick = getLongLong(pressureObject, "tick", -1);
+                    event.midiChannel = getInt(pressureObject, "midiChannel", fallbackMidiChannel);
+                    event.pressure = getInt(pressureObject, "pressure", -1);
+                    const auto parsedOrder = getLongLong(pressureObject, "order", static_cast<long long>(pressureFallbackOrder));
+                    event.order = parsedOrder > 0 ? static_cast<std::uint64_t>(parsedOrder) : pressureFallbackOrder;
+                    ++pressureFallbackOrder;
+                    if (event.tick < review.regionInTick || event.tick >= review.regionOutTick
+                        || event.midiChannel < 1 || event.midiChannel > 16
+                        || event.pressure < mw::core::midiChannelPressureMinimum || event.pressure > mw::core::midiChannelPressureMaximum)
+                        continue;
+                    pass.channelPressureEvents.push_back(event);
+                }
+                std::stable_sort(pass.channelPressureEvents.begin(), pass.channelPressureEvents.end(), [](const auto& a, const auto& b)
+                {
+                    if (a.tick != b.tick) return a.tick < b.tick;
+                    if (a.midiChannel != b.midiChannel) return a.midiChannel < b.midiChannel;
+                    return a.order < b.order;
+                });
+                std::vector<mw::core::PersistentMidiChannelPressureEvent> collapsedPressure;
+                for (const auto& event : pass.channelPressureEvents)
+                {
+                    if (!collapsedPressure.empty() && collapsedPressure.back().tick == event.tick
+                        && collapsedPressure.back().midiChannel == event.midiChannel)
+                        collapsedPressure.back() = event;
+                    else
+                        collapsedPressure.push_back(event);
+                }
+                pass.channelPressureEvents = std::move(collapsedPressure);
+            }
+
+            if (sourceFormatVersion >= 21)
+            {
+                const auto polyArray = extractArray(passObject, "polyPressureEvents");
+                std::uint64_t polyFallbackOrder = 1;
+                for (const auto& polyObject : splitTopLevelObjects(polyArray))
+                {
+                    mw::core::PersistentMidiPolyPressureEvent event;
+                    event.tick = getLongLong(polyObject, "tick", -1);
+                    event.midiChannel = getInt(polyObject, "midiChannel", fallbackMidiChannel);
+                    event.noteNumber = getInt(polyObject, "noteNumber", -1);
+                    event.pressure = getInt(polyObject, "pressure", -1);
+                    const auto parsedOrder = getLongLong(polyObject, "order", static_cast<long long>(polyFallbackOrder));
+                    event.order = parsedOrder > 0 ? static_cast<std::uint64_t>(parsedOrder) : polyFallbackOrder;
+                    ++polyFallbackOrder;
+                    if (event.tick < review.regionInTick || event.tick >= review.regionOutTick
+                        || event.midiChannel < 1 || event.midiChannel > 16
+                        || event.noteNumber < 0 || event.noteNumber > 127
+                        || event.pressure < mw::core::midiPolyPressureMinimum || event.pressure > mw::core::midiPolyPressureMaximum)
+                        continue;
+                    pass.polyPressureEvents.push_back(event);
+                }
+                std::stable_sort(pass.polyPressureEvents.begin(), pass.polyPressureEvents.end(), [](const auto& a, const auto& b)
+                {
+                    if (a.tick != b.tick) return a.tick < b.tick;
+                    if (a.midiChannel != b.midiChannel) return a.midiChannel < b.midiChannel;
+                    if (a.noteNumber != b.noteNumber) return a.noteNumber < b.noteNumber;
+                    return a.order < b.order;
+                });
+                std::vector<mw::core::PersistentMidiPolyPressureEvent> collapsedPoly;
+                for (const auto& event : pass.polyPressureEvents)
+                {
+                    if (!collapsedPoly.empty() && collapsedPoly.back().tick == event.tick
+                        && collapsedPoly.back().midiChannel == event.midiChannel
+                        && collapsedPoly.back().noteNumber == event.noteNumber)
+                        collapsedPoly.back() = event;
+                    else
+                        collapsedPoly.push_back(event);
+                }
+                pass.polyPressureEvents = std::move(collapsedPoly);
+            }
+
+            if (sourceFormatVersion >= 22)
+            {
+                const auto array14 = extractArray(passObject, "controller14BitEvents");
+                std::uint64_t fallback14 = 1;
+                for (const auto& object : splitTopLevelObjects(array14))
+                {
+                    mw::core::PersistentMidi14BitControllerEvent event;
+                    event.tick = getLongLong(object, "tick", -1);
+                    event.midiChannel = getInt(object, "midiChannel", fallbackMidiChannel);
+                    event.controllerMsb = getInt(object, "controllerMsb", -1);
+                    event.value = getInt(object, "value", -1);
+                    const auto parsed = getLongLong(object, "order", static_cast<long long>(fallback14));
+                    event.order = parsed > 0 ? static_cast<std::uint64_t>(parsed) : fallback14; ++fallback14;
+                    if (event.tick < review.regionInTick || event.tick >= review.regionOutTick
+                        || event.midiChannel < 1 || event.midiChannel > 16
+                        || event.controllerMsb < mw::core::midi14BitControllerMinimum || event.controllerMsb > mw::core::midi14BitControllerMaximum
+                        || event.value < mw::core::midi14BitMinimum || event.value > mw::core::midi14BitMaximum) continue;
+                    pass.controller14BitEvents.push_back(event);
+                }
+                std::stable_sort(pass.controller14BitEvents.begin(), pass.controller14BitEvents.end(), [](const auto& a, const auto& b)
+                { if (a.tick != b.tick) return a.tick < b.tick; if (a.midiChannel != b.midiChannel) return a.midiChannel < b.midiChannel; if (a.controllerMsb != b.controllerMsb) return a.controllerMsb < b.controllerMsb; return a.order < b.order; });
+                std::vector<mw::core::PersistentMidi14BitControllerEvent> collapsed14;
+                for (const auto& event : pass.controller14BitEvents)
+                {
+                    if (!collapsed14.empty() && collapsed14.back().tick == event.tick && collapsed14.back().midiChannel == event.midiChannel && collapsed14.back().controllerMsb == event.controllerMsb) collapsed14.back() = event;
+                    else collapsed14.push_back(event);
+                }
+                pass.controller14BitEvents = std::move(collapsed14);
+
+                const auto rpnArray = extractArray(passObject, "rpnEvents");
+                std::uint64_t fallbackRpn = 1;
+                for (const auto& object : splitTopLevelObjects(rpnArray))
+                {
+                    mw::core::PersistentMidiRpnEvent event;
+                    event.tick = getLongLong(object, "tick", -1); event.midiChannel = getInt(object, "midiChannel", fallbackMidiChannel);
+                    event.parameter = getInt(object, "parameter", -1); event.value = getInt(object, "value", -1);
+                    const auto parsed = getLongLong(object, "order", static_cast<long long>(fallbackRpn)); event.order = parsed > 0 ? static_cast<std::uint64_t>(parsed) : fallbackRpn; ++fallbackRpn;
+                    if (event.tick < review.regionInTick || event.tick >= review.regionOutTick || event.midiChannel < 1 || event.midiChannel > 16
+                        || event.parameter < mw::core::midiParameterMinimum || event.parameter >= mw::core::midiRpnNullParameter
+                        || event.value < mw::core::midiParameterMinimum || event.value > mw::core::midiParameterMaximum) continue;
+                    pass.rpnEvents.push_back(event);
+                }
+                std::stable_sort(pass.rpnEvents.begin(), pass.rpnEvents.end(), [](const auto& a, const auto& b)
+                { if (a.tick != b.tick) return a.tick < b.tick; if (a.midiChannel != b.midiChannel) return a.midiChannel < b.midiChannel; if (a.parameter != b.parameter) return a.parameter < b.parameter; return a.order < b.order; });
+                std::vector<mw::core::PersistentMidiRpnEvent> collapsedRpn;
+                for (const auto& event : pass.rpnEvents) { if (!collapsedRpn.empty() && collapsedRpn.back().tick == event.tick && collapsedRpn.back().midiChannel == event.midiChannel && collapsedRpn.back().parameter == event.parameter) collapsedRpn.back() = event; else collapsedRpn.push_back(event); }
+                pass.rpnEvents = std::move(collapsedRpn);
+
+                const auto nrpnArray = extractArray(passObject, "nrpnEvents");
+                std::uint64_t fallbackNrpn = 1;
+                for (const auto& object : splitTopLevelObjects(nrpnArray))
+                {
+                    mw::core::PersistentMidiNrpnEvent event;
+                    event.tick = getLongLong(object, "tick", -1); event.midiChannel = getInt(object, "midiChannel", fallbackMidiChannel);
+                    event.parameter = getInt(object, "parameter", -1); event.value = getInt(object, "value", -1);
+                    const auto parsed = getLongLong(object, "order", static_cast<long long>(fallbackNrpn)); event.order = parsed > 0 ? static_cast<std::uint64_t>(parsed) : fallbackNrpn; ++fallbackNrpn;
+                    if (event.tick < review.regionInTick || event.tick >= review.regionOutTick || event.midiChannel < 1 || event.midiChannel > 16
+                        || event.parameter < mw::core::midiParameterMinimum || event.parameter > mw::core::midiParameterMaximum
+                        || event.value < mw::core::midiParameterMinimum || event.value > mw::core::midiParameterMaximum) continue;
+                    pass.nrpnEvents.push_back(event);
+                }
+                std::stable_sort(pass.nrpnEvents.begin(), pass.nrpnEvents.end(), [](const auto& a, const auto& b)
+                { if (a.tick != b.tick) return a.tick < b.tick; if (a.midiChannel != b.midiChannel) return a.midiChannel < b.midiChannel; if (a.parameter != b.parameter) return a.parameter < b.parameter; return a.order < b.order; });
+                std::vector<mw::core::PersistentMidiNrpnEvent> collapsedNrpn;
+                for (const auto& event : pass.nrpnEvents) { if (!collapsedNrpn.empty() && collapsedNrpn.back().tick == event.tick && collapsedNrpn.back().midiChannel == event.midiChannel && collapsedNrpn.back().parameter == event.parameter) collapsedNrpn.back() = event; else collapsedNrpn.push_back(event); }
+                pass.nrpnEvents = std::move(collapsedNrpn);
+            }
+
+            const auto notesArray = extractArray(passObject, "takeNotes");
+            for (const auto& noteObject : splitTopLevelObjects(notesArray))
+            {
+                mw::core::NoteEvent note(
+                    getInt(noteObject, "pitch", 60),
+                    getInt(noteObject, "velocity", 100),
+                    getLongLong(noteObject, "startTick", 0),
+                    getLongLong(noteObject, "durationTicks", 0),
+                    getInt(noteObject, "midiChannel", fallbackMidiChannel),
+                    mw::core::articulationFromString(getString(noteObject, "articulation", "Normal")));
+
+                if (note.pitch < 0 || note.pitch > 127
+                    || note.velocity < 0 || note.velocity > 127
+                    || note.midiChannel < 1 || note.midiChannel > 16
+                    || note.durationTicks <= 0
+                    || note.startTick < review.regionInTick
+                    || note.startTick >= review.regionOutTick)
+                {
+                    return std::nullopt;
+                }
+
+                if (note.startTick + note.durationTicks > review.regionOutTick)
+                    return std::nullopt;
+
+                pass.notes.push_back(note);
+                ++totalNotes;
+            }
+            totalControllers += pass.controllerEvents.size() + pass.pitchBendEvents.size() + pass.programChangeEvents.size()
+                + pass.channelPressureEvents.size() + pass.polyPressureEvents.size() + pass.controller14BitEvents.size()
+                + pass.rpnEvents.size() + pass.nrpnEvents.size();
+            review.passes.push_back(std::move(pass));
+        }
+
+        if (review.passes.empty() || (totalNotes == 0 && totalControllers == 0))
+            return std::nullopt;
+        if (!containsPersistentPass(review.passes, review.selectedPassNumber))
+            review.selectedPassNumber = review.passes.front().passNumber;
+
+        const auto segmentsArray = extractArray(objectText, "segments");
+        for (const auto& segmentObject : splitTopLevelObjects(segmentsArray))
+        {
+            mw::core::PersistentMidiCompSegment segment;
+            segment.startTick = getLongLong(segmentObject, "startTick", -1);
+            segment.endTick = getLongLong(segmentObject, "endTick", -1);
+            segment.selectedPassNumber = getInt(segmentObject, "selectedPassNumber", 0);
+            if (segment.startTick < review.regionInTick
+                || segment.endTick <= segment.startTick
+                || segment.endTick > review.regionOutTick
+                || !containsPersistentPass(review.passes, segment.selectedPassNumber))
+            {
+                return std::nullopt;
+            }
+            if (!review.segments.empty() && review.segments.back().endTick != segment.startTick)
+                return std::nullopt;
+            review.segments.push_back(segment);
+        }
+
+        if (!review.segments.empty())
+        {
+            if (review.segments.front().startTick != review.regionInTick
+                || review.segments.back().endTick != review.regionOutTick)
+            {
+                return std::nullopt;
+            }
+        }
+        else if (review.reviewMode == mw::core::PersistentMidiTakeReviewMode::Comp)
+        {
+            return std::nullopt;
+        }
+
+        return review;
     }
 }
 
@@ -604,18 +1400,166 @@ namespace mw::serialization
 
             for (std::size_t n = 0; n < ns.size(); ++n)
             {
-                const auto& x = ns[n];
-
-                file << "        { \"pitch\": " << x.pitch
-                     << ", \"velocity\": " << x.velocity
-                     << ", \"startTick\": " << x.startTick
-                     << ", \"durationTicks\": " << x.durationTicks
-                     << ", \"midiChannel\": " << x.midiChannel
-                     << ", \"articulation\": \"" << mw::core::articulationToString(x.articulation) << "\" }"
-                     << (n + 1 < ns.size() ? "," : "") << "\n";
+                file << "        ";
+                writeNoteObject(file, ns[n]);
+                file << (n + 1 < ns.size() ? "," : "") << "\n";
             }
 
-            file << "      ]\n";
+            const auto& pendingReview = t.getPendingMidiTakeReview();
+            const auto& archivedReviews = t.getArchivedMidiTakeReviews();
+            const bool writeControllerEvents = !t.isAudioClipTrack();
+            const bool writePitchBendEvents = !t.isAudioClipTrack();
+            const bool writeProgramChangeEvents = !t.isAudioClipTrack();
+            const bool writeChannelPressureEvents = !t.isAudioClipTrack();
+            const bool writePolyPressureEvents = !t.isAudioClipTrack();
+            const bool write14BitControllerEvents = !t.isAudioClipTrack();
+            const bool writeRpnEvents = !t.isAudioClipTrack();
+            const bool writeNrpnEvents = !t.isAudioClipTrack();
+            const bool writePendingReview = !t.isAudioClipTrack() && pendingReview.active;
+            const bool writeArchivedReviews = !t.isAudioClipTrack() && !archivedReviews.empty();
+            file << "      ]" << ((writeControllerEvents || writePitchBendEvents || writeProgramChangeEvents || writeChannelPressureEvents || writePolyPressureEvents || write14BitControllerEvents || writeRpnEvents || writeNrpnEvents || writePendingReview || writeArchivedReviews) ? "," : "") << "\n";
+            if (writeControllerEvents)
+            {
+                auto controllerEvents = t.getMidiControllerEvents();
+                std::sort(controllerEvents.begin(), controllerEvents.end(), mw::core::midiControllerEventOrder);
+                file << "      \"controllerEvents\": [\n";
+                for (std::size_t controllerIndex = 0; controllerIndex < controllerEvents.size(); ++controllerIndex)
+                {
+                    const auto& event = controllerEvents[controllerIndex];
+                    file << "        {\"eventId\": " << static_cast<unsigned long long>(event.stableId)
+                         << ", \"tick\": " << event.tick
+                         << ", \"midiChannel\": " << event.midiChannel
+                         << ", \"controller\": " << event.controller
+                         << ", \"value\": " << event.value << "}"
+                         << (controllerIndex + 1 < controllerEvents.size() ? "," : "") << "\n";
+                }
+                file << "      ]" << ((writePitchBendEvents || writeProgramChangeEvents || writeChannelPressureEvents || writePolyPressureEvents || write14BitControllerEvents || writeRpnEvents || writeNrpnEvents || writePendingReview || writeArchivedReviews) ? "," : "") << "\n";
+            }
+            if (writePitchBendEvents)
+            {
+                auto pitchBendEvents = t.getMidiPitchBendEvents();
+                std::sort(pitchBendEvents.begin(), pitchBendEvents.end(), mw::core::midiPitchBendEventOrder);
+                file << "      \"pitchBendEvents\": [\n";
+                for (std::size_t bendIndex = 0; bendIndex < pitchBendEvents.size(); ++bendIndex)
+                {
+                    const auto& event = pitchBendEvents[bendIndex];
+                    file << "        {\"eventId\": " << static_cast<unsigned long long>(event.stableId)
+                         << ", \"tick\": " << event.tick
+                         << ", \"midiChannel\": " << event.midiChannel
+                         << ", \"value\": " << event.value << "}"
+                         << (bendIndex + 1 < pitchBendEvents.size() ? "," : "") << "\n";
+                }
+                file << "      ]" << ((writeProgramChangeEvents || writeChannelPressureEvents || writePolyPressureEvents || write14BitControllerEvents || writeRpnEvents || writeNrpnEvents || writePendingReview || writeArchivedReviews) ? "," : "") << "\n";
+            }
+            if (writeProgramChangeEvents)
+            {
+                auto programChangeEvents = t.getMidiProgramChangeEvents();
+                std::sort(programChangeEvents.begin(), programChangeEvents.end(), mw::core::midiProgramChangeEventOrder);
+                file << "      \"programChangeEvents\": [\n";
+                for (std::size_t programIndex = 0; programIndex < programChangeEvents.size(); ++programIndex)
+                {
+                    const auto& event = programChangeEvents[programIndex];
+                    file << "        {\"eventId\": " << static_cast<unsigned long long>(event.stableId)
+                         << ", \"tick\": " << event.tick
+                         << ", \"midiChannel\": " << event.midiChannel
+                         << ", \"program\": " << event.program << "}"
+                         << (programIndex + 1 < programChangeEvents.size() ? "," : "") << "\n";
+                }
+                file << "      ]" << ((writeChannelPressureEvents || writePolyPressureEvents || write14BitControllerEvents || writeRpnEvents || writeNrpnEvents || writePendingReview || writeArchivedReviews) ? "," : "") << "\n";
+            }
+            if (writeChannelPressureEvents)
+            {
+                auto pressureEvents = t.getMidiChannelPressureEvents();
+                std::sort(pressureEvents.begin(), pressureEvents.end(), mw::core::midiChannelPressureEventOrder);
+                file << "      \"channelPressureEvents\": [\n";
+                for (std::size_t pressureIndex = 0; pressureIndex < pressureEvents.size(); ++pressureIndex)
+                {
+                    const auto& event = pressureEvents[pressureIndex];
+                    file << "        {\"eventId\": " << static_cast<unsigned long long>(event.stableId)
+                         << ", \"tick\": " << event.tick
+                         << ", \"midiChannel\": " << event.midiChannel
+                         << ", \"pressure\": " << event.pressure << "}"
+                         << (pressureIndex + 1 < pressureEvents.size() ? "," : "") << "\n";
+                }
+                file << "      ]" << ((writePolyPressureEvents || write14BitControllerEvents || writeRpnEvents || writeNrpnEvents || writePendingReview || writeArchivedReviews) ? "," : "") << "\n";
+            }
+            if (writePolyPressureEvents)
+            {
+                auto polyEvents = t.getMidiPolyPressureEvents();
+                std::sort(polyEvents.begin(), polyEvents.end(), mw::core::midiPolyPressureEventOrder);
+                file << "      \"polyPressureEvents\": [\n";
+                for (std::size_t polyIndex = 0; polyIndex < polyEvents.size(); ++polyIndex)
+                {
+                    const auto& event = polyEvents[polyIndex];
+                    file << "        {\"eventId\": " << static_cast<unsigned long long>(event.stableId)
+                         << ", \"tick\": " << event.tick
+                         << ", \"midiChannel\": " << event.midiChannel
+                         << ", \"noteNumber\": " << event.noteNumber
+                         << ", \"pressure\": " << event.pressure << "}"
+                         << (polyIndex + 1 < polyEvents.size() ? "," : "") << "\n";
+                }
+                file << "      ]" << ((write14BitControllerEvents || writeRpnEvents || writeNrpnEvents || writePendingReview || writeArchivedReviews) ? "," : "") << "\n";
+            }
+            if (write14BitControllerEvents)
+            {
+                auto events = t.getMidi14BitControllerEvents();
+                std::sort(events.begin(), events.end(), mw::core::midi14BitControllerEventOrder);
+                file << "      \"controller14BitEvents\": [\n";
+                for (std::size_t eventIndex = 0; eventIndex < events.size(); ++eventIndex)
+                {
+                    const auto& event = events[eventIndex];
+                    file << "        {\"eventId\": " << static_cast<unsigned long long>(event.stableId)
+                         << ", \"tick\": " << event.tick << ", \"midiChannel\": " << event.midiChannel
+                         << ", \"controllerMsb\": " << event.controllerMsb << ", \"value\": " << event.value << "}"
+                         << (eventIndex + 1 < events.size() ? "," : "") << "\n";
+                }
+                file << "      ]" << ((writeRpnEvents || writeNrpnEvents || writePendingReview || writeArchivedReviews) ? "," : "") << "\n";
+            }
+            if (writeRpnEvents)
+            {
+                auto events = t.getMidiRpnEvents(); std::sort(events.begin(), events.end(), mw::core::midiRpnEventOrder);
+                file << "      \"rpnEvents\": [\n";
+                for (std::size_t eventIndex = 0; eventIndex < events.size(); ++eventIndex)
+                {
+                    const auto& event = events[eventIndex];
+                    file << "        {\"eventId\": " << static_cast<unsigned long long>(event.stableId)
+                         << ", \"tick\": " << event.tick << ", \"midiChannel\": " << event.midiChannel
+                         << ", \"parameter\": " << event.parameter << ", \"value\": " << event.value << "}"
+                         << (eventIndex + 1 < events.size() ? "," : "") << "\n";
+                }
+                file << "      ]" << ((writeNrpnEvents || writePendingReview || writeArchivedReviews) ? "," : "") << "\n";
+            }
+            if (writeNrpnEvents)
+            {
+                auto events = t.getMidiNrpnEvents(); std::sort(events.begin(), events.end(), mw::core::midiNrpnEventOrder);
+                file << "      \"nrpnEvents\": [\n";
+                for (std::size_t eventIndex = 0; eventIndex < events.size(); ++eventIndex)
+                {
+                    const auto& event = events[eventIndex];
+                    file << "        {\"eventId\": " << static_cast<unsigned long long>(event.stableId)
+                         << ", \"tick\": " << event.tick << ", \"midiChannel\": " << event.midiChannel
+                         << ", \"parameter\": " << event.parameter << ", \"value\": " << event.value << "}"
+                         << (eventIndex + 1 < events.size() ? "," : "") << "\n";
+                }
+                file << "      ]" << ((writePendingReview || writeArchivedReviews) ? "," : "") << "\n";
+            }
+            if (writePendingReview)
+            {
+                file << "      \"pendingMidiTakeReview\": ";
+                writePersistentMidiTakeReviewObject(file, pendingReview, "      ");
+                file << (writeArchivedReviews ? "," : "") << "\n";
+            }
+            if (writeArchivedReviews)
+            {
+                file << "      \"archivedMidiTakeReviews\": [\n";
+                for (std::size_t archiveIndex = 0; archiveIndex < archivedReviews.size(); ++archiveIndex)
+                {
+                    file << "        ";
+                    writePersistentMidiTakeReviewObject(file, archivedReviews[archiveIndex], "        ");
+                    file << (archiveIndex + 1 < archivedReviews.size() ? "," : "") << "\n";
+                }
+                file << "      ]\n";
+            }
             file << "    }" << (i + 1 < tracks.size() ? "," : "") << "\n";
         }
 
@@ -632,6 +1576,7 @@ namespace mw::serialization
         if (text.empty())
             return std::nullopt;
 
+        const int sourceFormatVersion = getInt(text, "version", 9);
         mw::core::Project project(getString(text, "name", filePath.stem().string()));
         project.setStableId(static_cast<mw::core::StableId>(std::max<long long>(1, getLongLong(text, "projectId", static_cast<long long>(project.getStableId())))));
         project.setTempoBpm(getInt(text, "tempoBpm", 120));
@@ -865,6 +1810,215 @@ namespace mw::serialization
                         mw::core::articulationFromString(getString(noteObject, "articulation", "Normal"))
                     )
                 );
+            }
+
+            if (sourceFormatVersion >= 16 && !track.isAudioClipTrack())
+            {
+                std::vector<mw::core::MidiControllerEvent> controllerEvents;
+                const auto controllerArray = extractArray(trackObject, "controllerEvents");
+                for (const auto& controllerObject : splitTopLevelObjects(controllerArray))
+                {
+                    const auto rawId = getLongLong(controllerObject, "eventId", 0);
+                    const auto tick = getLongLong(controllerObject, "tick", -1);
+                    const auto channel = getInt(controllerObject, "midiChannel", 0);
+                    const auto controller = getInt(controllerObject, "controller", -1);
+                    const auto value = getInt(controllerObject, "value", -1);
+                    if (tick < 0 || channel < 1 || channel > 16 || controller < 0 || controller > 127 || value < 0 || value > 127)
+                        continue;
+                    const auto stableId = rawId > 0 ? static_cast<mw::core::StableId>(rawId) : 0;
+                    auto duplicateTuple = std::find_if(controllerEvents.begin(), controllerEvents.end(), [&](const auto& event)
+                    {
+                        return event.tick == tick && event.midiChannel == channel && event.controller == controller;
+                    });
+                    if (duplicateTuple != controllerEvents.end())
+                    {
+                        duplicateTuple->value = value;
+                        if (duplicateTuple->stableId == 0 && stableId != 0) duplicateTuple->stableId = stableId;
+                    }
+                    else
+                    {
+                        controllerEvents.emplace_back(stableId, tick, channel, controller, value);
+                    }
+                }
+                track.setMidiControllerEvents(std::move(controllerEvents));
+            }
+
+            if (sourceFormatVersion >= 18 && !track.isAudioClipTrack())
+            {
+                std::vector<mw::core::MidiPitchBendEvent> bendEvents;
+                const auto bendArray = extractArray(trackObject, "pitchBendEvents");
+                for (const auto& bendObject : splitTopLevelObjects(bendArray))
+                {
+                    const auto rawId = getLongLong(bendObject, "eventId", 0);
+                    const auto tick = getLongLong(bendObject, "tick", -1);
+                    const auto channel = getInt(bendObject, "midiChannel", 0);
+                    const auto value = getInt(bendObject, "value", 99999);
+                    if (tick < 0 || channel < 1 || channel > 16
+                        || value < mw::core::midiPitchBendMinimum || value > mw::core::midiPitchBendMaximum)
+                        continue;
+                    const auto stableId = rawId > 0 ? static_cast<mw::core::StableId>(rawId) : 0;
+                    auto duplicateTuple = std::find_if(bendEvents.begin(), bendEvents.end(), [&](const auto& event)
+                    { return event.tick == tick && event.midiChannel == channel; });
+                    if (duplicateTuple != bendEvents.end())
+                    {
+                        duplicateTuple->value = value;
+                        if (duplicateTuple->stableId == 0 && stableId != 0) duplicateTuple->stableId = stableId;
+                    }
+                    else
+                        bendEvents.emplace_back(stableId, tick, channel, value);
+                }
+                track.setMidiPitchBendEvents(std::move(bendEvents));
+            }
+
+            if (sourceFormatVersion >= 19 && !track.isAudioClipTrack())
+            {
+                std::vector<mw::core::MidiProgramChangeEvent> programEvents;
+                const auto programArray = extractArray(trackObject, "programChangeEvents");
+                for (const auto& programObject : splitTopLevelObjects(programArray))
+                {
+                    const auto rawId = getLongLong(programObject, "eventId", 0);
+                    const auto tick = getLongLong(programObject, "tick", -1);
+                    const auto channel = getInt(programObject, "midiChannel", 0);
+                    const auto program = getInt(programObject, "program", -1);
+                    if (tick < 0 || channel < 1 || channel > 16 || program < 0 || program > 127)
+                        continue;
+                    const auto stableId = rawId > 0 ? static_cast<mw::core::StableId>(rawId) : 0;
+                    auto duplicateTuple = std::find_if(programEvents.begin(), programEvents.end(), [&](const auto& event)
+                    { return event.tick == tick && event.midiChannel == channel; });
+                    if (duplicateTuple != programEvents.end())
+                    {
+                        duplicateTuple->program = program;
+                        if (duplicateTuple->stableId == 0 && stableId != 0) duplicateTuple->stableId = stableId;
+                    }
+                    else
+                        programEvents.emplace_back(stableId, tick, channel, program);
+                }
+                track.setMidiProgramChangeEvents(std::move(programEvents));
+            }
+
+            if (sourceFormatVersion >= 20 && !track.isAudioClipTrack())
+            {
+                std::vector<mw::core::MidiChannelPressureEvent> pressureEvents;
+                const auto pressureArray = extractArray(trackObject, "channelPressureEvents");
+                for (const auto& pressureObject : splitTopLevelObjects(pressureArray))
+                {
+                    const auto rawId = getLongLong(pressureObject, "eventId", 0);
+                    const auto tick = getLongLong(pressureObject, "tick", -1);
+                    const auto channel = getInt(pressureObject, "midiChannel", 0);
+                    const auto pressureValue = getInt(pressureObject, "pressure", -1);
+                    if (tick < 0 || channel < 1 || channel > 16
+                        || pressureValue < mw::core::midiChannelPressureMinimum || pressureValue > mw::core::midiChannelPressureMaximum)
+                        continue;
+                    const auto stableId = rawId > 0 ? static_cast<mw::core::StableId>(rawId) : 0;
+                    auto duplicateTuple = std::find_if(pressureEvents.begin(), pressureEvents.end(), [&](const auto& event)
+                    { return event.tick == tick && event.midiChannel == channel; });
+                    if (duplicateTuple != pressureEvents.end())
+                    {
+                        duplicateTuple->pressure = pressureValue;
+                        if (duplicateTuple->stableId == 0 && stableId != 0) duplicateTuple->stableId = stableId;
+                    }
+                    else
+                        pressureEvents.emplace_back(stableId, tick, channel, pressureValue);
+                }
+                track.setMidiChannelPressureEvents(std::move(pressureEvents));
+            }
+
+            if (sourceFormatVersion >= 21 && !track.isAudioClipTrack())
+            {
+                std::vector<mw::core::MidiPolyPressureEvent> polyEvents;
+                const auto polyArray = extractArray(trackObject, "polyPressureEvents");
+                for (const auto& polyObject : splitTopLevelObjects(polyArray))
+                {
+                    const auto rawId = getLongLong(polyObject, "eventId", 0);
+                    const auto tick = getLongLong(polyObject, "tick", -1);
+                    const auto channel = getInt(polyObject, "midiChannel", 0);
+                    const auto note = getInt(polyObject, "noteNumber", -1);
+                    const auto pressureValue = getInt(polyObject, "pressure", -1);
+                    if (tick < 0 || channel < 1 || channel > 16 || note < 0 || note > 127
+                        || pressureValue < mw::core::midiPolyPressureMinimum || pressureValue > mw::core::midiPolyPressureMaximum)
+                        continue;
+                    const auto stableId = rawId > 0 ? static_cast<mw::core::StableId>(rawId) : 0;
+                    auto duplicateTuple = std::find_if(polyEvents.begin(), polyEvents.end(), [&](const auto& event)
+                    { return event.tick == tick && event.midiChannel == channel && event.noteNumber == note; });
+                    if (duplicateTuple != polyEvents.end())
+                    {
+                        duplicateTuple->pressure = pressureValue;
+                        if (duplicateTuple->stableId == 0 && stableId != 0) duplicateTuple->stableId = stableId;
+                    }
+                    else
+                        polyEvents.emplace_back(stableId, tick, channel, note, pressureValue);
+                }
+                track.setMidiPolyPressureEvents(std::move(polyEvents));
+            }
+
+            if (sourceFormatVersion >= 22 && !track.isAudioClipTrack())
+            {
+                std::vector<mw::core::Midi14BitControllerEvent> events14;
+                for (const auto& object : splitTopLevelObjects(extractArray(trackObject, "controller14BitEvents")))
+                {
+                    const auto rawId=getLongLong(object,"eventId",0); const auto tick=getLongLong(object,"tick",-1);
+                    const auto channel=getInt(object,"midiChannel",0); const auto controller=getInt(object,"controllerMsb",-1); const auto value=getInt(object,"value",-1);
+                    if(tick<0||channel<1||channel>16||controller<mw::core::midi14BitControllerMinimum||controller>mw::core::midi14BitControllerMaximum||value<mw::core::midi14BitMinimum||value>mw::core::midi14BitMaximum) continue;
+                    const auto id=rawId>0?static_cast<mw::core::StableId>(rawId):0; auto dup=std::find_if(events14.begin(),events14.end(),[&](const auto& e){return e.tick==tick&&e.midiChannel==channel&&e.controllerMsb==controller;});
+                    if(dup!=events14.end()){dup->value=value;if(dup->stableId==0&&id!=0)dup->stableId=id;}else events14.emplace_back(id,tick,channel,controller,value);
+                }
+                track.setMidi14BitControllerEvents(std::move(events14));
+
+                std::vector<mw::core::MidiRpnEvent> rpn;
+                for (const auto& object : splitTopLevelObjects(extractArray(trackObject, "rpnEvents")))
+                {
+                    const auto rawId=getLongLong(object,"eventId",0);const auto tick=getLongLong(object,"tick",-1);const auto channel=getInt(object,"midiChannel",0);const auto parameter=getInt(object,"parameter",-1);const auto value=getInt(object,"value",-1);
+                    if(tick<0||channel<1||channel>16||parameter<mw::core::midiParameterMinimum||parameter>=mw::core::midiRpnNullParameter||value<mw::core::midiParameterMinimum||value>mw::core::midiParameterMaximum)continue;
+                    const auto id=rawId>0?static_cast<mw::core::StableId>(rawId):0;auto dup=std::find_if(rpn.begin(),rpn.end(),[&](const auto& e){return e.tick==tick&&e.midiChannel==channel&&e.parameter==parameter;});if(dup!=rpn.end()){dup->value=value;if(dup->stableId==0&&id!=0)dup->stableId=id;}else rpn.emplace_back(id,tick,channel,parameter,value);
+                }
+                track.setMidiRpnEvents(std::move(rpn));
+
+                std::vector<mw::core::MidiNrpnEvent> nrpn;
+                for (const auto& object : splitTopLevelObjects(extractArray(trackObject, "nrpnEvents")))
+                {
+                    const auto rawId=getLongLong(object,"eventId",0);const auto tick=getLongLong(object,"tick",-1);const auto channel=getInt(object,"midiChannel",0);const auto parameter=getInt(object,"parameter",-1);const auto value=getInt(object,"value",-1);
+                    if(tick<0||channel<1||channel>16||parameter<mw::core::midiParameterMinimum||parameter>mw::core::midiParameterMaximum||value<mw::core::midiParameterMinimum||value>mw::core::midiParameterMaximum)continue;
+                    const auto id=rawId>0?static_cast<mw::core::StableId>(rawId):0;auto dup=std::find_if(nrpn.begin(),nrpn.end(),[&](const auto& e){return e.tick==tick&&e.midiChannel==channel&&e.parameter==parameter;});if(dup!=nrpn.end()){dup->value=value;if(dup->stableId==0&&id!=0)dup->stableId=id;}else nrpn.emplace_back(id,tick,channel,parameter,value);
+                }
+                track.setMidiNrpnEvents(std::move(nrpn));
+            }
+
+            if (sourceFormatVersion >= 10 && !track.isAudioClipTrack())
+            {
+                const auto reviewObject = extractObject(trackObject, "pendingMidiTakeReview");
+                if (const auto review = parsePersistentMidiTakeReviewObject(
+                        reviewObject, track.getInstrument().midiChannel, sourceFormatVersion))
+                {
+                    track.setPendingMidiTakeReview(*review);
+                }
+
+                if (sourceFormatVersion >= 13)
+                {
+                    std::vector<mw::core::PersistentMidiTakeReview> archivedReviews;
+                    const auto archivedArray = extractArray(trackObject, "archivedMidiTakeReviews");
+                    for (const auto& archivedObject : splitTopLevelObjects(archivedArray))
+                    {
+                        if (auto archived = parsePersistentMidiTakeReviewObject(
+                                archivedObject, track.getInstrument().midiChannel, sourceFormatVersion))
+                        {
+                            const bool duplicateId = archived->reviewSessionId != 0
+                                && ((track.getPendingMidiTakeReview().active
+                                     && track.getPendingMidiTakeReview().reviewSessionId == archived->reviewSessionId)
+                                    || std::any_of(archivedReviews.begin(), archivedReviews.end(), [&](const auto& existing)
+                                    {
+                                        return existing.reviewSessionId == archived->reviewSessionId;
+                                    }));
+                            if (duplicateId)
+                                continue;
+                            if (archived->reviewSessionId == 0)
+                                archived->reviewSessionId = mw::core::allocateStableId();
+                            if (archived->reviewName.empty())
+                                archived->reviewName = "Take Review " + std::to_string(archivedReviews.size() + 1U);
+                            archivedReviews.push_back(std::move(*archived));
+                        }
+                    }
+                    track.setArchivedMidiTakeReviews(std::move(archivedReviews));
+                }
             }
         }
 

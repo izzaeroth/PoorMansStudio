@@ -10,7 +10,8 @@
 
 namespace mw::audio
 {
-    AudioClipRecorder::AudioClipRecorder()
+    AudioClipRecorder::AudioClipRecorder(ApplicationAudioService& sharedAudioService)
+        : audioService(sharedAudioService)
     {
         backgroundThread.startThread();
     }
@@ -47,38 +48,26 @@ namespace mw::audio
         std::error_code ec;
         std::filesystem::create_directories(outputPath.parent_path(), ec);
 
-        const int requestedOutputChannels = liveEffectOptions.monitorEnabled ? 2 : 0;
-        auto initError = deviceManager.initialise(channelCount, requestedOutputChannels, nullptr, true, preferredInputDeviceName);
-        if (initError.isNotEmpty())
+        const auto activation = audioService.activateRecorderCallback(
+            this,
+            channelCount,
+            liveEffectOptions.monitorEnabled,
+            preferredInputDeviceName);
+        if (!activation.success)
         {
-            result.message = initError.toStdString();
+            result.message = activation.message.toStdString();
             return result;
         }
 
-        if (preferredInputDeviceName.isNotEmpty())
-        {
-            juce::AudioDeviceManager::AudioDeviceSetup setup;
-            deviceManager.getAudioDeviceSetup(setup);
-            setup.inputDeviceName = preferredInputDeviceName;
-            setup.useDefaultInputChannels = true;
-            const auto setupError = deviceManager.setAudioDeviceSetup(setup, true);
-            if (setupError.isNotEmpty())
-            {
-                result.message = setupError.toStdString();
-                return result;
-            }
-        }
-
-        int availableOutputChannels = 0;
-        int currentDeviceBlockSize = 512;
-        if (auto* device = deviceManager.getCurrentAudioDevice())
-        {
-            currentSampleRate = device->getCurrentSampleRate();
-            if (currentSampleRate <= 0.0)
-                currentSampleRate = 48000.0;
-            availableOutputChannels = device->getActiveOutputChannels().countNumberOfSetBits();
-            currentDeviceBlockSize = juce::jlimit(16, 8192, device->getCurrentBufferSizeSamples());
-        }
+        sharedCallbackAttached = true;
+        channelCount = juce::jlimit(1, 2, activation.activeInputChannels);
+        inputChannelIndices[0] = juce::jmax(0, activation.firstInputChannelIndex);
+        inputChannelIndices[1] = activation.inputMode == ApplicationAudioInputMode::StereoAdjacent
+            ? inputChannelIndices[0] + 1
+            : inputChannelIndices[0];
+        currentSampleRate = activation.sampleRate > 0.0 ? activation.sampleRate : 48000.0;
+        const int availableOutputChannels = activation.activeOutputChannels;
+        const int currentDeviceBlockSize = juce::jlimit(16, 8192, activation.blockSize);
 
         const bool effectProcessingRequested = hasRequestedEffectChain
             && (liveEffectOptions.monitorEnabled || liveEffectOptions.writeEffectToOutputFile);
@@ -238,6 +227,8 @@ namespace mw::audio
         if (!stream)
         {
             result.message = "Could not create recording file: " + outputPath.string();
+            audioService.deactivateRecorderCallback(this);
+            sharedCallbackAttached = false;
             return result;
         }
 
@@ -248,6 +239,8 @@ namespace mw::audio
         if (!writer)
         {
             result.message = "Could not create WAV writer for recording.";
+            audioService.deactivateRecorderCallback(this);
+            sharedCallbackAttached = false;
             return result;
         }
 
@@ -259,7 +252,6 @@ namespace mw::audio
         activeWriter = threadedWriter.get();
         paused = false;
         recording = true;
-        deviceManager.addAudioCallback(this);
 
         result.success = true;
         result.message = "Recording started.";
@@ -270,46 +262,16 @@ namespace mw::audio
 
     juce::StringArray AudioClipRecorder::getAvailableInputDeviceNames()
     {
-        juce::StringArray names;
-
-        auto initError = deviceManager.initialise(1, 0, nullptr, true);
-        if (initError.isNotEmpty())
-            return names;
-
-        auto& types = deviceManager.getAvailableDeviceTypes();
-        for (auto* type : types)
-        {
-            if (type == nullptr)
-                continue;
-
-            type->scanForDevices();
-            names.addArray(type->getDeviceNames(true));
-        }
-
-        names.removeDuplicates(false);
-        names.sort(false);
-        return names;
+        return audioService.getAvailableInputDeviceNames();
     }
 
     void AudioClipRecorder::setPreferredInputDeviceName(const juce::String& deviceName)
     {
         preferredInputDeviceName = deviceName.trim();
 
-        if (recording.load())
-            return;
-
-        auto initError = deviceManager.initialise(preferredInputDeviceName.isNotEmpty() ? 1 : 0, 0, nullptr, true, preferredInputDeviceName);
-        if (initError.isNotEmpty())
-            return;
-
-        if (preferredInputDeviceName.isNotEmpty())
-        {
-            juce::AudioDeviceManager::AudioDeviceSetup setup;
-            deviceManager.getAudioDeviceSetup(setup);
-            setup.inputDeviceName = preferredInputDeviceName;
-            setup.useDefaultInputChannels = true;
-            deviceManager.setAudioDeviceSetup(setup, true);
-        }
+        // Audio Settings persists the shared configuration. This setter keeps
+        // the recorder window's immediate device choice compatible with the
+        // shared service when the next recording session begins.
     }
 
     void AudioClipRecorder::pause()
@@ -324,12 +286,16 @@ namespace mw::audio
 
     void AudioClipRecorder::stop()
     {
-        if (recording.load())
-            deviceManager.removeAudioCallback(this);
-
         recording = false;
         paused = false;
         activeWriter = nullptr;
+
+        if (sharedCallbackAttached)
+        {
+            audioService.deactivateRecorderCallback(this);
+            sharedCallbackAttached = false;
+        }
+
         threadedWriter.reset();
         scratchBuffer.reset();
         effectBuffer.reset();
@@ -370,10 +336,7 @@ namespace mw::audio
 
     juce::String AudioClipRecorder::getCurrentDeviceSummary() const
     {
-        if (auto* device = deviceManager.getCurrentAudioDevice())
-            return device->getName() + " @ " + juce::String(device->getCurrentSampleRate(), 0) + " Hz";
-
-        return preferredInputDeviceName.isNotEmpty() ? preferredInputDeviceName : juce::String("Default audio input");
+        return audioService.currentInputDeviceSummary(preferredInputDeviceName);
     }
 
     void AudioClipRecorder::setInputGainDb(double gainDb)
@@ -437,12 +400,19 @@ namespace mw::audio
         for (int ch = 0; ch < channelCount; ++ch)
         {
             auto* dest = scratchBuffer->getWritePointer(ch);
-            if (ch < numInputChannels && inputChannelData[ch] != nullptr)
-                juce::FloatVectorOperations::copy(dest, inputChannelData[ch], numSamples);
-            else if (numInputChannels > 0 && inputChannelData[0] != nullptr)
-                juce::FloatVectorOperations::copy(dest, inputChannelData[0], numSamples);
+            const int sourceChannel = inputChannelIndices[static_cast<std::size_t>(juce::jlimit(0, 1, ch))];
+            if (sourceChannel < numInputChannels && inputChannelData[sourceChannel] != nullptr)
+            {
+                juce::FloatVectorOperations::copy(dest, inputChannelData[sourceChannel], numSamples);
+            }
             else
-                juce::FloatVectorOperations::clear(dest, numSamples);
+            {
+                const int monoSource = inputChannelIndices[0];
+                if (monoSource < numInputChannels && inputChannelData[monoSource] != nullptr)
+                    juce::FloatVectorOperations::copy(dest, inputChannelData[monoSource], numSamples);
+                else
+                    juce::FloatVectorOperations::clear(dest, numSamples);
+            }
 
             if (gain != 1.0f)
                 juce::FloatVectorOperations::multiply(dest, gain, numSamples);
