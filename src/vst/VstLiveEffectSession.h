@@ -52,6 +52,10 @@ namespace mw::vst
         bool processBlock(juce::AudioBuffer<float>& audio,
                           std::string& errorMessage) noexcept;
 
+        // Realtime callback entry: returns a status only; no diagnostic strings
+        // are allocated or formatted on a plugin processing failure.
+        bool processBlockRealtime(juce::AudioBuffer<float>& audio) noexcept;
+
     private:
         struct Impl;
         std::unique_ptr<Impl> impl_;

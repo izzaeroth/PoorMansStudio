@@ -155,6 +155,7 @@ namespace
 
             detailsBox.setMultiLine(true);
             detailsBox.setReadOnly(true);
+            detailsBox.setTooltip("Read-only AudioClip details including source media, trim and playback properties. Use the editor controls to change clip state.");
             detailsBox.setScrollbarsShown(true);
             detailsBox.setColour(juce::TextEditor::backgroundColourId, juce::Colours::black);
             detailsBox.setColour(juce::TextEditor::textColourId, juce::Colours::white);

@@ -13,6 +13,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <deque>
 #include <map>
 #include <mutex>
 
@@ -36,6 +37,8 @@
 #include "playback/MixedLiveProjectPreviewEngine.h"
 #include "midi/MidiInputCoordinator.h"
 #include "midi/MidiRecordingSession.h"
+#include "midi/MidiLoopCaptureBridge.h"
+#include "midi/MidiLoopWrapHandoff.h"
 #include "midi/MidiRecordingCountIn.h"
 #include "midi/MidiRecordingCountInPlayer.h"
 #include "midi/MidiRecordingQuantizer.h"
@@ -589,14 +592,31 @@ namespace mw::gui
                                            mw::core::StableId destinationTrackId);
         void requestDeleteArchivedTakeReview(mw::core::StableId trackId, mw::core::StableId reviewSessionId);
         void deleteArchivedTakeReview(mw::core::StableId trackId, mw::core::StableId reviewSessionId);
-        void runSimulationRegressionTests();
         bool applyMidiInputSelectionAndPersist(const mw::midi::MidiInputSelection& selection);
         bool startLiveMidiMonitoringForSelectedTrack(const mw::midi::MidiInputSelection* requestedSelection = nullptr);
         bool startLiveMidiMonitoringForTrack(int trackIndex, const mw::midi::MidiInputSelection* requestedSelection = nullptr);
         void stopLiveMidiMonitoring(bool sendPanic = true);
         void panicLiveMidiMonitoring();
         void restartLiveMidiMonitoringForSelectedTrack();
-        void handleIncomingLiveMidiMessage(const juce::MidiMessage& message);
+        void handleIncomingLiveMidiMessage(const juce::MidiMessage& message, double capturedProjectSeconds = -1.0);
+        void receiveNativeMidiForCapture(const juce::MidiMessage& message);
+        void drainCallbackMidiCapture(bool flushAtStop = false);
+        // Use a dedicated updater: MenuBarModel already inherits AsyncUpdater and
+        // owns its own menu-notification handler. Do not override or reuse it.
+        class MidiCaptureAsyncDispatcher final : private juce::AsyncUpdater
+        {
+        public:
+            explicit MidiCaptureAsyncDispatcher(MainComponent& owner) noexcept : owner(owner) {}
+            void notify() { triggerAsyncUpdate(); }
+            void cancel() { cancelPendingUpdate(); }
+        private:
+            void handleAsyncUpdate() override { owner.drainCallbackMidiCapture(); }
+            MainComponent& owner;
+        };
+        void scheduleCallbackMidiCapturePump();
+        void armCallbackMidiCapture();
+        void disarmCallbackMidiCapture() noexcept;
+        void failCallbackMidiCapture(const juce::String& reason);
         void handleMidiInputDisconnected(const juce::String& deviceName);
         bool armSelectedTrackForMidiRecording();
         void clearMidiRecordingArm();
@@ -620,7 +640,8 @@ namespace mw::gui
         bool beginMidiRecordingPunchCapture(std::uint64_t generation);
         void scheduleMidiRecordingPunchBoundary(std::uint64_t generation, bool punchOutBoundary);
         void completeMidiRecordingPunchOut(std::uint64_t generation);
-        bool completeMidiRecordingLoopWrap(std::uint64_t generation);
+        bool completeMidiRecordingLoopWrap(std::uint64_t generation,
+            const mw::playback::LoopWrapAcknowledgement* callbackNotice = nullptr);
         void clearMidiRecordingLoopSession(bool preserveTakeReview = false) noexcept;
         bool selectMidiRecordingLoopTakeReviewPass(int passNumber);
         void auditionMidiRecordingLoopTakeReviewPass();
@@ -1402,6 +1423,24 @@ namespace mw::gui
         mw::midi::MidiRecordingPunchRunState midiRecordingPunchRunState;
         mw::midi::MidiRecordingLoopRunState midiRecordingLoopRunState;
         mw::midi::MidiRecordingLoopWrapTransaction midiRecordingLoopWrapTransaction;
+        std::shared_ptr<mw::midi::MidiLoopCaptureFrameClock> midiLoopCaptureFrameClock
+            = std::make_shared<mw::midi::MidiLoopCaptureFrameClock>();
+        mw::midi::MidiLoopCapturedMessageMailbox midiLoopCapturedMessages;
+        MidiCaptureAsyncDispatcher midiCaptureAsyncDispatcher { *this };
+        mw::midi::MidiLoopCaptureOrder midiLoopCaptureOrder;
+        mw::midi::MidiLoopWrapHandoff midiLoopCaptureHandoff;
+        std::atomic<std::uint64_t> midiLoopCaptureGeneration { 0 };
+        mw::midi::MidiLoopCaptureIngressFence midiLoopCaptureIngressFence;
+        std::atomic<bool> midiLoopCaptureIngressFailed { false };
+        std::deque<mw::playback::LoopWrapAcknowledgement> midiLoopCapturePendingWraps;
+        std::uint64_t midiLoopCaptureConsumedWrapSerial = 0;
+        std::int64_t midiLoopCapturePlaybackStartTick = 0;
+        std::int64_t midiLoopCaptureLastWrapFrame = 0;
+        mw::midi::MidiLoopCaptureBoundaryFrames midiLoopCaptureBoundaryFrames;
+        std::int64_t midiLoopCaptureLastDispatchedFrame = 0;
+        int midiLoopCaptureSampleRate = 48000;
+        std::uint64_t midiLoopCapturePreparedEpoch = 0;
+        bool midiLoopCapturePumpScheduled = false;
         mw::midi::MidiRecordingLoopTakeReviewState midiRecordingLoopTakeReviewState;
         mw::midi::MidiRecordingLoopCompState midiRecordingLoopCompState;
         std::uint64_t midiRecordingPersistentReviewGeneration = 1000000;

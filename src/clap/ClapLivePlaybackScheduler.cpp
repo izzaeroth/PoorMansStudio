@@ -337,10 +337,17 @@ namespace mw::clap
     int ClapLivePlaybackScheduler::blockSize() const{return config_.blockSize;}
     int ClapLivePlaybackScheduler::totalScheduledEvents() const{return static_cast<int>(scheduledEvents_.size());}
     int ClapLivePlaybackScheduler::maxEventsPerBlock() const{return maxEventsPerBlock_;}
-    void ClapLivePlaybackScheduler::nextBlockInto(ClapLiveProcessRequest& request)
+    void ClapLivePlaybackScheduler::rewind() noexcept
+    {
+        nextEventIndex_ = 0;
+        currentSample_ = config_.startSample;
+    }
+    void ClapLivePlaybackScheduler::nextFramesInto(ClapLiveProcessRequest& request, int maximumFrames)
     {
         request.frameCount=0; request.noteEvents.clear(); request.controllerEvents.clear(); request.programChangeEvents.clear(); request.pitchBendEvents.clear(); request.channelPressureEvents.clear(); request.polyPressureEvents.clear(); if(isFinished())return;
-        const auto remaining=std::max<std::int64_t>(0,totalSamples_-currentSample_); const auto frames=static_cast<int>(std::min<std::int64_t>(config_.blockSize,remaining)); if(frames<=0){currentSample_=totalSamples_;return;}
+        const auto frameLimit = std::clamp(maximumFrames, 0, std::max(1, config_.blockSize));
+        if(frameLimit<=0)return;
+        const auto remaining=std::max<std::int64_t>(0,totalSamples_-currentSample_); const auto frames=static_cast<int>(std::min<std::int64_t>(frameLimit,remaining)); if(frames<=0){currentSample_=totalSamples_;return;}
         request.frameCount=frames; const auto start=currentSample_; const auto end=start+frames;
         while(nextEventIndex_<scheduledEvents_.size())
         {
@@ -353,5 +360,9 @@ namespace mw::clap
             else{auto e=s.note;e.frameOffset=offset;request.noteEvents.push_back(e);} ++nextEventIndex_;
         }
         currentSample_=end;
+    }
+    void ClapLivePlaybackScheduler::nextBlockInto(ClapLiveProcessRequest& request)
+    {
+        nextFramesInto(request, config_.blockSize);
     }
 }

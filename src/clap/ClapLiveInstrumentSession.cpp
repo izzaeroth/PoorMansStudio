@@ -1,4 +1,5 @@
 #include "clap/ClapLiveInstrumentSession.h"
+#include "playback/RealtimeAudioSafety.h"
 
 #include "app/AppVersion.h"
 #include "clap/ClapPluginScanner.h"
@@ -373,6 +374,7 @@ namespace
         ScheduledEventEncoding encoding = ScheduledEventEncoding::ClapNote;
         clap_event_note_t note {};
         clap_event_midi_t midi {};
+        std::size_t stableOrder = 0;
 
         const clap_event_header_t* header() const
         {
@@ -951,6 +953,95 @@ namespace mw::clap
             return true;
         }
 
+        void prepareRealtimeStorage(std::size_t maximumEvents)
+        {
+            realtimeOutputStorage.build(outputChannelCount, infoState.blockSize);
+            realtimeEventBlock.events.clear();
+            realtimeEventBlock.events.reserve(maximumEvents);
+            realtimeStorageReady = true;
+        }
+
+        ClapLiveRealtimeProcessResult processPlanarBlock(const ClapLiveProcessRequest& request,
+                                                         float* const* outputChannelData,
+                                                         int suppliedChannels) noexcept
+        {
+            ClapLiveRealtimeProcessResult result;
+            if (!realtimeStorageReady || !isOpen() || plugin == nullptr || plugin->process == nullptr
+                || request.frameCount <= 0 || request.frameCount > infoState.blockSize
+                || outputChannelData == nullptr || suppliedChannels <= 0)
+                return result;
+
+            const auto needed = request.noteEvents.size() + request.controllerEvents.size()
+                + request.programChangeEvents.size() + request.pitchBendEvents.size()
+                + request.channelPressureEvents.size() + request.polyPressureEvents.size();
+            if (!mw::playback::realtimeEventCapacityAllows(realtimeEventBlock.events.capacity(), needed))
+                return result;
+
+            auto& events = realtimeEventBlock.events;
+            events.clear();
+            const int frames = request.frameCount;
+            auto add = [&events](ScheduledLiveEvent event) noexcept
+            {
+                event.stableOrder = events.size();
+                events.push_back(event); // Capacity checked above; no allocations.
+            };
+            for (const auto& e : request.controllerEvents) add(makeClapLiveControllerEvent(e, noteDialectSelection.portIndex, frames));
+            for (const auto& e : request.programChangeEvents) add(makeClapLiveProgramChangeEvent(e, noteDialectSelection.portIndex, frames));
+            for (const auto& e : request.pitchBendEvents) add(makeClapLivePitchBendEvent(e, noteDialectSelection.portIndex, frames));
+            for (const auto& e : request.channelPressureEvents) add(makeClapLiveChannelPressureEvent(e, noteDialectSelection.portIndex, frames));
+            for (const auto& e : request.noteEvents) add(makeClapLiveNoteEvent(e, noteDialectSelection.dialect, noteDialectSelection.portIndex, frames));
+            for (const auto& e : request.polyPressureEvents) add(makeClapLivePolyPressureEvent(e, noteDialectSelection.portIndex, frames));
+
+            // std::sort has no temporary heap buffer. stableOrder preserves the
+            // same-tick, same-priority ownership of the existing stable_sort path.
+            std::sort(events.begin(), events.end(), [](const auto& a, const auto& b) noexcept
+            {
+                return mw::playback::realtimeEventLess(
+                    {a.header()->time, liveEventPriority(a), a.stableOrder},
+                    {b.header()->time, liveEventPriority(b), b.stableOrder});
+            });
+
+            clap_input_events_t inputEvents {};
+            inputEvents.ctx = &realtimeEventBlock;
+            inputEvents.size = inputEventsSize;
+            inputEvents.get = inputEventsGet;
+            ClapOutputEventState outputEventState;
+            clap_output_events_t outputEvents {};
+            outputEvents.ctx = &outputEventState;
+            outputEvents.try_push = outputEventsTryPush;
+
+            // A plugin may leave part of an output port untouched. Clear the
+            // preallocated span on every slice so no previous block leaks through.
+            for (auto& channel : realtimeOutputStorage.samples)
+                std::fill_n(channel.data(), static_cast<std::size_t>(frames), 0.0f);
+
+            clap_process_t process {};
+            process.steady_time = steadyFramePosition;
+            process.frames_count = static_cast<std::uint32_t>(frames);
+            process.audio_inputs = nullptr;
+            process.audio_inputs_count = 0;
+            process.audio_outputs = &realtimeOutputStorage.buffer;
+            process.audio_outputs_count = 1;
+            process.in_events = &inputEvents;
+            process.out_events = &outputEvents;
+
+            int status = clapProcessError;
+            try { status = plugin->process(plugin, &process); }
+            catch (...) { status = clapProcessError; }
+            result.processStatus = status;
+            result.success = status != clapProcessError;
+            if (!result.success) return result;
+            steadyFramePosition += static_cast<std::int64_t>(frames);
+            for (int channel = 0; channel < std::min(outputChannelCount, suppliedChannels); ++channel)
+                for (int frame = 0; frame < frames; ++frame)
+                    outputChannelData[channel][frame] = realtimeOutputStorage.samples[static_cast<std::size_t>(channel)][static_cast<std::size_t>(frame)];
+            result.outputChannelCount = outputChannelCount;
+            result.eventsSubmitted = static_cast<int>(events.size());
+            ++infoState.processedBlocks;
+            infoState.lastProcessStatus = status;
+            return result;
+        }
+
         ClapLiveProcessResult processBlock(const ClapLiveProcessRequest& request)
         {
             ClapLiveProcessResult result;
@@ -1070,6 +1161,9 @@ namespace mw::clap
             }
             library.reset();
             steadyFramePosition = 0;
+            realtimeStorageReady = false;
+            realtimeEventBlock.events.clear();
+            realtimeOutputStorage = {};
             pluginInitialized = false;
             infoState.open = false;
             infoState.startedProcessing = false;
@@ -1104,6 +1198,9 @@ namespace mw::clap
         ClapHostRequestState hostState;
         NoteDialectSelection noteDialectSelection;
         int outputChannelCount = 2;
+        LiveOutputStorage realtimeOutputStorage;
+        LiveEventBlock realtimeEventBlock;
+        bool realtimeStorageReady = false;
         std::int64_t steadyFramePosition = 0;
         bool entryInitialized = false;
         bool pluginInitialized = false;
@@ -1166,6 +1263,19 @@ namespace mw::clap
     ClapLiveInstrumentSessionInfo ClapLiveInstrumentSession::info() const
     {
         return impl->info();
+    }
+
+    void ClapLiveInstrumentSession::prepareRealtimeStorage(std::size_t maximumEvents)
+    {
+        if (impl != nullptr && impl->isOpen())
+            impl->prepareRealtimeStorage(maximumEvents);
+    }
+
+    ClapLiveRealtimeProcessResult ClapLiveInstrumentSession::processPlanarBlock(
+        const ClapLiveProcessRequest& request, float* const* outputChannelData, int outputChannelCount) noexcept
+    {
+        return impl == nullptr ? ClapLiveRealtimeProcessResult{}
+            : impl->processPlanarBlock(request, outputChannelData, outputChannelCount);
     }
 
     ClapLiveProcessResult ClapLiveInstrumentSession::processBlock(const ClapLiveProcessRequest& request)

@@ -1,6 +1,7 @@
 #include "clap/ClapLiveDirectPreviewEngine.h"
 #include "midi/LiveMidiNoteQueue.h"
 #include "audio/GainLimits.h"
+#include "playback/RealtimeAudioSafety.h"
 
 #include <algorithm>
 #include <array>
@@ -24,24 +25,7 @@ namespace mw::clap
         constexpr int kMaximumQueuedLiveMidiEventsPerBlock = 128;
         constexpr int kMaximumPanicNoteOffEvents = 16 * 128;
         constexpr int kMaximumLiveMidiEventsPerBlock = kMaximumQueuedLiveMidiEventsPerBlock + kMaximumPanicNoteOffEvents;
-
-        bool hasValidPluginOutputBuffer(int expectedFrames,
-                                        int outputFrames,
-                                        int outputChannels,
-                                        std::size_t interleavedSampleCount) noexcept
-        {
-            if (expectedFrames <= 0
-                || outputFrames != expectedFrames
-                || outputChannels < kMinimumOutputChannels
-                || outputChannels > kMaximumPluginOutputChannels)
-            {
-                return false;
-            }
-
-            const auto requiredSamples = static_cast<std::size_t>(expectedFrames)
-                * static_cast<std::size_t>(outputChannels);
-            return interleavedSampleCount >= requiredSamples;
-        }
+        constexpr std::size_t kMaximumRealtimeMidiEvents = 4096;
 
         int sanitizeOutputChannelCount(int value)
         {
@@ -96,9 +80,8 @@ namespace mw::clap
                 track.effects.reserve(request.effects.size());
                 for (const auto& effectRequest : request.effects)
                 {
-                    if (effectRequest.session == nullptr || effectRequest.sessionProcessMutex == nullptr)
-                        continue;
-
+                    // Preserve even an unavailable requested slot. Preparation must
+                    // reject the complete chain, never silently remove a bad slot.
                     EffectState effect;
                     effect.slotIndex = effectRequest.slotIndex;
                     effect.displayName = effectRequest.displayName;
@@ -150,6 +133,12 @@ namespace mw::clap
                 ? device->getCurrentBufferSizeSamples()
                 : 512;
 
+            failed.store(false);
+            callbackFault.reset();
+            {
+                const juce::ScopedLock lock(messageLock);
+                lastMessage.clear();
+            }
             prepareTracks(juce::jlimit(kMinimumDeviceSampleRate,
                                        kMaximumDeviceSampleRate,
                                        static_cast<int>(std::round(deviceSampleRate))),
@@ -166,12 +155,7 @@ namespace mw::clap
             stopFlushSkippedBusy.store(0);
             clippedSamples.store(0);
             outputPeak.store(0.0f);
-            failed.store(false);
-            finished.store(!prepared);
-            {
-                const juce::ScopedLock lock(messageLock);
-                lastMessage.clear();
-            }
+            finished.store(!prepared || failed.load());
         }
 
         void audioDeviceStopped() override
@@ -244,7 +228,10 @@ namespace mw::clap
         float getPeak() const noexcept { return outputPeak.load(); }
         juce::String getLastMessage() const
         {
-            const juce::ScopedLock lock(messageLock);
+            const auto fault = callbackFault.read();
+            if (fault != mw::playback::DirectPreviewFault::None)
+                return juce::String(mw::playback::directPreviewFaultText(fault));
+            const juce::ScopedLock lock(messageLock); // Preparation/stop messages only.
             return lastMessage;
         }
 
@@ -285,6 +272,9 @@ namespace mw::clap
             float outputGain = 1.0f;
             bool liveMidiInput = false;
             ClapLiveProcessRequest liveMidiRequest;
+            // Scratch buffers allocated at preparation, not in the audio callback.
+            juce::AudioBuffer<float> scratchA;
+            juce::AudioBuffer<float> scratchB;
             std::array<std::array<int, 128>, 16> activeNoteDepths {};
             int consecutiveSkippedBlocks = 0;
             bool prepared = false;
@@ -398,6 +388,7 @@ namespace mw::clap
             std::int64_t aggregateTotalSamples = 0;
             int preparedTrackCount = 0;
             int firstTrackIndex = -1;
+            bool allSessionsPrepared = true;
 
             for (auto& track : tracks)
             {
@@ -407,6 +398,52 @@ namespace mw::clap
                 track.failed = false;
                 track.consecutiveSkippedBlocks = 0;
                 clearActiveNotes(track);
+                track.scratchA.setSize(kMaximumPluginOutputChannels, kMaximumBlockSize,
+                                       false, false, true);
+                track.scratchB.setSize(kMaximumPluginOutputChannels, kMaximumBlockSize,
+                                       false, false, true);
+                track.scratchA.clear();
+                track.scratchB.clear();
+                // Native session preparation is performed before device callbacks:
+                // the effective device block size may differ from the startup guess.
+                bool sessionReady = track.session != nullptr && track.sessionMutex != nullptr;
+                if (sessionReady)
+                {
+                    const std::lock_guard<std::mutex> sessionLock(*track.sessionMutex);
+                    std::string prepareError;
+                    sessionReady = track.session->prepareForPlayback(
+                        deviceSampleRate, deviceBlockSize, requestedOutputChannels, prepareError);
+                    if (sessionReady)
+                        track.session->prepareRealtimeStorage(kMaximumRealtimeMidiEvents);
+                    else
+                    {
+                        const juce::ScopedLock lock(messageLock);
+                        lastMessage = "CLAP direct preview instrument preparation failed: " + juce::String(prepareError);
+                    }
+                }
+                for (auto& effect : track.effects)
+                {
+                    if (effect.session == nullptr || effect.sessionMutex == nullptr)
+                    {
+                        sessionReady = false;
+                        continue;
+                    }
+                    const std::lock_guard<std::mutex> effectLock(*effect.sessionMutex);
+                    std::string prepareError;
+                    if (!effect.session->prepareForPlayback(
+                            deviceSampleRate, deviceBlockSize, requestedOutputChannels, prepareError))
+                    {
+                        sessionReady = false;
+                        const juce::ScopedLock lock(messageLock);
+                        lastMessage = "CLAP direct preview effect preparation failed: " + juce::String(prepareError);
+                    }
+                }
+                if (!sessionReady)
+                {
+                    track.failed = true;
+                    allSessionsPrepared = false;
+                    continue;
+                }
 
                 if (track.liveMidiInput)
                 {
@@ -451,7 +488,12 @@ namespace mw::clap
                 aggregateTotalSamples = std::max(aggregateTotalSamples, source.startSample + durationAtDeviceRate);
             }
 
-            prepared = preparedTrackCount > 0 || preparedAudioSourceCount > 0;
+            prepared = allSessionsPrepared && (preparedTrackCount > 0 || preparedAudioSourceCount > 0);
+            if (!allSessionsPrepared)
+            {
+                failed.store(true);
+                finished.store(true);
+            }
             sampleRate.store(deviceSampleRate);
             currentSample.store(0);
             primaryTrackIndex.store(firstTrackIndex);
@@ -473,10 +515,17 @@ namespace mw::clap
         }
 
 
+        void failRealtime(mw::playback::DirectPreviewFault code) noexcept
+        {
+            callbackFault.publish(code);
+            failed.store(true);
+            finished.store(true);
+        }
+
         bool processLiveEffectsForTrack(TrackState& track,
-                                        std::vector<float>& interleavedAudio,
+                                        juce::AudioBuffer<float>*& currentAudio,
                                         int& audioChannels,
-                                        int frames)
+                                        int frames) noexcept
         {
             if (track.effects.empty() || frames <= 0 || audioChannels <= 0)
                 return true;
@@ -484,50 +533,40 @@ namespace mw::clap
             for (auto& effect : track.effects)
             {
                 if (effect.session == nullptr || effect.sessionMutex == nullptr)
-                    continue;
+                {
+                    failRealtime(mw::playback::DirectPreviewFault::ClapEffectMissing);
+                    return false;
+                }
 
                 std::unique_lock<std::mutex> effectLock(*effect.sessionMutex, std::try_to_lock);
                 if (!effectLock.owns_lock())
                 {
                     skippedEffectBlocks.fetch_add(1);
-                    continue;
-                }
-
-                ClapLiveEffectProcessRequest effectRequest;
-                effectRequest.frameCount = frames;
-                effectRequest.inputChannelCount = audioChannels;
-                effectRequest.interleavedInputAudio = interleavedAudio;
-
-                auto effectResult = effect.session->processBlock(effectRequest);
-                if (!effectResult.success)
-                {
-                    failed.store(true);
-                    finished.store(true);
-                    const juce::ScopedLock lock(messageLock);
-                    juce::String effectName(effect.displayName);
-                    if (effectName.isEmpty())
-                        effectName = effect.slotIndex >= 0 ? (juce::String("slot ") + juce::String(effect.slotIndex + 1)) : juce::String("effect");
-                    lastMessage = "CLAP live effect failed (" + effectName + "): " + juce::String(effectResult.message);
+                    failRealtime(mw::playback::DirectPreviewFault::ClapEffectBusy);
                     return false;
                 }
 
-                if (!hasValidPluginOutputBuffer(frames,
-                                                effectResult.outputFrameCount,
-                                                effectResult.outputChannelCount,
-                                                effectResult.interleavedAudio.size()))
+                auto& destination = currentAudio == &track.scratchA ? track.scratchB : track.scratchA;
+                destination.clear(0, frames);
+                const auto result = effect.session->processPlanarBlock(
+                    currentAudio->getArrayOfReadPointers(), audioChannels,
+                    destination.getArrayOfWritePointers(), kMaximumPluginOutputChannels, frames);
+                if (!result.success)
                 {
-                    failed.store(true);
-                    finished.store(true);
-                    const juce::ScopedLock lock(messageLock);
-                    lastMessage = "CLAP live effect returned an invalid audio buffer.";
+                    failRealtime(mw::playback::DirectPreviewFault::ClapEffect);
+                    return false;
+                }
+                if (result.outputChannelCount < kMinimumOutputChannels
+                    || result.outputChannelCount > kMaximumPluginOutputChannels)
+                {
+                    failRealtime(mw::playback::DirectPreviewFault::ClapEffectOutput);
                     return false;
                 }
 
-                interleavedAudio = std::move(effectResult.interleavedAudio);
-                audioChannels = effectResult.outputChannelCount;
+                currentAudio = &destination;
+                audioChannels = result.outputChannelCount;
                 processedEffectBlocks.fetch_add(1);
             }
-
             return true;
         }
 
@@ -598,10 +637,7 @@ namespace mw::clap
                         const auto index1 = static_cast<std::size_t>(sourceFrame1 * source.sourceChannelCount + sourceChannel);
                         if (index0 >= source.interleavedAudio.size() || index1 >= source.interleavedAudio.size())
                         {
-                            failed.store(true);
-                            finished.store(true);
-                            const juce::ScopedLock lock(messageLock);
-                            lastMessage = "Rendered fallback audio source had invalid buffer dimensions.";
+                            failRealtime(mw::playback::DirectPreviewFault::ClapAudioSourceOutput);
                             return false;
                         }
 
@@ -627,6 +663,11 @@ namespace mw::clap
 
             if (!prepared || failed.load() || finished.load() || numOutputChannels <= 0 || numSamples <= 0)
                 return;
+            if (numSamples > kMaximumBlockSize)
+            {
+                failRealtime(mw::playback::DirectPreviewFault::ClapInstrumentOutput);
+                return;
+            }
 
             bool anyTrackStillActive = false;
             bool anyTrackProcessedThisBlock = false;
@@ -654,10 +695,8 @@ namespace mw::clap
                     if (track.consecutiveSkippedBlocks >= kMaximumConsecutiveBusyBlocks)
                     {
                         track.failed = true;
-                        failed.store(true);
-                        finished.store(true);
-                        const juce::ScopedLock lock(messageLock);
-                        lastMessage = "CLAP preview stopped because the live instrument stayed busy for too many consecutive audio blocks.";
+                        failRealtime(mw::playback::DirectPreviewFault::ClapBusy);
+                        clearOutputs(outputChannelData, numOutputChannels, numSamples);
                         return;
                     }
                     continue;
@@ -761,14 +800,33 @@ namespace mw::clap
                 }
 
                 const auto& request = *processRequest;
-                auto result = track.session->processBlock(request);
+                const auto events = request.noteEvents.size() + request.controllerEvents.size()
+                    + request.pitchBendEvents.size() + request.programChangeEvents.size()
+                    + request.channelPressureEvents.size() + request.polyPressureEvents.size();
+                if (!mw::playback::realtimeCallbackEventCountAllows(events, kMaximumRealtimeMidiEvents))
+                {
+                    track.failed = true;
+                    failRealtime(mw::playback::DirectPreviewFault::ClapInstrument);
+                    clearOutputs(outputChannelData, numOutputChannels, numSamples);
+                    return;
+                }
+
+                track.scratchA.clear(0, request.frameCount);
+                const auto result = track.session->processPlanarBlock(
+                    request, track.scratchA.getArrayOfWritePointers(), kMaximumPluginOutputChannels);
                 if (!result.success)
                 {
                     track.failed = true;
-                    failed.store(true);
-                    finished.store(true);
-                    const juce::ScopedLock lock(messageLock);
-                    lastMessage = juce::String(result.message);
+                    failRealtime(mw::playback::DirectPreviewFault::ClapInstrument);
+                    clearOutputs(outputChannelData, numOutputChannels, numSamples);
+                    return;
+                }
+                if (result.outputChannelCount < kMinimumOutputChannels
+                    || result.outputChannelCount > kMaximumPluginOutputChannels)
+                {
+                    track.failed = true;
+                    failRealtime(mw::playback::DirectPreviewFault::ClapInstrumentOutput);
+                    clearOutputs(outputChannelData, numOutputChannels, numSamples);
                     return;
                 }
 
@@ -779,42 +837,22 @@ namespace mw::clap
                     clearActiveNotes(track);
                 }
 
-                auto blockAudio = std::move(result.interleavedAudio);
+                auto* blockAudio = &track.scratchA;
                 auto outputChannels = result.outputChannelCount;
-                const auto outputFrames = result.outputFrameCount;
-                if (!hasValidPluginOutputBuffer(request.frameCount,
-                                                outputFrames,
-                                                outputChannels,
-                                                blockAudio.size()))
+                const auto framesToCopy = std::min(numSamples, request.frameCount);
+                if (!processLiveEffectsForTrack(track, blockAudio, outputChannels, framesToCopy))
                 {
-                    track.failed = true;
-                    failed.store(true);
-                    finished.store(true);
-                    const juce::ScopedLock lock(messageLock);
-                    lastMessage = "CLAP live instrument returned an invalid audio buffer.";
+                    clearOutputs(outputChannelData, numOutputChannels, numSamples);
                     return;
                 }
-
-                const auto framesToCopy = std::min({ numSamples, request.frameCount, outputFrames });
-
-                if (!processLiveEffectsForTrack(track, blockAudio, outputChannels, framesToCopy))
-                    return;
 
                 for (int frame = 0; frame < framesToCopy; ++frame)
-                {
                     for (int ch = 0; ch < numOutputChannels; ++ch)
                     {
-                        float sample = 0.0f;
-                        if (ch < outputChannels)
-                        {
-                            const auto idx = static_cast<std::size_t>(frame * outputChannels + ch);
-                            if (idx < blockAudio.size())
-                                sample = blockAudio[idx] * track.outputGain;
-                        }
-
+                        const float sample = ch < outputChannels
+                            ? blockAudio->getSample(ch, frame) * track.outputGain : 0.0f;
                         mixOutputSample(outputChannelData, ch, frame, sample, localPeak);
                     }
-                }
 
                 anyTrackProcessedThisBlock = true;
                 eventsThisCallback += static_cast<int>(request.noteEvents.size() + request.controllerEvents.size() + request.programChangeEvents.size() + request.pitchBendEvents.size() + request.channelPressureEvents.size() + request.polyPressureEvents.size());
@@ -826,7 +864,10 @@ namespace mw::clap
             const bool anyAudioSourceProcessed = mixAudioSources(
                 outputChannelData, numOutputChannels, numSamples, blockStartSample, localPeak);
             if (failed.load())
+            {
+                clearOutputs(outputChannelData, numOutputChannels, numSamples);
                 return;
+            }
 
             currentSample.store(blockStartSample + numSamples);
             outputPeak.store(localPeak);
@@ -891,6 +932,7 @@ namespace mw::clap
         std::atomic<std::int64_t> currentSample { 0 };
         std::atomic<std::int64_t> totalSamples { 0 };
         std::atomic<float> outputPeak { 0.0f };
+        mw::playback::DirectPreviewFaultLatch callbackFault;
         mutable juce::CriticalSection messageLock;
         juce::String lastMessage;
     };
@@ -1033,6 +1075,13 @@ namespace mw::clap
         result.outputChannelCount = sanitizeOutputChannelCount(outputChannelCount);
 
         auto callback = std::make_unique<DirectPreviewAudioCallback>(std::move(tracks), std::move(audioSources), result.outputChannelCount);
+        if (callback->hasFailed())
+        {
+            result.errorMessage = callback->getLastMessage();
+            if (result.errorMessage.isEmpty())
+                result.errorMessage = "CLAP direct preview could not prepare its complete instrument/effect chain.";
+            return result;
+        }
 
         result.trackIndex = callback->getTrackIndex();
         const bool liveMidiInput = callback->isLiveMidiInput();

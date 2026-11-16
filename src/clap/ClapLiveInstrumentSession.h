@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -103,6 +104,14 @@ namespace mw::clap
         std::vector<ClapLivePolyPressureEvent> polyPressureEvents;
     };
 
+    struct ClapLiveRealtimeProcessResult
+    {
+        bool success = false;
+        int processStatus = -1;
+        int eventsSubmitted = 0;
+        int outputChannelCount = 0;
+    };
+
     struct ClapLiveProcessResult
     {
         bool success = false;
@@ -130,6 +139,12 @@ namespace mw::clap
         bool prepareForPlayback(int sampleRate, int blockSize, int channelCount, std::string& errorMessage);
         ClapLiveInstrumentSessionInfo info() const;
         ClapLiveProcessResult processBlock(const ClapLiveProcessRequest& request);
+        // Caller must own the session's processing mutex. Scratch/event storage is
+        // reserved on the control thread; processing never resizes it.
+        void prepareRealtimeStorage(std::size_t maximumEvents);
+        ClapLiveRealtimeProcessResult processPlanarBlock(const ClapLiveProcessRequest& request,
+                                                        float* const* outputChannelData,
+                                                        int outputChannelCount) noexcept;
 
     private:
         struct Impl;

@@ -4,9 +4,6 @@
 
 It is intentionally practical: bring in MIDI or score material, clean up tracks, organize sections, assign instruments, preview ideas quickly, and render usable audio or MIDI output from a self-contained workspace. It has just enough DAW energy to be useful, without trying to become a spaceship cockpit.
 
-*Currently working on bringing in actual music hardware support. Some inputs do actually work, but I do not have a MIDI device or other equipment, so my testing is simulation only for now.*
-
-
 ## Quick Feature Tour
 
 ### Import, Arrange, And Edit
@@ -15,6 +12,8 @@ It is intentionally practical: bring in MIDI or score material, clean up tracks,
 - Create MIDI tracks from score/MIDI files.
 - Create AudioClip tracks from imported, recorded, or rendered AudioClip arrangement audio.
 - Edit notes in the main editor and in dedicated Piano Roll windows.
+- Edit timed MIDI expression events through dedicated Controller, 14-bit Controller, RPN/NRPN Parameter, Pitch Bend, Program Change, Channel Pressure, and Poly Pressure lanes.
+- Record MIDI notes and optional controller/expression events, using a count-in, metronome, punch range, repeated loop passes, and Take Review when desired.
 - Edit AudioClip source trim non-destructively, enhance the full AudioClip source into a new generated copy, freeze a kept range, arrange repeated or overlapping local clips, add editor-only Aux source trims into the arrangement, preview the arrangement, and render it into a new mixed AudioClip track.
 - Keep one Piano Roll window per track so track edits stay understandable.
 - Organize track groups, song sections, sequence assignments, ordering, names, and track layout through the Track Manager.
@@ -30,6 +29,46 @@ It is intentionally practical: bring in MIDI or score material, clean up tracks,
 - Apply per-track settings intentionally so existing tracks are not overwritten accidentally.
 - Switch a track between SF2/SF3/SFZ/VST3/CLAP without deleting its MIDI notes.
 - Preserve notes when changing libraries; the instrument assignment changes, the music stays.
+
+### MIDI Editing And Expression
+
+Piano Roll editing covers note pitch, timing, duration, and velocity. MIDI event lanes operate on the selected MIDI track and channel; an AudioClip track does not have MIDI controller lanes. Events are stored at specific musical positions, **not as automatically interpolated curves**.
+
+- **Controller Lane:** Edit ordinary 7-bit CC messages (values 0-127), such as CC1 Modulation, CC11 Expression, and CC64 Sustain.
+- **14-bit Controller Lane:** Edit paired MSB/LSB controllers as a single value from 0-16383. Pairs CC1/33 through CC31/63 are supported. CC0/32 is reserved for Bank Select.
+- **Parameter Lane:** Edit RPN and NRPN parameter/value transactions. They are stored as semantic events and exported as standard controller sequences (RPN uses CC101/100, NRPN uses CC99/98, and Data Entry uses CC6/38). RPN 127/127 is the Null Function, not an ordinary editable parameter.
+- **Pitch Bend:** Edit signed bend values from -8192 to +8191; the audible bend range depends on the instrument.
+- **Program Change:** Edit programs numbered 0-127; bank and program interpretation is instrument-dependent.
+- **Channel Pressure:** Edit one aftertouch value for the selected channel.
+- **Polyphonic Key Pressure:** Edit pressure for a specific note number on the selected channel.
+
+To make a modulation swell, select a MIDI track, open the **MIDI Controller Lane**, choose **CC1** and the proper channel, then use **Add at Preview** to place points at different positions with increasing values. Preview with an instrument that responds to CC1.
+
+For finer modulation, use the **14-bit Controller Lane**, select **CC1/33**, and enter values such as **0**, **8192**, and **16383** at different preview positions. Standard MIDI export writes the appropriate MSB and LSB messages. A 7-bit-only plugin may ignore the extra precision.
+
+For an instrument-specific parameter, consult its MIDI implementation chart, choose **RPN** or **NRPN** in the Parameter Lane, and enter its documented parameter and value. A parameter can be valid MIDI even if the current instrument produces no audible change.
+
+### MIDI Input, Recording, Punch, Loop And Take Review
+
+Open **MIDI Input / Live Monitor**, select a device and channel (or **Omni**), apply the input settings, and use **Start Monitor** to play without recording. **Arm Selected** chooses the MIDI track for recording; **Record MIDI** begins a take and **Stop Recording** finishes it. The input controls let you opt in to controller, bend, program, channel-pressure, poly-pressure, and advanced-parameter capture. Advanced parameter recording (14-bit CC, RPN, and NRPN) is optional and initially off.
+
+- **Count-In and metronome:** Prepare for a take before input is captured. Note quantization applies to note timing, not recorded controller timestamps.
+- **Punch In/Out:** Define a half-open recording region `[In, Out)`: an event at In is included; an event exactly at Out is outside the region.
+- **Loop Record:** Capture consecutive passes between Loop In and Loop Out. Choose **Merge** to combine passes or **Review** to retain them for comparison.
+- **Take Review:** Audition whole passes, keep or discard them, or build a **Comp** by assigning different passes to Beat, Bar, or Custom segments. Review archives and Undo/Redo Take are subject to edit-history safety rules.
+- **Panic:** Release held MIDI notes if monitoring or playback leaves a note sounding.
+
+**Example: comp a four-bar chorus.** Set In and Out around four bars, enable Loop Record, select **Review**, and record three passes. Open Take Review, audition each pass, then use Comp to select your favorite segment from each one. Choose **Keep Comp**, then **Save Project** to preserve the result.
+
+Standard MIDI export preserves supported musical MIDI events, but application-specific Take Review metadata and undo history remain in the `.mwproj` project, not in the exported `.mid` file.
+
+### Playback, Loop Boundaries And Audio Devices
+
+Use **Project > Audio Settings** to select the audio output/input device and configure routing, sample rate, and callback buffer size. The application uses one JUCE-managed audio device service for compatible live playback and monitoring. A compatible mixed-project preview can combine live VST3/CLAP tracks and prepared audio on a shared timeline.
+
+For supported live mixed-project playback, the **Loop In/Out** region uses `[Loop In, Loop Out)` boundaries, and playback wraps inside the audio callback at the output sample boundary. Direct-preview and rendered fallback paths can have different seek and loop capabilities; the app uses conservative fallback when a project or plugin configuration cannot safely run live. Stopping playback and changing devices can require session re-preparation.
+
+Enabled effect chains run in fixed **Slot 1 -> Slot 2** order. An effect that is missing, busy, or fails cannot simply be skipped while later stages keep running: the live wet path fails safely rather than pretending the complete chain processed. Source AudioClip recordings remain dry, even when wet effects are selected for monitoring.
 
 ### VST3 Plugin Support
 
@@ -60,7 +99,7 @@ VST3 instrument hosting remains in-process, so a plugin crash can still close th
 
 ### CLAP Plugin Support
 
-CLAP support is experimental and newer than the VST3 path. It is designed to preserve the existing offline render/export workflow while adding guarded direct/live preview when the project is safe for it.
+CLAP support is experimental. It is designed to preserve the existing offline render/export workflow while adding guarded direct/live preview when the project is safe for it.
 
 Current CLAP support includes:
 
@@ -75,7 +114,7 @@ Current CLAP support includes:
 - Guarded live CLAP Effect Slot 1 / Slot 2 routing during direct CLAP preview when the selected effects are CLAP effects.
 - Compatible CLAP and VST3 instrument tracks remain live together while SF2/SF3, SFZ, AudioClip, cross-backend effect chains, latency-reporting plugins, and otherwise unsafe tracks use the prepared or full rendered fallback.
 - Explicit transport lifecycle state and playback generation tracking protect project replacement, stop/restart, live seek restart, stale asynchronous preparation, and completion handling.
-- Stable project and track identities are saved in `.mwproj` project format version 9 so live session ownership does not depend only on mutable track indexes.
+- Stable project and track identities are saved in `.mwproj` project format **22**, along with supported MIDI-expression events and Take Review information; live session ownership does not depend only on mutable track indexes.
 - Full rendered/temp-WAV fallback remains available when hybrid preparation, plugin opening, the audio device, or live routing cannot run safely.
 
 Direct CLAP preview is not the same as final export. Render/export paths still use the saved project state and offline processing so output remains repeatable and compatible with the existing render workflow.
@@ -85,7 +124,7 @@ The Help menu includes one combined **Plugin Compatibility Warnings** toggle for
 ### Preview, Render, And Export
 
 - Preview a selected track, selected sequence, Piano Roll area, enhanced AudioClip source preview, AudioClip arrangement, or the full project.
-- Compatible VST3 and CLAP selected-track previews may play through their guarded direct/live paths. Project Preview uses one shared callback for compatible live VST3 and CLAP tracks plus prepared rendered sources; unsupported or unsafe cases still use the full rendered/temp-WAV fallback.
+- Compatible VST3 and CLAP selected-track previews may play through their guarded direct/live paths. Project Preview uses one shared callback for compatible live VST3 and CLAP tracks plus prepared rendered sources; unsupported or unsafe cases still use the full rendered/temp-WAV fallback. Live mixed-project loops use callback-owned wrap boundaries when supported.
 - Render the full project, selected track, selected sequence, or stems depending on render settings.
 - Export WAV, FLAC, MP3, and OGG audio.
 - Attach album art to MP3 renders when Output Format is MP3.
@@ -101,13 +140,13 @@ The main window includes **Attach Album Art** under **Edit Info** for final MP3 
 
 ### Export Folder Behavior
 
-Poor Man's Studio keeps user-facing renders in `workspace/exports` by default instead of auto-switching exports into each project folder. Saving or opening a `.mwproj` no longer retargets the export box to `workspace/projects/<project>/renders`; older project-local `renders`/`output` paths are reset back to the workspace export folder unless you manually choose another custom export folder.
+Poor Man's Studio uses `workspace/exports` for user-facing renders by default. Opening or saving a `.mwproj` keeps that workspace export destination unless you explicitly choose a custom export folder. Project-local `renders`/`output` destinations stored in older projects resolve to the workspace default.
 
 Render Settings retention applies consistently to non-WAV exports too. When **Keep WAV audio stems** is enabled, the source WAV sidecar used for MP3/FLAC/OGG encoding is kept next to the final export; when **Keep MIDI stem files** is enabled, generated MIDI sidecars/stems are kept. Preview/temp renders, including enhanced AudioClip previews, still clean themselves under `workspace/temp`.
 
 ### Usability And Project Safety
 
-- Helper bubbles for in-app guidance.
+- Helper bubbles for in-app guidance, including Punch and Take Review, MIDI parameter editors, preview controls, audio devices, and plugin settings.
 - Plain key/value settings file that can be inspected by hand.
 - Settings save behavior separates explicit full settings saves from narrow one-key acknowledgements.
 - Dirty-state prompts so unapplied editor changes are not silently discarded. AudioClip Editor close prompts apply only to pending source-trim edits, not arrangement tracks already rendered with Render To Track.
@@ -122,11 +161,12 @@ Render Settings retention applies consistently to non-WAV exports too. When **Ke
 3. Click **Apply Project Defaults** before importing or adding new MIDI tracks.
 4. Import MusicXML, MXL, MIDI, audio, or open an existing `.mwproj` project.
 5. Organize tracks and sequences.
-6. Edit notes in the main UI or Piano Roll.
-7. Apply per-track instrument changes where needed.
-8. Preview the track, sequence, Piano Roll, or full project.
-9. Save the `.mwproj` project.
-10. Render final audio or MIDI output.
+6. Edit notes in the main UI or Piano Roll; use the MIDI event lanes for expression, program changes, or parameter data.
+7. If recording, choose an input device, arm a MIDI track, and optionally enable Count-In, Punch, Loop Record, or Take Review.
+8. Apply per-track instrument changes where needed.
+9. Preview the track, sequence, Piano Roll, or full project.
+10. Save the `.mwproj` project; review or commit recorded takes as appropriate.
+11. Render final audio or MIDI output.
 
 Project Defaults affect future imported or newly added MIDI tracks. Existing track assignments are changed only through per-track controls or Piano Roll track settings.
 
@@ -145,6 +185,7 @@ PoorMansStudio/
     clap/
     clap_host_helper/
     gui/
+    midi/
   workspace/
     docs/
     exports/
@@ -224,7 +265,7 @@ cmake_minimum_required(VERSION 3.24)
 set(CMAKE_CXX_STANDARD 20)
 ```
 
-JUCE's own CMake support requires CMake 3.22 or newer, but this project requires 3.24 or newer. The current development setup is using JUCE 8.0.14 and CMake 4.4.0.
+JUCE's own CMake support requires CMake 3.22 or newer; this project requires 3.24 or newer. A JUCE 8 source tree and a C++20-capable Windows toolchain are recommended.
 
 ## Visual Studio Community Setup
 
@@ -363,6 +404,8 @@ Open **Developer PowerShell for Visual Studio** or **x64 Native Tools Command Pr
 
 The easiest build path is the included PowerShell wrapper. It runs CMake configure/build, times the build, checks common inputs, and prints a clean summary at the end.
 
+The standard build produces the Windows application and its VST3 and CLAP host helpers.
+
 ```powershell
 .\Build-PoorMansStudio.ps1
 ```
@@ -372,14 +415,12 @@ Example summary:
 ```text
 Poor Man's Studio Build Summary
 --------------------------------
-Version:        0.66.5
+Version:        (current application version)
 Configuration:  Release
-Generator:      Visual Studio 18 2026
+Generator:      (available Visual Studio generator)
 Platform:       x64
 Parallel Jobs:  16
-Started:        2026-07-19 11:05:39
-Finished:       2026-07-19 11:10:13
-Elapsed:        4 min 33 sec
+Elapsed:        (your build time)
 Result:         SUCCESS
 Output:         C:\Dev\PoorMansStudio\workspace\program\Poor Man's Studio.exe
 VST Host:       C:\Dev\PoorMansStudio\workspace\vst_host\PoorMansStudioVstHost.exe
@@ -445,12 +486,12 @@ cmake --build builds --config Debug
 Use this when changing JUCE versions, CMake versions, or Visual Studio toolchains:
 
 ```powershell
-rmdir /s /q builds
+Remove-Item -Recurse -Force .\builds
 cmake -S . -B builds -A x64
 cmake --build builds --config Release
 ```
 
-The post-build step copies the built executable to:
+The post-build step copies the built application executable to:
 
 ```text
 workspace/program/
@@ -464,7 +505,7 @@ Run the app from the built output or from:
 workspace/program/
 ```
 
-Keep the `workspace` folder beside the source/app layout unless you intentionally configure paths elsewhere. The app expects the workspace folders for docs, settings, projects, tools, and libraries.
+Keep the `workspace` folder beside the source/app layout unless you intentionally configure paths elsewhere. The app expects the workspace folders for docs, settings, projects, supported rendering utilities, and libraries.
 
 ## External Runtime Tool Setup
 
@@ -659,7 +700,7 @@ Processing order is always:
 source track -> VST Effect 1 -> VST Effect 2 -> preview/export
 ```
 
-Unassigned, disabled, or bypassed slots are skipped. Open Slot 1/2 is unavailable unless that slot has an assigned plugin and its Enable checkbox is checked. If both slots are enabled and assigned, slot 2 receives the output from slot 1. The old single-effect project format is read as slot 1 for compatibility.
+Unassigned, disabled, or bypassed slots are skipped. Open Slot 1/2 is unavailable unless that slot has an assigned plugin and its Enable checkbox is checked. If both slots are enabled and assigned, slot 2 receives the output from slot 1. Projects saved with a single effect slot can load that slot as Effect Slot 1 for compatibility.
 
 Use **Apply Track Settings** as the clear commit point for track-level effect choices: slot assignments, Enable, Bypass, mute/solo, volume, and other track controls. Use **Apply Changes** inside a plugin editor only after changing plugin parameters; that editor button saves the plugin state for the owning track and slot. Use **Default** when you want the same VST3 or CLAP instrument/effect assignment recreated at its new-instance state without removing the track or effect slot. Default discards unapplied editor changes and the applied state after confirmation, but preserves plugin identity, slot order, Enable/Bypass, and host snapshots.
 
@@ -691,7 +732,7 @@ The **Track Live Effects** checkbox controls monitoring only. When checked, the 
 
 ### VST Editor Host Windows
 
-Track-owned VST Instrument and VST Effect editor windows enforce a minimum host-window size while remaining resizable from the window corner. Very small plugin editors may leave extra empty host-window space, but the editor toolbar under the title bar keeps **Apply Changes** and **Default** usable instead of crowding them into the title bar. VST effect toolbars use compact target wording such as `Track #1 - S1 - Reverb`; VST instrument custom title bars include the owning track, for example `Track: #1 - Lead Piano | Instrument | Plugin: Dexed`. Status feedback stays in tooltips/logs instead of a trailing status text label. The **Window** menu also includes side submenus for **VST Instrument** and **VST Effect** whenever those editor windows are open, so you can bring a specific track/slot editor to the front like the Piano Roll window list. When changing a MIDI track to a scanned VST3 instrument, **Choose scanned VST3 plugin** now opens a clear chooser dialog instead of a tiny follow-up popup.
+Track-owned VST Instrument and VST Effect editor windows enforce a minimum host-window size while remaining resizable from the window corner. Very small plugin editors may leave extra empty host-window space, but the editor toolbar under the title bar keeps **Apply Changes** and **Default** usable instead of crowding them into the title bar. VST effect toolbars use compact target wording such as `Track #1 - S1 - Reverb`; VST instrument custom title bars include the owning track, for example `Track: #1 - Lead Piano | Instrument | Plugin: Dexed`. Status feedback stays in tooltips/logs instead of a trailing status text label. The **Window** menu also includes side submenus for **VST Instrument** and **VST Effect** whenever those editor windows are open, so you can bring a specific track/slot editor to the front like the Piano Roll window list. When changing a MIDI track to a scanned VST3 instrument, **Choose scanned VST3 plugin** opens a chooser dialog for selecting the instrument.
 
 The **Default** button asks for confirmation, clears only the owning instrument or effect slot's applied plugin state, closes the old editor safely, and opens a fresh instance of the same VST3 or CLAP plugin. Track identity, plugin assignment, effect-slot position, Enable/Bypass state, and saved Snapshot files are preserved. The editor toolbar also includes **Snapshot** slots. Each VST instrument and VST effect editor has five host-side snapshot slots with **Load**, **Save**, **Clear Current**, and **Clear All** buttons. Clear actions ask for confirmation before deleting snapshot files. Snapshots save the plugin state blob for the exact plugin identity and editor role outside the project under `workspace/vst3/snapshots`, so a favorite instrument or effect setting can be reused on another track or project using the same plugin. Snapshot loading is blocked when the saved snapshot does not match the current plugin/role.
 

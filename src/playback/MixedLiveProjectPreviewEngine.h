@@ -2,6 +2,9 @@
 
 #include "audio/ApplicationAudioService.h"
 #include "midi/MidiRecordingMetronome.h"
+#include "playback/SampleAccurateLoopCoordinator.h"
+#include "playback/LoopWrapAcknowledgement.h"
+#include "midi/MidiLoopCaptureBridge.h"
 
 #include "clap/ClapLiveDirectPreviewEngine.h"
 #include "vst/VstLiveDirectPreviewEngine.h"
@@ -14,6 +17,17 @@
 
 namespace mw::playback
 {
+    struct MixedLiveProjectLoopConfig
+    {
+        bool enabled = false;
+        int tempoBpm = 120;
+        std::int64_t ticksPerQuarterNote = 960;
+        std::int64_t playbackStartTick = 0;
+        std::int64_t loopStartTick = 0;
+        std::int64_t loopEndTick = 0;
+        std::shared_ptr<mw::midi::MidiLoopCaptureFrameClock> captureClock;
+    };
+
     struct MixedLiveProjectStartResult
     {
         bool started = false;
@@ -37,6 +51,8 @@ namespace mw::playback
         int stopFlushSucceeded = 0;
         int stopFlushSkippedBusy = 0;
         int clippedSamples = 0;
+        bool sampleAccurateLoopActive = false;
+        std::uint64_t loopWrapCount = 0;
         std::int64_t currentSample = 0;
         std::int64_t totalSamples = 0;
         juce::String message;
@@ -71,6 +87,8 @@ namespace mw::playback
         int stopFlushSucceeded = 0;
         int stopFlushSkippedBusy = 0;
         int clippedSamples = 0;
+        bool sampleAccurateLoopActive = false;
+        std::uint64_t loopWrapCount = 0;
         std::int64_t currentSample = 0;
         std::int64_t totalSamples = 0;
         float peak = 0.0f;
@@ -105,6 +123,8 @@ namespace mw::playback
         int stopFlushSucceeded = 0;
         int stopFlushSkippedBusy = 0;
         int clippedSamples = 0;
+        bool sampleAccurateLoopActive = false;
+        std::uint64_t loopWrapCount = 0;
         std::int64_t currentSample = 0;
         std::int64_t totalSamples = 0;
         float peak = 0.0f;
@@ -128,9 +148,14 @@ namespace mw::playback
             std::vector<mw::clap::ClapLiveDirectPreviewAudioSourceRequest> audioSources,
             int outputChannelCount = 2,
             mw::midi::MidiRecordingMetronomeConfig recordingMetronome = {},
-            double recordingMetronomeProjectStartSeconds = 0.0);
+            double recordingMetronomeProjectStartSeconds = 0.0,
+            MixedLiveProjectLoopConfig loopConfig = {});
 
         void setMidiRecordingMetronomeActive(bool active) noexcept;
+        // Control-thread readout; a stale or overrun notice must never be used
+        // to advance a recording pass. This does not itself enable loop recording.
+        LoopWrapPollResult pollLoopWrapAcknowledgement(
+            std::uint64_t& consumedSerial, LoopWrapAcknowledgement& notice) const noexcept;
         MixedLiveProjectStopSummary stop();
         MixedLiveProjectStatus status() const;
         bool isActive() const noexcept;

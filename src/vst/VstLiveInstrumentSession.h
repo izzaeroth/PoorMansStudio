@@ -53,6 +53,11 @@ namespace mw::vst
                           juce::MidiBuffer& midi,
                           std::string& errorMessage) noexcept;
 
+        // Realtime callback entry: returns a status only; no diagnostic strings
+        // are allocated or formatted on a plugin processing failure.
+        bool processBlockRealtime(juce::AudioBuffer<float>& audio,
+                                  juce::MidiBuffer& midi) noexcept;
+
     private:
         struct Impl;
         std::unique_ptr<Impl> impl_;

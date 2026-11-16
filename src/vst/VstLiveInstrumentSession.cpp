@@ -170,6 +170,20 @@ namespace mw::vst
         return false;
     }
 
+    bool VstLiveInstrumentSession::processBlockRealtime(juce::AudioBuffer<float>& audio,
+                                                       juce::MidiBuffer& midi) noexcept
+    {
+        if (!isOpen() || audio.getNumChannels() <= 0 || audio.getNumSamples() <= 0
+            || audio.getNumChannels() < impl_->info.reportedOutputChannels)
+            return false;
+        try
+        {
+            impl_->instance->processBlock(audio, midi);
+            return true;
+        }
+        catch (...) { return false; }
+    }
+
     bool VstLiveInstrumentSession::processBlock(juce::AudioBuffer<float>& audio,
                                                 juce::MidiBuffer& midi,
                                                 std::string& errorMessage) noexcept

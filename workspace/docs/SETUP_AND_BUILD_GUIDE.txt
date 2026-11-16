@@ -285,7 +285,7 @@ Scan the folder containing .clap plugins.
 Confirm plugins appear as instruments or effects.
 Assign a CLAP Instrument to a MIDI track or assign CLAP Effect entries to Effect Slot 1/2.
 Use Preview Track or Preview Project to test guarded live CLAP playback. Compatible CLAP and VST3 tracks can share the live project mixer; unsupported, cross-backend, latency-reporting, or unsafe routes use prepared or rendered fallback.
-Open CLAP Settings to check Plugin Graphics Adapter, Max Open CLAP Windows, Safe CLAP Plugin UI Mode, and Refresh Adapter List.
+Open CLAP Settings to check Plugin Graphics Adapter, Max Open CLAP Windows, Safe CLAP Plugin UI Mode, and Refresh Adapter List. VST3 and CLAP editor-window limits are independent and each accepts values from 1 through 16.
 
 15. Testing VST Instruments
 
@@ -294,6 +294,8 @@ Basic instrument test:
 Create or select a MIDI/instrument track.
 Choose a scanned VST3 instrument.
 Open the instrument editor.
+Change a visible parameter and click Apply Changes.
+Click Default, confirm the warning, and verify the same track/plugin editor reopens at its new-instance state without deleting Snapshot files.
 Add MIDI notes in Piano Roll.
 Preview playback.
 Render/export to confirm the instrument is included.
@@ -310,6 +312,7 @@ Tick Enable for Slot 1.
 Click Open Slot 1.
 Adjust plugin settings.
 Click Apply Changes in the plugin editor.
+Click Default, confirm the warning, and verify the same slot/plugin reopens at its new-instance state while Enable, Bypass, slot order, and Snapshot files remain unchanged.
 Click Apply Track Settings in the main window.
 Preview or export.
 

@@ -1,5 +1,6 @@
 #include "vst/VstLiveDirectPreviewEngine.h"
 #include "midi/LiveMidiNoteQueue.h"
+#include "playback/RealtimeAudioSafety.h"
 
 #include <algorithm>
 #include <array>
@@ -23,6 +24,7 @@ namespace mw::vst
         constexpr int kMaximumQueuedLiveMidiEventsPerBlock = 128;
         constexpr int kMaximumPanicNoteOffEvents = 16 * 128;
         constexpr int kMaximumLiveMidiEventsPerBlock = kMaximumQueuedLiveMidiEventsPerBlock + kMaximumPanicNoteOffEvents;
+        constexpr std::size_t kMaximumCallbackMidiEvents = 4096;
 
         int sanitizeOutputChannelCount(int value)
         {
@@ -78,6 +80,7 @@ namespace mw::vst
             outputPeak.store(0.0f);
             consecutiveBusyBlocks = 0;
             failed.store(false);
+            callbackFault.reset();
             finished.store(!prepared);
             {
                 const juce::ScopedLock lock(messageLock);
@@ -150,7 +153,10 @@ namespace mw::vst
         float getPeak() const noexcept { return outputPeak.load(); }
         juce::String getLastMessage() const
         {
-            const juce::ScopedLock lock(messageLock);
+            const auto fault = callbackFault.read();
+            if (fault != mw::playback::DirectPreviewFault::None)
+                return juce::String(mw::playback::directPreviewFaultText(fault));
+            const juce::ScopedLock lock(messageLock); // Preparation/stop text only.
             return lastMessage;
         }
 
@@ -280,6 +286,7 @@ namespace mw::vst
                                   true,
                                   false);
             processBuffer.clear();
+            midi.ensureSize(kMaximumCallbackMidiEvents * 16u); // Before any audio callback.
             clearActiveNotes();
             sampleRate.store(deviceSampleRate);
             finished.store(!prepared);
@@ -314,22 +321,36 @@ namespace mw::vst
                     juce::FloatVectorOperations::clear(outputChannelData[channel], numSamples);
         }
 
-        bool processEffects(std::string& errorMessage)
+        void failRealtime(mw::playback::DirectPreviewFault code) noexcept
+        {
+            callbackFault.publish(code);
+            failed.store(true);
+            finished.store(true);
+        }
+
+        bool processEffects()
         {
             for (auto& effect : request.effects)
             {
                 if (effect.session == nullptr || effect.sessionProcessMutex == nullptr)
-                    continue;
+                {
+                    callbackFault.publish(mw::playback::DirectPreviewFault::VstEffectMissing);
+                    return false;
+                }
 
                 std::unique_lock<std::mutex> effectLock(*effect.sessionProcessMutex, std::try_to_lock);
                 if (!effectLock.owns_lock())
                 {
                     skippedEffectBusyBlocks.fetch_add(1);
-                    continue;
+                    callbackFault.publish(mw::playback::DirectPreviewFault::VstEffectBusy);
+                    return false;
                 }
 
-                if (!effect.session->processBlock(processBuffer, errorMessage))
+                if (!effect.session->processBlockRealtime(processBuffer))
+                {
+                    callbackFault.publish(mw::playback::DirectPreviewFault::VstEffect);
                     return false;
+                }
 
                 processedEffectBlocks.fetch_add(1);
             }
@@ -350,10 +371,7 @@ namespace mw::vst
 
             if (numSamples > kMaximumBlockSize || numSamples != configuredBlockSize)
             {
-                failed.store(true);
-                finished.store(true);
-                const juce::ScopedLock lock(messageLock);
-                lastMessage = "VST3 live preview received an unexpected audio-device block size.";
+                failRealtime(mw::playback::DirectPreviewFault::VstInvalidBlock);
                 return;
             }
 
@@ -364,10 +382,7 @@ namespace mw::vst
                 ++consecutiveBusyBlocks;
                 if (consecutiveBusyBlocks >= kMaximumConsecutiveBusyBlocks)
                 {
-                    failed.store(true);
-                    finished.store(true);
-                    const juce::ScopedLock lock(messageLock);
-                    lastMessage = "VST3 live preview stopped because the instrument stayed busy for too many consecutive audio blocks.";
+                    failRealtime(mw::playback::DirectPreviewFault::VstBusy);
                 }
                 return;
             }
@@ -479,10 +494,17 @@ namespace mw::vst
             const auto& blockRequest = *blockRequestPointer;
             if (blockRequest.frameCount > numSamples)
             {
-                failed.store(true);
-                finished.store(true);
-                const juce::ScopedLock lock(messageLock);
-                lastMessage = "VST3 live scheduler block size exceeded the audio-device callback block.";
+                failRealtime(mw::playback::DirectPreviewFault::VstScheduler);
+                return;
+            }
+
+            const auto midiEventCount = blockRequest.controllerEvents.size()
+                + blockRequest.programChangeEvents.size() + blockRequest.pitchBendEvents.size()
+                + blockRequest.channelPressureEvents.size() + blockRequest.noteEvents.size()
+                + blockRequest.polyPressureEvents.size() + (panicThisBlock ? 16u : 0u);
+            if (!mw::playback::realtimeCallbackEventCountAllows(midiEventCount, kMaximumCallbackMidiEvents))
+            {
+                failRealtime(mw::playback::DirectPreviewFault::VstScheduler);
                 return;
             }
 
@@ -560,13 +582,9 @@ namespace mw::vst
                 midi.addEvent(juce::MidiMessage::aftertouchChange(channel, key, pressure), offset);
             }
 
-            std::string processError;
-            if (!request.session->processBlock(processBuffer, midi, processError))
+            if (!request.session->processBlockRealtime(processBuffer, midi))
             {
-                failed.store(true);
-                finished.store(true);
-                const juce::ScopedLock lock(messageLock);
-                lastMessage = juce::String(processError);
+                failRealtime(mw::playback::DirectPreviewFault::VstInstrument);
                 return;
             }
 
@@ -578,12 +596,9 @@ namespace mw::vst
             }
             submittedEvents.fetch_add(static_cast<int>(blockRequest.noteEvents.size() + blockRequest.controllerEvents.size() + blockRequest.programChangeEvents.size() + blockRequest.pitchBendEvents.size() + blockRequest.channelPressureEvents.size() + blockRequest.polyPressureEvents.size()));
 
-            if (!processEffects(processError))
+            if (!processEffects())
             {
-                failed.store(true);
-                finished.store(true);
-                const juce::ScopedLock lock(messageLock);
-                lastMessage = juce::String(processError);
+                failRealtime(mw::playback::DirectPreviewFault::VstEffect);
                 return;
             }
 
@@ -656,6 +671,7 @@ namespace mw::vst
         std::atomic<std::int64_t> currentSample { 0 };
         std::atomic<std::int64_t> totalSamples { 0 };
         std::atomic<float> outputPeak { 0.0f };
+        mw::playback::DirectPreviewFaultLatch callbackFault;
         mutable juce::CriticalSection messageLock;
         juce::String lastMessage;
     };

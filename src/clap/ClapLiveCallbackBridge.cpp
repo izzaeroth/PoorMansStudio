@@ -122,9 +122,15 @@ namespace mw::clap
         return scheduler_.isFinished();
     }
 
-    const ClapLiveProcessRequest& ClapLiveCallbackBridge::nextRequest()
+    void ClapLiveCallbackBridge::rewind() noexcept
     {
-        scheduler_.nextBlockInto(reusableRequest_);
+        scheduler_.rewind();
+        state_.currentSample = scheduler_.currentSample();
+    }
+
+    const ClapLiveProcessRequest& ClapLiveCallbackBridge::nextRequest(int maximumFrames)
+    {
+        scheduler_.nextFramesInto(reusableRequest_, maximumFrames);
         if (reusableRequest_.frameCount > 0)
         {
             ++state_.emittedBlocks;
@@ -132,6 +138,11 @@ namespace mw::clap
             state_.currentSample = scheduler_.currentSample();
         }
         return reusableRequest_;
+    }
+
+    const ClapLiveProcessRequest& ClapLiveCallbackBridge::nextRequest()
+    {
+        return nextRequest(scheduler_.blockSize());
     }
 
     const ClapLiveCallbackBridgeState& ClapLiveCallbackBridge::state() const

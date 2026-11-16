@@ -1,5 +1,7 @@
 #include "gui/MainComponent.h"
 #include "gui/AudioClipEditorComponent.h"
+#include "gui/TransportHelperText.h"
+#include "gui/AdditionalHelperText.h"
 
 #include "app/AppPaths.h"
 #include "app/UserPreferences.h"
@@ -30,7 +32,6 @@
 #include "midi/MidiRecordingLoop.h"
 #include "midi/MidiPendingTakeReviewManager.h"
 #include "serialization/ProjectSerializer.h"
-#include "simulation/SimulationRegressionSuite.h"
 #include "clap/ClapPluginScanner.h"
 #include "clap/ClapEffectEditorHost.h"
 #include "clap/ClapInstrumentHost.h"
@@ -1841,6 +1842,7 @@ namespace
                     onPreferredGpuChanged(gpuIds[static_cast<std::size_t>(selectedId - 1)]);
             };
             addAndMakeVisible(preferredGpuCombo);
+            preferredGpuCombo.setTooltip(mw::gui::pluginGraphicsAdapterHelp);
 
             maxOpenPluginWindowsLabel.setText(maxOpenPluginWindowsLabelText, juce::dontSendNotification);
             maxOpenPluginWindowsLabel.setJustificationType(juce::Justification::centredLeft);
@@ -1867,6 +1869,7 @@ namespace
                     onMaxOpenPluginWindowsChanged(maxOpenPluginWindows);
             };
             addAndMakeVisible(maxOpenPluginWindowsCombo);
+            maxOpenPluginWindowsCombo.setTooltip(mw::gui::pluginEditorWindowLimitHelp);
 
             safeModeToggle.setButtonText(safeModeText);
             safeModeToggle.setToggleState(safeMode, juce::dontSendNotification);
@@ -1897,6 +1900,7 @@ namespace
             }
 
             refreshButton.setButtonText("Refresh Adapter List");
+            refreshButton.setTooltip(mw::gui::pluginRefreshAdapterHelp);
             refreshButton.onClick = [this]
             {
                 if (onRefreshRequested)
@@ -4160,6 +4164,7 @@ namespace
                 paletteCombo.addItem("Color " + juce::String(i + 1), i + 1);
 
             paletteCombo.setSelectedId(1, juce::dontSendNotification);
+            paletteCombo.setTooltip("Choose a color palette for this view. Changing the palette affects presentation, not MIDI event timing or pitch.");
 
             selector.setCurrentColour(readableSequenceColour(initialColour));
             selector.addChangeListener(this);
@@ -4325,6 +4330,7 @@ namespace
 
             okButton.setButtonText("OK");
             createNewButton.setButtonText("Create Blank Seq");
+            createNewButton.setTooltip("Create an empty sequence and select it in this picker. Press OK to apply the selection to the project.");
             cancelButton.setButtonText("Cancel");
 
             viewport.setViewedComponent(&rows, false);
@@ -4598,6 +4604,17 @@ namespace
             refreshButton.setButtonText("Refresh Devices");
             applyButton.setButtonText("Apply / Save");
             cancelButton.setButtonText("Cancel");
+
+            driverTypeCombo.setTooltip(mw::gui::audioDriverHelp);
+            outputDeviceCombo.setTooltip(mw::gui::audioOutputDeviceHelp);
+            inputDeviceCombo.setTooltip(mw::gui::audioInputDeviceHelp);
+            sampleRateCombo.setTooltip(mw::gui::audioSampleRateHelp);
+            bufferSizeCombo.setTooltip(mw::gui::audioBufferSizeHelp);
+            inputModeCombo.setTooltip(mw::gui::audioInputModeHelp);
+            inputChannelCombo.setTooltip(mw::gui::audioInputAssignmentHelp);
+            refreshButton.setTooltip(mw::gui::audioRefreshDevicesHelp);
+            applyButton.setTooltip(mw::gui::audioApplyHelp);
+            cancelButton.setTooltip(mw::gui::audioCancelHelp);
 
             statusLabel.setJustificationType(juce::Justification::topLeft);
             statusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
@@ -4983,7 +5000,7 @@ namespace
             titleLabel.setColour(juce::Label::textColourId, juce::Colours::white);
 
             instructionLabel.setText(
-                "Choose one physical MIDI input. Monitor routes Note On/Off, Control Change, Pitch Bend, Program Change, Channel Pressure, and Poly Pressure to the existing VST3/CLAP instrument path. Arm Selected fixes the recording target; Record MIDI can capture notes plus opt-in CC, Pitch Bend, Program Change, Channel Pressure, and Poly Pressure at exact project ticks.",
+                "Choose one physical MIDI input. Monitor routes note and expression messages to the existing VST3/CLAP instrument path. Arm Selected fixes the recording target; Record MIDI can capture notes and opt-in Controllers, Pitch Bend, Program Change, Channel Pressure, Poly Pressure, and complete 14-bit CC / RPN / NRPN transactions at transport ticks.",
                 juce::dontSendNotification);
             instructionLabel.setJustificationType(juce::Justification::topLeft);
             instructionLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
@@ -5015,7 +5032,9 @@ namespace
             for (int channel = 1; channel <= 16; ++channel)
                 channelCombo.addItem("Channel " + juce::String(channel), channel + 1);
             channelCombo.setSelectedId(juce::jlimit(1, 17, initialSelection.channel + 1), juce::dontSendNotification);
+            channelCombo.setTooltip(mw::gui::midiInputChannelHelp);
 
+            countInCombo.setTooltip(mw::gui::midiRecordCountInHelp);
             countInCombo.addItem("Off", 1);
             countInCombo.addItem("1 Bar", 2);
             countInCombo.addItem("2 Bars", 3);
@@ -5026,6 +5045,7 @@ namespace
                     onCountInChanged(getCountInBars());
             };
 
+            quantizeCombo.setTooltip(mw::gui::midiRecordQuantizeHelp);
             quantizeCombo.addItem("Off", 1);
             quantizeCombo.addItem("1/4", 2);
             quantizeCombo.addItem("1/8", 3);
@@ -5047,6 +5067,7 @@ namespace
                     onQuantizeChanged(getQuantizeDivision());
             };
 
+            metronomeCombo.setTooltip(mw::gui::midiRecordMetronomeHelp);
             metronomeCombo.addItem("Off", 1);
             metronomeCombo.addItem("On", 2);
             metronomeCombo.setSelectedId(initialMetronomeEnabledIn ? 2 : 1, juce::dontSendNotification);
@@ -5116,6 +5137,7 @@ namespace
                     onRecordAdvancedParametersChanged(recordAdvancedParametersCombo.getSelectedId() == 2);
             };
 
+            punchCombo.setTooltip(mw::gui::midiRecordPunchHelp);
             punchCombo.addItem("Off", 1);
             punchCombo.addItem("On", 2);
             punchCombo.setSelectedId(initialPunchEnabledIn ? 2 : 1, juce::dontSendNotification);
@@ -5129,11 +5151,15 @@ namespace
             setPunchInButton.setButtonText("Set In");
             setPunchOutButton.setButtonText("Set Out");
             clearPunchButton.setButtonText("Clear");
+            setPunchInButton.setTooltip(mw::gui::midiSetPunchInHelp);
+            setPunchOutButton.setTooltip(mw::gui::midiSetPunchOutHelp);
+            clearPunchButton.setTooltip(mw::gui::midiClearPunchHelp);
             setPunchInButton.onClick = [this] { if (onSetPunchIn) onSetPunchIn(); };
             setPunchOutButton.onClick = [this] { if (onSetPunchOut) onSetPunchOut(); };
             clearPunchButton.onClick = [this] { if (onClearPunch) onClearPunch(); };
             punchEnabled = initialPunchEnabledIn;
 
+            loopCombo.setTooltip(mw::gui::midiRecordLoopHelp);
             loopCombo.addItem("Off", 1);
             loopCombo.addItem("On", 2);
             loopCombo.setSelectedId(initialLoopEnabledIn ? 2 : 1, juce::dontSendNotification);
@@ -5286,15 +5312,25 @@ namespace
             refreshButton.setButtonText("Refresh Devices");
             applyButton.setButtonText("Apply / Save");
             startButton.setButtonText("Start Monitor");
+            startButton.setTooltip(mw::gui::midiRecordStartMonitorHelp);
             panicButton.setButtonText("Panic");
+            panicButton.setTooltip(mw::gui::midiRecordPanicHelp);
             stopButton.setButtonText("Stop Monitor");
+            stopButton.setTooltip(mw::gui::midiStopMonitorHelp);
             armButton.setButtonText("Arm Selected");
+            armButton.setTooltip(mw::gui::midiRecordArmHelp);
             recordButton.setButtonText("Record MIDI");
-            recordButton.setTooltip("With Loop Record On and a valid In/Out region, this can also run an empty-pass backing-wrap diagnostic when no MIDI input is open; stopping that diagnostic does not change project notes or Undo history.");
+            recordButton.setTooltip(mw::gui::midiRecordStartHelp);
             stopRecordingButton.setButtonText("Stop Recording");
+            stopRecordingButton.setTooltip(mw::gui::midiRecordStopHelp);
             undoTakeButton.setButtonText("Undo Take");
             redoTakeButton.setButtonText("Redo Take");
+            undoTakeButton.setTooltip(mw::gui::midiUndoTakeHelp);
+            redoTakeButton.setTooltip(mw::gui::midiRedoTakeHelp);
             closeButton.setButtonText("Close");
+            deviceCombo.setTooltip(mw::gui::midiInputDeviceHelp);
+            refreshButton.setTooltip(mw::gui::midiRefreshDevicesHelp);
+            applyButton.setTooltip(mw::gui::midiApplyInputHelp);
 
             statusLabel.setJustificationType(juce::Justification::topLeft);
             statusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
@@ -6233,6 +6269,7 @@ namespace
             thoughtsEditor.setScrollbarsShown(true);
             thoughtsEditor.setTextToShowWhenEmpty("Add thoughts about what this sequence is doing...", juce::Colours::grey);
             thoughtsEditor.setText(initialThoughts, juce::dontSendNotification);
+            thoughtsEditor.setTooltip("Enter notes about this sequence. Apply or save this dialog to persist the text; editing it does not change MIDI notes.");
             thoughtsEditor.onTextChange = [this] { updateDirtyLabel(); };
 
             okButton.setButtonText("OK");
@@ -7771,6 +7808,10 @@ juce::Label helpLabel;
             previewButton.setButtonText("Preview");
             playPauseButton.setButtonText("Play");
             stopButton.setButtonText("Stop");
+            previewButton.setTooltip(mw::gui::previewGenerateHelp);
+            playPauseButton.setTooltip(mw::gui::previewPlayPauseHelp);
+            stopButton.setTooltip(mw::gui::previewStopHelp);
+            closeButton.setTooltip(mw::gui::previewCloseHelp);
             playPauseButton.setEnabled(false);
             stopButton.setEnabled(false);
 
@@ -10019,12 +10060,14 @@ namespace mw::gui
 
                 listText.setMultiLine(true);
                 listText.setReadOnly(true);
+                listText.setTooltip("Read-only Take Review library listing. Use the selection controls to inspect or manage a saved active or archived review.");
                 listText.setScrollbarsShown(true);
                 listText.setFont(juce::FontOptions(14.0f));
                 listText.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff181818));
 
                 selectedDetails.setMultiLine(true);
                 selectedDetails.setReadOnly(true);
+                selectedDetails.setTooltip("Read-only details of the selected saved Take Review, including its identity and review state.");
                 selectedDetails.setScrollbarsShown(false);
                 selectedDetails.setFont(juce::FontOptions(14.0f));
                 selectedDetails.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff202020));
@@ -10501,7 +10544,6 @@ namespace mw::gui
 
             menuUserGuide = 1501,
             menuSetupGuide,
-            menuRunSimulationRegression,
             menuAbout
         };
     }
@@ -10920,7 +10962,6 @@ namespace mw::gui
             case 8:
                 menu.addItem(menuUserGuide, "Open User Guide PDF");
                 menu.addItem(menuSetupGuide, "Show Setup / Build Guide File");
-                menu.addItem(menuRunSimulationRegression, "Run Simulation / Regression Tests...");
                 menu.addSeparator();
                 menu.addItem(menuToggleHelperBubbles, "Helper Bubbles", true, helperBubblesEnabled);
                 menu.addItem(menuTogglePluginCompatibilityWarnings, "Plugin Compatibility Warnings", true, pluginCompatibilityWarningsEnabled());
@@ -11067,7 +11108,6 @@ namespace mw::gui
             case menuAudioSettings: openAudioSettingsWindow(); break;
             case menuMidiInputSettings: openMidiInputSettingsWindow(); break;
             case menuPendingTakeReviews: openPendingTakeReviewsWindow(); break;
-            case menuRunSimulationRegression: runSimulationRegressionTests(); break;
             case menuCleanTemp: cleanTempFolder(); break;
             case menuChooseExportFolder: chooseExportFolder(); break;
 
@@ -11213,7 +11253,7 @@ namespace mw::gui
 
         midiInputCoordinator.setMessageCallback([this](const juce::MidiMessage& message)
         {
-            handleIncomingLiveMidiMessage(message);
+            receiveNativeMidiForCapture(message);
         });
         midiInputCoordinator.setDisconnectCallback([this](const juce::String& deviceName)
         {
@@ -12064,6 +12104,8 @@ namespace mw::gui
 
     MainComponent::~MainComponent()
     {
+        disarmCallbackMidiCapture();
+        midiCaptureAsyncDispatcher.cancel();
         stopLiveMidiMonitoring(false);
         midiInputCoordinator.setMessageCallback({});
         midiInputCoordinator.setDisconnectCallback({});
@@ -12597,6 +12639,7 @@ namespace mw::gui
                 addAndMakeVisible(searchLabel);
 
                 searchBox.setTextToShowWhenEmpty("name, vendor, path, category...", juce::Colours::grey);
+                searchBox.setTooltip("Filter VST3 plugin entries by name, vendor, file path or category. Search does not change plugin assignments.");
                 searchBox.setFont(juce::FontOptions(16.0f));
                 searchBox.onTextChange = [this] { rebuildLists(); rebuildDetails(); };
                 addAndMakeVisible(searchBox);
@@ -12687,6 +12730,7 @@ namespace mw::gui
                 addAndMakeVisible(rescanButton);
 
                 copyInfoButton.setButtonText("Copy Plugin Info");
+                copyInfoButton.setTooltip("Copy the selected plugin details to the clipboard for diagnostics or sharing.");
                 copyInfoButton.onClick = [this]
                 {
                     juce::SystemClipboard::copyTextToClipboard(details.getText());
@@ -13842,6 +13886,7 @@ namespace mw::gui
                 addAndMakeVisible(searchLabel);
 
                 searchBox.setTextToShowWhenEmpty("name, vendor, path, role...", juce::Colours::grey);
+                searchBox.setTooltip("Filter CLAP plugin entries by name, vendor, path or role. Search is view-only and does not alter project assignments.");
                 searchBox.setFont(juce::FontOptions(16.0f));
                 searchBox.onTextChange = [this] { rebuildLists(); rebuildDetails(); };
                 addAndMakeVisible(searchBox);
@@ -13928,6 +13973,7 @@ namespace mw::gui
                 addAndMakeVisible(rescanButton);
 
                 revealFolderButton.setButtonText("Open workspace\\clap");
+                revealFolderButton.setTooltip("Open the local CLAP workspace folder in the file manager. This does not modify plugin installations.");
                 revealFolderButton.onClick = [this]
                 {
                     if (onRevealWorkspaceFolderRequested)
@@ -13936,6 +13982,7 @@ namespace mw::gui
                 addAndMakeVisible(revealFolderButton);
 
                 copyInfoButton.setButtonText("Copy Plugin Info");
+                copyInfoButton.setTooltip("Copy the selected plugin details to the clipboard for diagnostics or sharing.");
                 copyInfoButton.onClick = [this]
                 {
                     juce::SystemClipboard::copyTextToClipboard(details.getText());
@@ -19171,13 +19218,40 @@ namespace mw::gui
             currentProject->getTempoBpm(),
             timeSignature.numerator,
             timeSignature.denominator);
+        mw::playback::MixedLiveProjectLoopConfig liveLoopConfig;
+        if (midiRecordingLoopEnabled
+            && (!midiRecordingPlaybackPending || midiRecordingLoopRunState.isActive()))
+        {
+            const auto loopRegion = currentMidiRecordingPunchRegion();
+            if (mw::midi::isValidMidiRecordingPunchRegion(loopRegion)
+                && previewStartTick <= loopRegion.inTick)
+            {
+                liveLoopConfig.enabled = true;
+                liveLoopConfig.tempoBpm = tempoBpm;
+                liveLoopConfig.ticksPerQuarterNote = mw::core::Project::ticksPerQuarterNote;
+                liveLoopConfig.playbackStartTick = previewStartTick;
+                liveLoopConfig.loopStartTick = loopRegion.inTick;
+                liveLoopConfig.loopEndTick = loopRegion.outTick;
+                if (midiRecordingLoopRunState.isActive() && midiRecordingPlaybackPending)
+                {
+                    midiLoopCaptureFrameClock->reset();
+                    liveLoopConfig.captureClock = midiLoopCaptureFrameClock;
+                    midiLoopCapturePlaybackStartTick = previewStartTick;
+                }
+            }
+            else if (mw::midi::isValidMidiRecordingPunchRegion(loopRegion))
+            {
+                logMessage("Project Preview Transport: sample-accurate callback loop is disabled because playback began after Loop In.");
+            }
+        }
         auto startResult = mixedLiveProjectPreviewEngine.start(
             clapLiveProjectTrackSessionManager.makeDirectPreviewRequests(),
             vstLiveProjectTrackSessionManager.makeDirectPreviewRequests(),
             std::move(audioSources),
             channelCount,
             recordingMetronome,
-            std::max(0.0, pendingPianoRollPreviewStartSeconds));
+            std::max(0.0, pendingPianoRollPreviewStartSeconds),
+            liveLoopConfig);
         if (!startResult.started)
         {
             const auto reason = startResult.errorMessage.isNotEmpty()
@@ -19255,6 +19329,8 @@ namespace mw::gui
             + ", total samples " + juce::String(static_cast<juce::int64>(startResult.totalSamples)) + ".");
         if (startResult.message.isNotEmpty())
             logMessage("Project Preview Transport: " + startResult.message);
+        if (startResult.sampleAccurateLoopActive)
+            logMessage("Project Preview Transport: Loop In/Out is owned by the audio callback for this preview run.");
 
         beginClapDirectPreviewCompletionPolling();
         return true;
@@ -25385,56 +25461,6 @@ void MainComponent::openAudioRecorderWindow()
             closeAudioSettingsWindow();
     }
 
-    void MainComponent::runSimulationRegressionTests()
-    {
-        const auto report = mw::simulation::runSimulationRegressionSuite();
-        const auto outputFolder = mw::app::AppPaths::workspaceFolder() / "simulation";
-        std::filesystem::path textPath;
-        std::filesystem::path jsonPath;
-        std::string writeError;
-        const bool wroteReports = mw::simulation::writeSimulationReports(
-            report, outputFolder, textPath, jsonPath, writeError);
-
-        std::vector<std::filesystem::path> artifactPaths;
-        std::string artifactError;
-        const bool wroteArtifacts = mw::simulation::writeSimulationArtifacts(
-            outputFolder, artifactPaths, artifactError);
-
-        juce::String summary = "Simulation / Regression: "
-            + juce::String(report.passedCount()) + " passed, "
-            + juce::String(report.failedCount()) + " failed, "
-            + juce::String(static_cast<int>(report.scenarios.size())) + " total.";
-
-        if (wroteReports)
-        {
-            summary += "\n\nResults:\n" + juce::String(textPath.string())
-                + "\n" + juce::String(jsonPath.string());
-        }
-        else
-        {
-            summary += "\n\nThe tests ran, but result files could not be written: "
-                + juce::String(writeError);
-        }
-
-        if (wroteArtifacts)
-            summary += "\n\nDeterministic WAV artifacts:\n"
-                + juce::String((outputFolder / "artifacts").string());
-        else
-            summary += "\n\nThe tests ran, but deterministic WAV artifacts could not be written: "
-                + juce::String(artifactError);
-
-        summary += "\n\nThis mode is deterministic and does not open physical audio/MIDI devices or third-party plugins.";
-        logMessage(summary.replaceCharacter('\n', ' '));
-
-        juce::AlertWindow::showMessageBoxAsync(
-            report.allPassed() && wroteReports && wroteArtifacts
-                ? juce::AlertWindow::InfoIcon
-                : juce::AlertWindow::WarningIcon,
-            "Simulation / Regression Tests",
-            summary,
-            "OK");
-    }
-
     void MainComponent::openAudioSettingsWindow()
     {
         if (audioSettingsWindow != nullptr)
@@ -27511,6 +27537,7 @@ void MainComponent::openAudioRecorderWindow()
 
         midiRecordingArmedTrackIndex = trackIndex;
         midiRecordingRequestedStartSeconds = config.startTimeSeconds;
+        armCallbackMidiCapture();
         midiRecordingPlaybackPending = false;
         midiRecordingOwnsProjectPlayback = true;
         midiRecordingRedoStack.clear();
@@ -27632,6 +27659,7 @@ void MainComponent::openAudioRecorderWindow()
             refreshMidiRecordingUi();
             return false;
         }
+        armCallbackMidiCapture();
 
         const auto timeSignature = currentProject->getTimeSignature();
         const auto metronomeConfig = mw::midi::makeMidiRecordingMetronomeConfig(
@@ -27692,6 +27720,8 @@ void MainComponent::openAudioRecorderWindow()
 
     void MainComponent::completeMidiRecordingPunchOut(std::uint64_t generation)
     {
+        if (midiLoopCaptureGeneration.load(std::memory_order_acquire) != 0)
+            return; // Audio callback owns Loop Out for this recording generation.
         if (!midiRecordingPunchRunState.matches(generation) || !midiRecordingPunchRunState.isActive())
             return;
 
@@ -27752,6 +27782,7 @@ void MainComponent::openAudioRecorderWindow()
 
     void MainComponent::clearMidiRecordingLoopSession(bool preserveTakeReview) noexcept
     {
+        disarmCallbackMidiCapture();
         midiRecordingLoopRunState.cancel();
         midiRecordingLoopWrapTransaction.cancel();
         if (!preserveTakeReview)
@@ -27780,7 +27811,8 @@ void MainComponent::openAudioRecorderWindow()
         midiRecordingLoopPendingWrapBackend.clear();
     }
 
-    bool MainComponent::completeMidiRecordingLoopWrap(std::uint64_t generation)
+    bool MainComponent::completeMidiRecordingLoopWrap(
+        std::uint64_t generation, const mw::playback::LoopWrapAcknowledgement* callbackNotice)
     {
         if (!currentProject
             || !midiRecordingLoopRunState.matches(generation)
@@ -27795,12 +27827,22 @@ void MainComponent::openAudioRecorderWindow()
             return false;
 
         const auto currentSeconds = currentMidiRecordingTransportSeconds();
-        const auto currentTick = mw::midi::projectTickForTransportSeconds(
-            currentSeconds, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+        const auto currentTick = callbackNotice != nullptr
+            ? region.outTick
+            : mw::midi::projectTickForTransportSeconds(
+                currentSeconds, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
         const int completedPass = midiRecordingLoopRunState.passNumber();
         if (!midiRecordingLoopWrapTransaction.begin(generation, completedPass, region, currentTick))
             return false;
-        if (!midiRecordingLoopRunState.claimWrap(generation, currentTick))
+        if (callbackNotice != nullptr)
+        {
+            if (!midiLoopCaptureHandoff.validate(*callbackNotice, midiRecordingLoopRunState, generation))
+            {
+                midiRecordingLoopWrapTransaction.cancel();
+                return false;
+            }
+        }
+        else if (!midiRecordingLoopRunState.claimWrap(generation, currentTick))
         {
             midiRecordingLoopWrapTransaction.cancel();
             return false;
@@ -27810,8 +27852,10 @@ void MainComponent::openAudioRecorderWindow()
             region.outTick, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
         const auto boundaryLatenessMs = std::max(0.0, (currentSeconds - outSeconds) * 1000.0);
         const auto wrapStartedMs = juce::Time::getMillisecondCounterHiRes();
-        const auto wrapBackend = midiRecordingFallbackTransportGeneration != 0
-            ? juce::String("rendered/MCI")
+        const auto wrapBackend = callbackNotice != nullptr
+            ? juce::String("callback")
+            : midiRecordingFallbackTransportGeneration != 0
+                ? juce::String("rendered/MCI")
             : ((vstLiveDirectPreviewEngine.status().active
                     || mixedLiveProjectPreviewEngine.isActive()
                     || clapLiveDirectPreviewEngine.status().active)
@@ -27891,6 +27935,40 @@ void MainComponent::openAudioRecorderWindow()
         if (clapLiveDirectPreviewProjectMode && mixedLiveProjectPreviewEngine.isActive())
             mixedLiveProjectPreviewEngine.requestLiveMidiPanic(midiRecordingArmedTrackId);
 
+        if (callbackNotice != nullptr)
+        {
+            // Only after stop()/Take Review retention may the validated notice
+            // advance the pass. All of this runs on the JUCE message thread.
+            if (!midiLoopCaptureHandoff.commit(*callbackNotice,
+                    midiRecordingLoopRunState, generation, region.outTick))
+            {
+                midiRecordingLoopWrapTransaction.cancel();
+                return false;
+            }
+            const auto inSeconds = mw::midi::midiRecordingProjectSecondsForTick(
+                region.inTick, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+            mw::midi::MidiRecordingConfig nextConfig;
+            nextConfig.tempoBpm = currentProject->getTempoBpm();
+            nextConfig.ticksPerQuarterNote = mw::core::Project::ticksPerQuarterNote;
+            nextConfig.startTick = region.inTick;
+            nextConfig.startTimeSeconds = inSeconds;
+            nextConfig.sustainDownMaskAtStart = midiRecordingLoopSustainDownMask;
+            nextConfig.recordControllers = midiRecordingRecordControllers;
+            nextConfig.recordPitchBend = midiRecordingRecordPitchBend;
+            nextConfig.recordProgramChange = midiRecordingRecordProgramChange;
+            nextConfig.recordChannelPressure = midiRecordingRecordChannelPressure;
+            nextConfig.recordPolyPressure = midiRecordingRecordPolyPressure;
+            nextConfig.recordAdvancedParameters = midiRecordingRecordAdvancedParameters;
+            if (!midiRecordingSession.start(nextConfig))
+            {
+                midiRecordingLoopWrapTransaction.cancel();
+                return false;
+            }
+            midiRecordingLoopWrapTransaction.cancel(); // No seek or restart stage.
+            midiLoopCaptureLastWrapFrame = callbackNotice->deviceFrame;
+            return true;
+        }
+
         if (!midiRecordingLoopWrapTransaction.markSeeking(generation, completedPass))
         {
             logMessage("MIDI Recording Loop: wrap transaction could not enter seek stage; committing completed passes and stopping.");
@@ -27916,12 +27994,9 @@ void MainComponent::openAudioRecorderWindow()
         midiRecordingPlaybackPending = true;
         midiRecordingOwnsProjectPlayback = true;
 
-        // Deliberate future seam: if native listening later proves sample-boundary loop
-        // continuity is required, keep MidiRecordingLoopWrapTransaction as the logical
-        // generation/pass contract and replace only this backend seek/restart step for
-        // compatible in-process mixed-live playback with an audio-callback boundary
-        // coordinator. Rendered/MCI fallback must keep a separately defined contract;
-        // do not call MCI/UI APIs from an audio callback or add another AudioDeviceManager.
+        // Rendered/MCI and unsupported native backends deliberately retain their
+        // old seek/restart contract. Callback-owned recording uses the notice path
+        // above and never enters this branch or calls UI/MCI from the audio thread.
         const auto seekStartedMs = juce::Time::getMillisecondCounterHiRes();
         const bool seekSucceeded = seekPianoRollPreviewToSeconds(inSeconds);
         const auto seekElapsedMs = std::max(0.0,
@@ -28060,6 +28135,26 @@ void MainComponent::openAudioRecorderWindow()
 
     void MainComponent::stopMidiRecording(bool commitNotes)
     {
+        // Resolve all already-rendered callback frames on the sole recording
+        // owner before disposing of the audio callback. Future/unacknowledged
+        // input cannot be silently assigned to a guessed final pass.
+        if (midiLoopCaptureGeneration.load(std::memory_order_acquire) != 0)
+        {
+            // Freeze ingress first. Without this fence, Stop could see an
+            // empty queue just before a MIDI callback appends a late event.
+            midiLoopCaptureIngressFence.seal();
+            while (!midiLoopCaptureIngressFence.quiescent())
+                std::this_thread::yield();
+            drainCallbackMidiCapture(true);
+            if (midiLoopCaptureGeneration.load(std::memory_order_acquire) == 0)
+                return; // The drain already handled a fail-closed stop.
+            if (!midiLoopCapturedMessages.empty() || !midiLoopCapturePendingWraps.empty())
+            {
+                failCallbackMidiCapture("unresolved device-frame input at Stop");
+                return;
+            }
+            disarmCallbackMidiCapture();
+        }
         if (midiRecordingLoopTakeReviewState.isReviewActive())
         {
             logMessage("MIDI Recording Take Review: resolve the pending review with Keep Selected, Keep All, Keep Comp, or Discard before starting/stopping another recording workflow.");
@@ -29801,7 +29896,282 @@ void MainComponent::openAudioRecorderWindow()
         return true;
     }
 
-    void MainComponent::handleIncomingLiveMidiMessage(const juce::MidiMessage& message)
+    // The MIDI hardware callback may not read or mutate project/UI/Take Review
+    // state in callback-loop recording mode. Only the message-thread consumer
+    // owns the recording session and pass transitions.
+    void MainComponent::receiveNativeMidiForCapture(const juce::MidiMessage& message)
+    {
+        const auto generation = midiLoopCaptureGeneration.load(std::memory_order_acquire);
+        if (generation == 0)
+        {
+            handleIncomingLiveMidiMessage(message);
+            return;
+        }
+        if (!midiLoopCaptureIngressFence.tryEnter())
+            return; // Stop has sealed capture; never enqueue into the drained take.
+        if (midiLoopCaptureGeneration.load(std::memory_order_acquire) == generation)
+        {
+            const int size = message.getRawDataSize();
+            const auto* bytes = message.getRawData();
+            const auto kind = mw::midi::classifyMidiLoopCaptureMessage(bytes, size);
+            if (kind == mw::midi::MidiLoopCaptureMessageKind::Invalid)
+            {
+                midiLoopCaptureIngressFailed.store(true, std::memory_order_release);
+            }
+            else if (kind == mw::midi::MidiLoopCaptureMessageKind::ChannelVoice)
+            {
+                std::int64_t frame = -1;
+                if (!midiLoopCaptureFrameClock->estimate(
+                        mw::midi::MidiLoopCaptureFrameClock::nowNanoseconds(), frame))
+                {
+                    midiLoopCaptureIngressFailed.store(true, std::memory_order_release);
+                }
+                else
+                {
+                    const mw::midi::MidiLoopCapturedMessage entry {
+                        generation, frame, bytes[0],
+                        size >= 2 ? bytes[1] : static_cast<std::uint8_t>(0),
+                        size >= 3 ? bytes[2] : static_cast<std::uint8_t>(0),
+                        static_cast<std::uint8_t>(size)
+                    };
+                    if (!midiLoopCapturedMessages.push(entry))
+                        midiLoopCaptureIngressFailed.store(true, std::memory_order_release);
+                }
+            }
+            // IgnoreSystem leaves the pass and queue untouched. In particular,
+            // it does not require a valid audio-frame estimate.
+        }
+        midiLoopCaptureIngressFence.leave();
+        midiCaptureAsyncDispatcher.notify();
+    }
+
+    void MainComponent::scheduleCallbackMidiCapturePump()
+    {
+        if (midiLoopCaptureGeneration.load(std::memory_order_acquire) == 0
+            || midiLoopCapturePumpScheduled)
+            return;
+        midiLoopCapturePumpScheduled = true;
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        juce::Timer::callAfterDelay(5, [safeThis]()
+        {
+            if (safeThis == nullptr)
+                return;
+            safeThis->midiLoopCapturePumpScheduled = false;
+            safeThis->drainCallbackMidiCapture();
+            safeThis->scheduleCallbackMidiCapturePump();
+        });
+    }
+
+    void MainComponent::disarmCallbackMidiCapture() noexcept
+    {
+        midiLoopCaptureIngressFence.seal();
+        midiLoopCaptureGeneration.store(0, std::memory_order_release);
+        midiLoopCaptureOrder.cancel();
+        midiLoopCaptureHandoff.cancel();
+        midiLoopCaptureBoundaryFrames.cancel();
+    }
+
+    void MainComponent::armCallbackMidiCapture()
+    {
+        if (!currentProject || !midiRecordingLoopRunState.isActive()
+            || !midiRecordingSession.isRecording()
+            || !clapLiveDirectPreviewProjectMode || !mixedLiveProjectPreviewEngine.isActive())
+            return;
+        const auto status = mixedLiveProjectPreviewEngine.status();
+        if (!status.sampleAccurateLoopActive)
+            return; // Rendered/MCI, normal punch and restart fallback are unchanged.
+
+        const auto generation = midiRecordingLoopRunState.generation();
+        const auto region = midiRecordingPunchRunState.region();
+        if (generation == 0 || !mw::midi::isValidMidiRecordingPunchRegion(region)
+            || status.sampleRate <= 0 || status.loopWrapCount != 0)
+        {
+            logMessage("MIDI Recording Loop: native capture could not arm before the first callback wrap; stopping safely.");
+            juce::Component::SafePointer<MainComponent> safeThis(this);
+            juce::MessageManager::callAsync([safeThis, generation]()
+            {
+                if (safeThis != nullptr && safeThis->midiRecordingLoopRunState.matches(generation))
+                {
+                    safeThis->midiRecordingSession.cancel();
+                    safeThis->stopMidiRecording(true);
+                }
+            });
+            return;
+        }
+        // Disarm the old generation and wait for any producer that observed it
+        // before replacing the bounded SPSC queue (never wait on the audio thread).
+        midiLoopCaptureIngressFence.seal();
+        midiLoopCaptureGeneration.store(0, std::memory_order_release);
+        while (!midiLoopCaptureIngressFence.quiescent())
+            std::this_thread::yield();
+        midiLoopCapturedMessages.resetWhenStopped();
+        midiLoopCaptureIngressFailed.store(false, std::memory_order_release);
+        midiLoopCaptureSampleRate = status.sampleRate;
+        midiLoopCapturePreparedEpoch = midiLoopCaptureFrameClock->prepareEpoch();
+        midiLoopCaptureConsumedWrapSerial = 0;
+        midiLoopCapturePendingWraps.clear();
+        midiLoopCaptureLastWrapFrame = 0;
+        midiLoopCaptureLastDispatchedFrame = 0;
+        const auto samplesPerTick = (60.0 * static_cast<double>(status.sampleRate))
+            / (static_cast<double>(std::max(1, currentProject->getTempoBpm()))
+                * static_cast<double>(mw::core::Project::ticksPerQuarterNote));
+        const auto inSample = static_cast<std::int64_t>(std::llround(
+            static_cast<double>(region.inTick - midiLoopCapturePlaybackStartTick) * samplesPerTick));
+        const auto outSample = static_cast<std::int64_t>(std::llround(
+            static_cast<double>(region.outTick - midiLoopCapturePlaybackStartTick) * samplesPerTick));
+        if (inSample < 0 || !midiLoopCaptureBoundaryFrames.arm(outSample, outSample - inSample))
+        {
+            logMessage("MIDI Recording Loop: invalid native sample-domain capture region; aborting capture.");
+            juce::Component::SafePointer<MainComponent> safeThis(this);
+            juce::MessageManager::callAsync([safeThis, generation]()
+            {
+                if (safeThis != nullptr && safeThis->midiRecordingLoopRunState.matches(generation))
+                {
+                    safeThis->midiRecordingSession.cancel();
+                    safeThis->stopMidiRecording(true);
+                }
+            });
+            return;
+        }
+        midiLoopCaptureOrder.arm(generation);
+        midiLoopCaptureHandoff.arm(generation, 0, inSample);
+        midiLoopCaptureGeneration.store(generation, std::memory_order_release);
+        midiLoopCaptureIngressFence.open();
+        scheduleCallbackMidiCapturePump();
+        logMessage("MIDI Recording Loop: callback-timestamp capture is active; messages and wrap notices are serialized on the control thread.");
+    }
+
+    void MainComponent::failCallbackMidiCapture(const juce::String& reason)
+    {
+        if (midiLoopCaptureGeneration.load(std::memory_order_acquire) == 0)
+            return;
+        disarmCallbackMidiCapture();
+        logMessage("MIDI Recording Loop: capture ordering failure (" + reason
+            + "). Discarding the uncertain current pass; completed passes remain available.");
+        midiRecordingSession.cancel();
+        stopMidiRecording(true);
+    }
+
+    void MainComponent::drainCallbackMidiCapture(bool flushAtStop)
+    {
+        const auto generation = midiLoopCaptureGeneration.load(std::memory_order_acquire);
+        if (generation == 0)
+            return;
+        if (!currentProject || !midiRecordingLoopRunState.matches(generation)
+            || !midiRecordingSession.isRecording() || !mixedLiveProjectPreviewEngine.isActive())
+        {
+            failCallbackMidiCapture("capture/transport generation changed");
+            return;
+        }
+        if (midiLoopCaptureIngressFailed.load(std::memory_order_acquire)
+            || midiLoopCapturedMessages.failed())
+        {
+            failCallbackMidiCapture("input queue overflow or uncalibrated MIDI timestamp");
+            return;
+        }
+
+        // Only this message-thread reader consumes both independent mailboxes.
+        // Wraps are sorted against captured physical frames, not against a UI
+        // playhead that may already have cycled to Loop In.
+        mw::playback::LoopWrapAcknowledgement notice;
+        while (true)
+        {
+            const auto poll = mixedLiveProjectPreviewEngine.pollLoopWrapAcknowledgement(
+                midiLoopCaptureConsumedWrapSerial, notice);
+            if (poll == mw::playback::LoopWrapPollResult::None)
+                break;
+            if (poll != mw::playback::LoopWrapPollResult::Event)
+            {
+                failCallbackMidiCapture("lost or inconsistent callback wrap acknowledgement");
+                return;
+            }
+            if (!midiLoopCaptureBoundaryFrames.validateQueuedWrap(
+                    notice.deviceFrame, midiLoopCapturePendingWraps.size()))
+            {
+                failCallbackMidiCapture("unexpected physical-frame loop boundary");
+                return;
+            }
+            midiLoopCapturePendingWraps.push_back(notice);
+            if (midiLoopCapturePendingWraps.size() > mw::playback::LoopWrapAcknowledgementMailbox::capacity)
+            {
+                failCallbackMidiCapture("callback wrap backlog overrun");
+                return;
+            }
+        }
+
+        const auto status = mixedLiveProjectPreviewEngine.status();
+        if (!status.sampleAccurateLoopActive || status.sampleRate != midiLoopCaptureSampleRate
+            || midiLoopCaptureFrameClock->prepareEpoch() != midiLoopCapturePreparedEpoch)
+        {
+            failCallbackMidiCapture("device reprepare or callback-loop deactivation");
+            return;
+        }
+        const auto completed = midiLoopCaptureFrameClock->completedFrame();
+        const auto guard = static_cast<std::int64_t>(std::max(1, status.blockSize)) * 2;
+        const auto stableThrough = flushAtStop
+            ? completed : std::max<std::int64_t>(0, completed - guard);
+        const auto region = midiRecordingPunchRunState.region();
+        const double ticksPerFrame = (static_cast<double>(currentProject->getTempoBpm())
+            * static_cast<double>(mw::core::Project::ticksPerQuarterNote))
+            / (60.0 * static_cast<double>(status.sampleRate));
+
+        while (midiLoopCaptureGeneration.load(std::memory_order_acquire) == generation)
+        {
+            mw::midi::MidiLoopCapturedMessage event;
+            const bool hasEvent = midiLoopCapturedMessages.peek(event);
+            const bool eventReady = hasEvent && event.deviceFrame <= stableThrough;
+            const bool wrapReady = !midiLoopCapturePendingWraps.empty()
+                && midiLoopCapturePendingWraps.front().deviceFrame <= stableThrough;
+            if (!eventReady && !wrapReady)
+                break;
+            if (wrapReady && (!eventReady || midiLoopCapturePendingWraps.front().deviceFrame <= event.deviceFrame))
+            {
+                const auto wrap = midiLoopCapturePendingWraps.front();
+                if (wrap.deviceFrame < midiLoopCaptureLastDispatchedFrame
+                    || !completeMidiRecordingLoopWrap(generation, &wrap))
+                {
+                    failCallbackMidiCapture("failed pass finalization/acknowledgement");
+                    return;
+                }
+                midiLoopCapturePendingWraps.pop_front();
+                if (!midiLoopCaptureBoundaryFrames.commitWrap(wrap.deviceFrame))
+                {
+                    failCallbackMidiCapture("unable to advance physical loop-frame ownership");
+                    return;
+                }
+            }
+            else
+            {
+                if (!midiLoopCaptureBoundaryFrames.isBeforeNextWrap(event.deviceFrame))
+                {
+                    failCallbackMidiCapture("MIDI timestamp crossed Loop Out without an acknowledged wrap");
+                    return;
+                }
+                if (!midiLoopCapturedMessages.pop(event)
+                    || !midiLoopCaptureOrder.accept(event)
+                    || event.deviceFrame < midiLoopCaptureLastWrapFrame)
+                {
+                    failCallbackMidiCapture("late or out-of-order MIDI device frame");
+                    return;
+                }
+                midiLoopCaptureLastDispatchedFrame = event.deviceFrame;
+                const auto elapsed = event.deviceFrame - midiLoopCaptureLastWrapFrame;
+                const auto baseTick = midiLoopCaptureLastWrapFrame == 0
+                    ? midiLoopCapturePlaybackStartTick : region.inTick;
+                const auto rawTick = baseTick + static_cast<std::int64_t>(std::llround(
+                    static_cast<double>(elapsed) * ticksPerFrame));
+                const auto tick = std::clamp(rawTick, std::int64_t{0}, region.outTick - 1);
+                const auto seconds = mw::midi::midiRecordingProjectSecondsForTick(
+                    tick, currentProject->getTempoBpm(), mw::core::Project::ticksPerQuarterNote);
+                const std::uint8_t raw[3] { event.status, event.data1, event.data2 };
+                const juce::MidiMessage decoded(raw, event.size, seconds);
+                handleIncomingLiveMidiMessage(decoded, seconds);
+            }
+        }
+    }
+
+    void MainComponent::handleIncomingLiveMidiMessage(
+        const juce::MidiMessage& message, double capturedProjectSeconds)
     {
         const bool punchWorkflowActive = midiRecordingPunchRunState.isActive()
             && midiRecordingOwnsProjectPlayback
@@ -29810,7 +30180,8 @@ void MainComponent::openAudioRecorderWindow()
         std::int64_t eventTick = 0;
         if (midiRecordingSession.isRecording() || punchWorkflowActive)
         {
-            eventTime = currentMidiRecordingTransportSeconds();
+            eventTime = capturedProjectSeconds >= 0.0
+                ? capturedProjectSeconds : currentMidiRecordingTransportSeconds();
             if (currentProject)
             {
                 eventTick = mw::midi::projectTickForTransportSeconds(
@@ -29836,7 +30207,7 @@ void MainComponent::openAudioRecorderWindow()
 
         if (midiRecordingSession.isRecording())
         {
-            if (eventTime <= 0.0)
+            if (eventTime <= 0.0 && capturedProjectSeconds < 0.0)
                 eventTime = currentMidiRecordingTransportSeconds();
             if (message.isNoteOn())
             {

@@ -182,6 +182,21 @@ namespace mw::vst
         return false;
     }
 
+    bool VstLiveEffectSession::processBlockRealtime(juce::AudioBuffer<float>& audio) noexcept
+    {
+        if (!isOpen() || audio.getNumChannels() <= 0 || audio.getNumSamples() <= 0
+            || audio.getNumChannels() < std::max(impl_->info.reportedInputChannels,
+                                                 impl_->info.reportedOutputChannels))
+            return false;
+        try
+        {
+            impl_->emptyMidi.clear();
+            impl_->instance->processBlock(audio, impl_->emptyMidi);
+            return true;
+        }
+        catch (...) { return false; }
+    }
+
     bool VstLiveEffectSession::processBlock(juce::AudioBuffer<float>& audio,
                                             std::string& errorMessage) noexcept
     {

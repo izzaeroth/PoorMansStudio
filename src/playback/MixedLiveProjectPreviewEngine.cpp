@@ -2,6 +2,7 @@
 
 #include "audio/GainLimits.h"
 #include "midi/LiveMidiNoteQueue.h"
+#include "playback/RealtimeAudioSafety.h"
 #include "midi/MidiRecordingMetronome.h"
 
 #include <algorithm>
@@ -72,18 +73,23 @@ namespace mw::playback
             std::vector<mw::clap::ClapLiveDirectPreviewAudioSourceRequest> audioSourceRequests,
             int requestedOutputChannelsIn,
             mw::midi::MidiRecordingMetronomeConfig recordingMetronomeIn,
-            double recordingMetronomeProjectStartSecondsIn)
+            double recordingMetronomeProjectStartSecondsIn,
+            MixedLiveProjectLoopConfig loopConfigIn)
             : requestedOutputChannels(sanitizeOutputChannelCount(requestedOutputChannelsIn)),
               recordingMetronome(std::move(recordingMetronomeIn)),
               recordingMetronomeProjectStartSeconds(std::isfinite(recordingMetronomeProjectStartSecondsIn)
                   ? std::max(0.0, recordingMetronomeProjectStartSecondsIn)
-                  : 0.0)
+                  : 0.0),
+              loopConfig(std::move(loopConfigIn))
         {
             clapTracks.reserve(clapRequests.size());
             for (auto& request : clapRequests)
             {
                 if (request.session == nullptr || request.sessionProcessMutex == nullptr
-                    || (!request.liveMidiInput && request.notes.empty() && request.controllers.empty() && request.pitchBends.empty() && request.programChanges.empty() && request.channelPressures.empty() && request.polyPressures.empty()))
+                    || (!request.liveMidiInput && request.notes.empty() && request.controllers.empty()
+                        && request.pitchBends.empty() && request.programChanges.empty()
+                        && request.channelPressures.empty() && request.polyPressures.empty()
+                        && request.controller14Bits.empty() && request.rpns.empty() && request.nrpns.empty()))
                     continue;
 
                 ClapTrackState state;
@@ -98,6 +104,7 @@ namespace mw::playback
                     state.combinedRequest.pitchBendEvents.reserve(static_cast<std::size_t>(kMaximumCombinedMidiEventsPerBlock));
                     state.combinedRequest.programChangeEvents.reserve(static_cast<std::size_t>(kMaximumCombinedMidiEventsPerBlock));
                     state.combinedRequest.channelPressureEvents.reserve(static_cast<std::size_t>(kMaximumCombinedMidiEventsPerBlock));
+                    state.combinedRequest.polyPressureEvents.reserve(static_cast<std::size_t>(kMaximumCombinedMidiEventsPerBlock));
                 }
                 state.session = request.session;
                 state.sessionMutex = request.sessionProcessMutex;
@@ -107,6 +114,9 @@ namespace mw::playback
                 state.programChanges = std::move(request.programChanges);
                 state.channelPressures = std::move(request.channelPressures);
                 state.polyPressures = std::move(request.polyPressures);
+                state.controller14Bits = std::move(request.controller14Bits);
+                state.rpns = std::move(request.rpns);
+                state.nrpns = std::move(request.nrpns);
                 state.config = std::move(request.config);
                 state.outputGain = mw::audio::sanitizeMainUiGain(request.outputGain);
                 if (state.config.trackIndex < 0)
@@ -135,7 +145,10 @@ namespace mw::playback
             for (auto& request : vstRequests)
             {
                 if (request.session == nullptr || request.sessionProcessMutex == nullptr
-                    || (!request.liveMidiInput && request.notes.empty() && request.controllers.empty() && request.pitchBends.empty() && request.programChanges.empty() && request.channelPressures.empty() && request.polyPressures.empty()))
+                    || (!request.liveMidiInput && request.notes.empty() && request.controllers.empty()
+                        && request.pitchBends.empty() && request.programChanges.empty()
+                        && request.channelPressures.empty() && request.polyPressures.empty()
+                        && request.controller14Bits.empty() && request.rpns.empty() && request.nrpns.empty()))
                     continue;
 
                 VstTrackState state;
@@ -150,6 +163,7 @@ namespace mw::playback
                     state.combinedRequest.pitchBendEvents.reserve(static_cast<std::size_t>(kMaximumCombinedMidiEventsPerBlock));
                     state.combinedRequest.programChangeEvents.reserve(static_cast<std::size_t>(kMaximumCombinedMidiEventsPerBlock));
                     state.combinedRequest.channelPressureEvents.reserve(static_cast<std::size_t>(kMaximumCombinedMidiEventsPerBlock));
+                    state.combinedRequest.polyPressureEvents.reserve(static_cast<std::size_t>(kMaximumCombinedMidiEventsPerBlock));
                 }
                 state.session = request.session;
                 state.sessionMutex = request.sessionProcessMutex;
@@ -159,6 +173,9 @@ namespace mw::playback
                 state.programChanges = std::move(request.programChanges);
                 state.channelPressures = std::move(request.channelPressures);
                 state.polyPressures = std::move(request.polyPressures);
+                state.controller14Bits = std::move(request.controller14Bits);
+                state.rpns = std::move(request.rpns);
+                state.nrpns = std::move(request.nrpns);
                 state.config = std::move(request.config);
                 state.outputGain = mw::audio::sanitizeMainUiGain(request.outputGain);
                 if (state.config.trackIndex < 0)
@@ -216,6 +233,8 @@ namespace mw::playback
 
         void audioDeviceAboutToStart(juce::AudioIODevice* device) override
         {
+            if (loopConfig.captureClock != nullptr)
+                loopConfig.captureClock->devicePrepared();
             const auto rate = device != nullptr && device->getCurrentSampleRate() > 0.0
                 ? device->getCurrentSampleRate()
                 : static_cast<double>(kFallbackSampleRate);
@@ -246,6 +265,8 @@ namespace mw::playback
 
         void audioDeviceStopped() override
         {
+            if (loopConfig.captureClock != nullptr)
+                loopConfig.captureClock->devicePrepared(); // Invalidate active capture on loss/stop.
             finished.store(true);
         }
 
@@ -301,12 +322,22 @@ namespace mw::playback
         int getStopFlushSucceeded() const noexcept { return stopFlushSucceeded.load(); }
         int getStopFlushSkippedBusy() const noexcept { return stopFlushSkippedBusy.load(); }
         int getClippedSamples() const noexcept { return clippedSamples.load(); }
+        bool isSampleAccurateLoopActive() const noexcept { return sampleAccurateLoopActive.load(); }
+        std::uint64_t getLoopWrapCount() const noexcept { return loopWrapCount.load(); }
+        LoopWrapPollResult pollLoopWrapAcknowledgement(
+            std::uint64_t& consumedSerial, LoopWrapAcknowledgement& notice) const noexcept
+        {
+            return loopWrapMailbox.poll(consumedSerial, notice);
+        }
         std::int64_t getCurrentSample() const noexcept { return currentSample.load(); }
         std::int64_t getTotalSamples() const noexcept { return totalSamples.load(); }
         float getPeak() const noexcept { return outputPeak.load(); }
         juce::String getLastMessage() const
         {
-            const juce::ScopedLock lock(messageLock);
+            const auto fault = callbackFault.read();
+            if (fault != RealtimeAudioFault::None)
+                return juce::String(realtimeFaultText(fault));
+            const juce::ScopedLock lock(messageLock); // Control-thread initialization/stop messages only.
             return lastMessage;
         }
 
@@ -392,9 +423,17 @@ namespace mw::playback
             std::vector<mw::clap::ClapLivePlaybackProgramChangeEvent> programChanges;
             std::vector<mw::clap::ClapLivePlaybackChannelPressureEvent> channelPressures;
             std::vector<mw::clap::ClapLivePlaybackPolyPressureEvent> polyPressures;
+            std::vector<mw::clap::ClapLivePlayback14BitControllerEvent> controller14Bits;
+            std::vector<mw::clap::ClapLivePlaybackRpnEvent> rpns;
+            std::vector<mw::clap::ClapLivePlaybackNrpnEvent> nrpns;
             mw::clap::ClapLiveCallbackBridgeConfig config;
             mw::clap::ClapLiveCallbackBridge bridge;
+            mw::clap::ClapLiveCallbackBridge loopBridge;
+            bool usingLoopBridge = false;
+            bool loopBoundaryPanicRequested = false;
             std::vector<ClapEffectState> effects;
+            juce::AudioBuffer<float> processBuffer;
+            juce::AudioBuffer<float> effectScratchBuffer;
             float outputGain = 1.0f;
             std::array<std::array<int, 128>, 16> activeNoteDepths {};
             int consecutiveSkippedBlocks = 0;
@@ -426,8 +465,14 @@ namespace mw::playback
             std::vector<mw::clap::ClapLivePlaybackProgramChangeEvent> programChanges;
             std::vector<mw::clap::ClapLivePlaybackChannelPressureEvent> channelPressures;
             std::vector<mw::clap::ClapLivePlaybackPolyPressureEvent> polyPressures;
+            std::vector<mw::clap::ClapLivePlayback14BitControllerEvent> controller14Bits;
+            std::vector<mw::clap::ClapLivePlaybackRpnEvent> rpns;
+            std::vector<mw::clap::ClapLivePlaybackNrpnEvent> nrpns;
             mw::clap::ClapLiveCallbackBridgeConfig config;
             mw::clap::ClapLiveCallbackBridge bridge;
+            mw::clap::ClapLiveCallbackBridge loopBridge;
+            bool usingLoopBridge = false;
+            bool loopBoundaryPanicRequested = false;
             std::vector<VstEffectState> effects;
             juce::AudioBuffer<float> processBuffer;
             juce::MidiBuffer midi;
@@ -463,9 +508,11 @@ namespace mw::playback
             stopFlushSucceeded.store(0);
             stopFlushSkippedBusy.store(0);
             clippedSamples.store(0);
+            loopWrapCount.store(0);
             outputPeak.store(0.0f);
             failed.store(false);
             finished.store(false);
+            callbackFault.reset();
             {
                 const juce::ScopedLock lock(messageLock);
                 lastMessage.clear();
@@ -494,12 +541,32 @@ namespace mw::playback
             }
         }
 
+        template <typename Track>
+        static mw::clap::ClapLiveCallbackBridge& activeBridge(Track& track) noexcept
+        {
+            return track.usingLoopBridge ? track.loopBridge : track.bridge;
+        }
+
+        template <typename Track>
+        static const mw::clap::ClapLiveCallbackBridge& activeBridge(const Track& track) noexcept
+        {
+            return track.usingLoopBridge ? track.loopBridge : track.bridge;
+        }
+
         void setFailure(juce::String message)
         {
+            // Only called on control-thread prepare/stop paths.
             failed.store(true);
             finished.store(true);
             const juce::ScopedLock lock(messageLock);
             lastMessage = std::move(message);
+        }
+
+        void setRealtimeFailure(RealtimeAudioFault code) noexcept
+        {
+            callbackFault.publish(code); // No mutex, string, or heap allocation.
+            failed.store(true, std::memory_order_release);
+            finished.store(true, std::memory_order_release);
         }
 
         bool prepareClapTrack(ClapTrackState& track,
@@ -511,6 +578,8 @@ namespace mw::playback
             track.finished = false;
             track.failed = false;
             track.consecutiveSkippedBlocks = 0;
+            track.usingLoopBridge = false;
+            track.loopBoundaryPanicRequested = false;
             clearActiveNotes(track);
 
             if (track.session == nullptr || track.sessionMutex == nullptr)
@@ -569,12 +638,27 @@ namespace mw::playback
                 * static_cast<double>(std::max<std::int64_t>(1, bridgeConfig.scheduler.ticksPerQuarterNote)) / 60.0));
             bridgeConfig.scheduler.startSample = 0;
             bridgeConfig.outputChannelCount = requestedOutputChannels;
-            track.bridge.prepare(track.notes, track.controllers, track.pitchBends, track.programChanges, track.channelPressures, track.polyPressures, bridgeConfig);
-            if (track.liveMidiInput)
+            track.bridge.prepare(track.notes, track.controllers, track.pitchBends, track.programChanges,
+                                 track.channelPressures, track.polyPressures, track.controller14Bits,
+                                 track.rpns, track.nrpns, bridgeConfig);
+            if (loopCoordinator.isEnabled())
+            {
+                auto loopBridgeConfig = track.config;
+                loopBridgeConfig.scheduler.sampleRate = deviceSampleRate;
+                loopBridgeConfig.scheduler.blockSize = deviceBlockSize;
+                loopBridgeConfig.scheduler.startTick = loopConfig.loopStartTick;
+                loopBridgeConfig.scheduler.startSample = 0;
+                loopBridgeConfig.outputChannelCount = requestedOutputChannels;
+                track.loopBridge.prepare(track.notes, track.controllers, track.pitchBends, track.programChanges,
+                                         track.channelPressures, track.polyPressures, track.controller14Bits,
+                                         track.rpns, track.nrpns, loopBridgeConfig);
+            }
+            if (track.liveMidiInput || loopCoordinator.isEnabled())
             {
                 const auto bridgeState = track.bridge.state();
+                const auto loopBridgeState = track.loopBridge.state();
                 const auto requiredCapacity = static_cast<std::size_t>(
-                    std::max(0, bridgeState.maxEventsPerBlock)
+                    std::max({ 0, bridgeState.maxEventsPerBlock, loopBridgeState.maxEventsPerBlock })
                     + kMaximumQueuedLiveMidiEventsPerBlock
                     + kMaximumPanicNoteOffEvents);
                 if (track.combinedRequest.noteEvents.capacity() < requiredCapacity)
@@ -587,9 +671,25 @@ namespace mw::playback
                     track.combinedRequest.programChangeEvents.reserve(requiredCapacity);
                 if (track.combinedRequest.channelPressureEvents.capacity() < requiredCapacity)
                     track.combinedRequest.channelPressureEvents.reserve(requiredCapacity);
+                if (track.combinedRequest.polyPressureEvents.capacity() < requiredCapacity)
+                    track.combinedRequest.polyPressureEvents.reserve(requiredCapacity);
             }
-            track.prepared = track.liveMidiInput || track.bridge.isPrepared();
-            track.finished = !track.prepared || (!track.liveMidiInput && track.bridge.isFinished());
+            const auto bridgeState = track.bridge.state();
+            const auto loopBridgeState = track.loopBridge.state();
+            // Each event category can contribute independently. Reserve the worst
+            // allowed combined count on the control thread, before playback starts.
+            const auto eventCapacity = static_cast<std::size_t>(
+                std::max({ 0, bridgeState.maxEventsPerBlock, loopBridgeState.maxEventsPerBlock })
+                + kMaximumQueuedLiveMidiEventsPerBlock + kMaximumPanicNoteOffEvents) * 6U;
+            track.session->prepareRealtimeStorage(eventCapacity);
+            track.processBuffer.setSize(kMaximumOutputChannels, deviceBlockSize, false, false, true);
+            track.effectScratchBuffer.setSize(kMaximumOutputChannels, deviceBlockSize, false, false, true);
+            track.processBuffer.clear();
+            track.effectScratchBuffer.clear();
+            track.prepared = track.liveMidiInput || track.bridge.isPrepared()
+                || (loopCoordinator.isEnabled() && track.loopBridge.isPrepared());
+            track.finished = !track.prepared
+                || (!loopCoordinator.isEnabled() && !track.liveMidiInput && track.bridge.isFinished());
             return track.prepared;
         }
 
@@ -602,6 +702,8 @@ namespace mw::playback
             track.finished = false;
             track.failed = false;
             track.consecutiveSkippedBlocks = 0;
+            track.usingLoopBridge = false;
+            track.loopBoundaryPanicRequested = false;
             clearActiveNotes(track);
 
             if (track.session == nullptr || track.sessionMutex == nullptr)
@@ -660,12 +762,27 @@ namespace mw::playback
                 * static_cast<double>(std::max<std::int64_t>(1, bridgeConfig.scheduler.ticksPerQuarterNote)) / 60.0));
             bridgeConfig.scheduler.startSample = 0;
             bridgeConfig.outputChannelCount = requestedOutputChannels;
-            track.bridge.prepare(track.notes, track.controllers, track.pitchBends, track.programChanges, track.channelPressures, track.polyPressures, bridgeConfig);
-            if (track.liveMidiInput)
+            track.bridge.prepare(track.notes, track.controllers, track.pitchBends, track.programChanges,
+                                 track.channelPressures, track.polyPressures, track.controller14Bits,
+                                 track.rpns, track.nrpns, bridgeConfig);
+            if (loopCoordinator.isEnabled())
+            {
+                auto loopBridgeConfig = track.config;
+                loopBridgeConfig.scheduler.sampleRate = deviceSampleRate;
+                loopBridgeConfig.scheduler.blockSize = deviceBlockSize;
+                loopBridgeConfig.scheduler.startTick = loopConfig.loopStartTick;
+                loopBridgeConfig.scheduler.startSample = 0;
+                loopBridgeConfig.outputChannelCount = requestedOutputChannels;
+                track.loopBridge.prepare(track.notes, track.controllers, track.pitchBends, track.programChanges,
+                                         track.channelPressures, track.polyPressures, track.controller14Bits,
+                                         track.rpns, track.nrpns, loopBridgeConfig);
+            }
+            if (track.liveMidiInput || loopCoordinator.isEnabled())
             {
                 const auto bridgeState = track.bridge.state();
+                const auto loopBridgeState = track.loopBridge.state();
                 const auto requiredCapacity = static_cast<std::size_t>(
-                    std::max(0, bridgeState.maxEventsPerBlock)
+                    std::max({ 0, bridgeState.maxEventsPerBlock, loopBridgeState.maxEventsPerBlock })
                     + kMaximumQueuedLiveMidiEventsPerBlock
                     + kMaximumPanicNoteOffEvents);
                 if (track.combinedRequest.noteEvents.capacity() < requiredCapacity)
@@ -678,6 +795,8 @@ namespace mw::playback
                     track.combinedRequest.programChangeEvents.reserve(requiredCapacity);
                 if (track.combinedRequest.channelPressureEvents.capacity() < requiredCapacity)
                     track.combinedRequest.channelPressureEvents.reserve(requiredCapacity);
+                if (track.combinedRequest.polyPressureEvents.capacity() < requiredCapacity)
+                    track.combinedRequest.polyPressureEvents.reserve(requiredCapacity);
             }
             track.processBuffer.setSize(
                 requestedOutputChannels,
@@ -686,8 +805,10 @@ namespace mw::playback
                 true,
                 false);
             track.processBuffer.clear();
-            track.prepared = track.liveMidiInput || track.bridge.isPrepared();
-            track.finished = !track.prepared || (!track.liveMidiInput && track.bridge.isFinished());
+            track.prepared = track.liveMidiInput || track.bridge.isPrepared()
+                || (loopCoordinator.isEnabled() && track.loopBridge.isPrepared());
+            track.finished = !track.prepared
+                || (!loopCoordinator.isEnabled() && !track.liveMidiInput && track.bridge.isFinished());
             return track.prepared;
         }
 
@@ -696,6 +817,23 @@ namespace mw::playback
             configuredBlockSize.store(deviceBlockSize);
             const auto timelineStartSample = static_cast<std::int64_t>(std::llround(
                 std::max(0.0, resumeSeconds) * static_cast<double>(deviceSampleRate)));
+            SampleAccurateLoopConfig sampleLoop;
+            const auto tempo = std::max(1, loopConfig.tempoBpm);
+            const auto ticksPerQuarter = std::max<std::int64_t>(1, loopConfig.ticksPerQuarterNote);
+            if (loopConfig.enabled
+                && loopConfig.loopStartTick >= loopConfig.playbackStartTick
+                && loopConfig.loopEndTick > loopConfig.loopStartTick)
+            {
+                const auto samplesPerTick = (60.0 * static_cast<double>(deviceSampleRate))
+                    / (static_cast<double>(tempo) * static_cast<double>(ticksPerQuarter));
+                sampleLoop.enabled = true;
+                sampleLoop.loopStartSample = static_cast<std::int64_t>(std::llround(
+                    static_cast<double>(loopConfig.loopStartTick - loopConfig.playbackStartTick) * samplesPerTick));
+                sampleLoop.loopEndSample = static_cast<std::int64_t>(std::llround(
+                    static_cast<double>(loopConfig.loopEndTick - loopConfig.playbackStartTick) * samplesPerTick));
+            }
+            loopCoordinator.prepare(sampleLoop, timelineStartSample);
+            sampleAccurateLoopActive.store(loopCoordinator.isEnabled());
             int preparedClap = 0;
             int preparedVst = 0;
             int preparedSources = 0;
@@ -895,65 +1033,74 @@ namespace mw::playback
         }
 
         bool processClapEffects(ClapTrackState& track,
-                                std::vector<float>& interleaved,
-                                int& channelCount,
+                                juce::AudioBuffer<float>*& active,
+                                int& activeChannels,
                                 int frames)
         {
             for (auto& effect : track.effects)
             {
-                if (effect.session == nullptr || effect.sessionMutex == nullptr)
-                    continue;
-
+                if (effectChainAction(effect.session != nullptr && effect.sessionMutex != nullptr, true)
+                    == EffectChainAction::FailClosed)
+                {
+                    setRealtimeFailure(RealtimeAudioFault::EffectProcess);
+                    return false;
+                }
                 std::unique_lock<std::mutex> lock(*effect.sessionMutex, std::try_to_lock);
-                if (!lock.owns_lock())
+                if (effectChainAction(true, lock.owns_lock()) == EffectChainAction::FailClosed)
                 {
                     skippedEffectBlocks.fetch_add(1);
-                    continue;
+                    setRealtimeFailure(RealtimeAudioFault::EffectBusy);
+                    return false;
                 }
 
-                mw::clap::ClapLiveEffectProcessRequest request;
-                request.frameCount = frames;
-                request.inputChannelCount = channelCount;
-                request.interleavedInputAudio = interleaved;
-                auto result = effect.session->processBlock(request);
+                auto* output = active == &track.processBuffer ? &track.effectScratchBuffer : &track.processBuffer;
+                std::array<const float*, kMaximumOutputChannels> inputChannels {};
+                const auto inputCount = std::min(activeChannels, kMaximumOutputChannels);
+                for (int channel = 0; channel < inputCount; ++channel)
+                    inputChannels[static_cast<std::size_t>(channel)] = active->getReadPointer(channel);
+                output->clear();
+                const auto result = effect.session->processPlanarBlock(
+                    inputChannels.data(), inputCount,
+                    output->getArrayOfWritePointers(), output->getNumChannels(), frames);
                 if (!result.success)
                 {
-                    setFailure("Mixed project CLAP effect failed: " + juce::String(result.message));
+                    setRealtimeFailure(RealtimeAudioFault::EffectProcess);
                     return false;
                 }
-                if (!hasValidPluginOutputBuffer(
-                        frames,
-                        result.outputFrameCount,
-                        result.outputChannelCount,
-                        result.interleavedAudio.size()))
+                if (result.outputChannelCount <= 0 || result.outputChannelCount > kMaximumPluginChannels)
                 {
-                    setFailure("Mixed project CLAP effect returned an invalid audio buffer.");
+                    setRealtimeFailure(RealtimeAudioFault::EffectOutput);
                     return false;
                 }
-
-                interleaved = std::move(result.interleavedAudio);
-                channelCount = result.outputChannelCount;
+                active = output;
+                activeChannels = result.outputChannelCount;
                 processedEffectBlocks.fetch_add(1);
             }
             return true;
         }
 
-        bool processVstEffects(VstTrackState& track, std::string& error)
+        bool processVstEffects(VstTrackState& track)
         {
             for (auto& effect : track.effects)
             {
-                if (effect.session == nullptr || effect.sessionMutex == nullptr)
-                    continue;
-
+                if (effectChainAction(effect.session != nullptr && effect.sessionMutex != nullptr, true)
+                    == EffectChainAction::FailClosed)
+                {
+                    setRealtimeFailure(RealtimeAudioFault::EffectProcess);
+                    return false;
+                }
                 std::unique_lock<std::mutex> lock(*effect.sessionMutex, std::try_to_lock);
-                if (!lock.owns_lock())
+                if (effectChainAction(true, lock.owns_lock()) == EffectChainAction::FailClosed)
                 {
                     skippedEffectBlocks.fetch_add(1);
-                    continue;
-                }
-
-                if (!effect.session->processBlock(track.processBuffer, error))
+                    setRealtimeFailure(RealtimeAudioFault::EffectBusy);
                     return false;
+                }
+                if (!effect.session->processBlockRealtime(track.processBuffer))
+                {
+                    setRealtimeFailure(RealtimeAudioFault::EffectProcess);
+                    return false;
+                }
                 processedEffectBlocks.fetch_add(1);
             }
             return true;
@@ -968,12 +1115,14 @@ namespace mw::playback
         {
             panicThisBlock = false;
             panicNoteOffCount = 0;
+            auto& bridge = activeBridge(track);
+            const bool boundaryPanic = track.loopBoundaryPanicRequested;
 
-            if (!track.liveMidiInput)
+            if (!track.liveMidiInput && !boundaryPanic)
             {
-                if (track.bridge.isFinished())
+                if (bridge.isFinished())
                     return nullptr;
-                return &track.bridge.nextRequest();
+                return &bridge.nextRequest(numSamples);
             }
 
             auto& combined = track.combinedRequest;
@@ -983,10 +1132,11 @@ namespace mw::playback
             combined.pitchBendEvents.clear();
             combined.programChangeEvents.clear();
             combined.channelPressureEvents.clear();
+            combined.polyPressureEvents.clear();
 
-            if (!track.bridge.isFinished())
+            if (!bridge.isFinished())
             {
-                const auto& scheduled = track.bridge.nextRequest();
+                const auto& scheduled = bridge.nextRequest(numSamples);
                 if (scheduled.frameCount > numSamples)
                     return nullptr;
                 combined.controllerEvents.insert(
@@ -1009,6 +1159,10 @@ namespace mw::playback
                     combined.channelPressureEvents.end(),
                     scheduled.channelPressureEvents.begin(),
                     scheduled.channelPressureEvents.end());
+                combined.polyPressureEvents.insert(
+                    combined.polyPressureEvents.end(),
+                    scheduled.polyPressureEvents.begin(),
+                    scheduled.polyPressureEvents.end());
             }
 
             if (track.liveMidiQueue != nullptr)
@@ -1045,6 +1199,13 @@ namespace mw::playback
                         event.frameOffset = 0; event.midiChannel = queued.channel; event.pressure = queued.channelPressure;
                         combined.channelPressureEvents.push_back(event);
                     }
+                    else if (queued.type == mw::midi::LiveMidiEventType::PolyPressure)
+                    {
+                        mw::clap::ClapLivePolyPressureEvent event;
+                        event.frameOffset = 0; event.midiChannel = queued.channel;
+                        event.noteNumber = queued.key; event.pressure = queued.polyPressure;
+                        combined.polyPressureEvents.push_back(event);
+                    }
                     else
                     {
                         mw::clap::ClapLiveNoteEvent event;
@@ -1057,8 +1218,10 @@ namespace mw::playback
                 }
             }
 
-            panicThisBlock = track.liveMidiPanicRequested != nullptr
+            const bool livePanic = track.liveMidiPanicRequested != nullptr
                 && track.liveMidiPanicRequested->exchange(false, std::memory_order_acq_rel);
+            panicThisBlock = boundaryPanic || livePanic;
+            track.loopBoundaryPanicRequested = false;
             if (panicThisBlock)
             {
                 for (int channel = 0; channel < 16; ++channel)
@@ -1091,13 +1254,15 @@ namespace mw::playback
                               float* const* outputChannelData,
                               int numOutputChannels,
                               int numSamples,
+                              int outputFrameOffset,
                               int& eventsThisCallback,
                               float& localPeak)
         {
+            auto& bridge = activeBridge(track);
             if (!track.prepared || track.failed || track.finished
-                || (!track.liveMidiInput && track.bridge.isFinished()))
+                || (!track.liveMidiInput && !track.loopBoundaryPanicRequested && bridge.isFinished()))
             {
-                if (!track.liveMidiInput && track.bridge.isFinished())
+                if (!loopCoordinator.isEnabled() && !track.liveMidiInput && bridge.isFinished())
                     track.finished = true;
                 return false;
             }
@@ -1108,7 +1273,7 @@ namespace mw::playback
                 skippedBlocks.fetch_add(1);
                 ++track.consecutiveSkippedBlocks;
                 if (track.consecutiveSkippedBlocks >= kMaximumConsecutiveBusyBlocks)
-                    setFailure("Mixed project CLAP instrument stayed busy for too many consecutive audio blocks.");
+                    setRealtimeFailure(RealtimeAudioFault::InstrumentBusy);
                 return false;
             }
             track.consecutiveSkippedBlocks = 0;
@@ -1125,15 +1290,18 @@ namespace mw::playback
             const auto& request = *requestPointer;
             if (request.frameCount > numSamples)
             {
-                setFailure("Mixed project CLAP scheduler block exceeded the device callback block.");
+                setRealtimeFailure(RealtimeAudioFault::InstrumentScheduler);
                 track.failed = true;
                 return false;
             }
 
-            auto result = track.session->processBlock(request);
+            track.processBuffer.clear();
+            auto result = track.session->processPlanarBlock(
+                request, track.processBuffer.getArrayOfWritePointers(),
+                track.processBuffer.getNumChannels());
             if (!result.success)
             {
-                setFailure("Mixed project CLAP instrument failed: " + juce::String(result.message));
+                setRealtimeFailure(RealtimeAudioFault::InstrumentProcess);
                 track.failed = true;
                 return false;
             }
@@ -1143,43 +1311,31 @@ namespace mw::playback
                 emergencyNoteOffsSubmitted.fetch_add(panicNoteOffCount);
                 clearActiveNotes(track);
             }
-
-            auto audio = std::move(result.interleavedAudio);
-            auto channels = result.outputChannelCount;
-            if (!hasValidPluginOutputBuffer(
-                    request.frameCount,
-                    result.outputFrameCount,
-                    channels,
-                    audio.size()))
+            if (result.outputChannelCount <= 0
+                || result.outputChannelCount > kMaximumPluginChannels)
             {
-                setFailure("Mixed project CLAP instrument returned an invalid audio buffer.");
+                setRealtimeFailure(RealtimeAudioFault::InstrumentOutput);
                 track.failed = true;
                 return false;
             }
 
-            if (!processClapEffects(track, audio, channels, request.frameCount))
+            auto* audio = &track.processBuffer;
+            auto activeChannels = result.outputChannelCount;
+            if (!processClapEffects(track, audio, activeChannels, request.frameCount))
             {
                 track.failed = true;
                 return false;
             }
-
+            const auto channels = std::min({numOutputChannels, activeChannels, audio->getNumChannels()});
             for (int frame = 0; frame < request.frameCount; ++frame)
-            {
-                for (int channel = 0; channel < numOutputChannels; ++channel)
-                {
-                    float sample = 0.0f;
-                    if (channel < channels)
-                    {
-                        const auto index = static_cast<std::size_t>(frame * channels + channel);
-                        if (index < audio.size())
-                            sample = audio[index] * track.outputGain;
-                    }
-                    mixOutputSample(outputChannelData, channel, frame, sample, localPeak);
-                }
-            }
+                for (int channel = 0; channel < channels; ++channel)
+                    mixOutputSample(outputChannelData, channel, outputFrameOffset + frame,
+                                    audio->getSample(channel, frame) * track.outputGain, localPeak);
 
-            eventsThisCallback += static_cast<int>(request.noteEvents.size() + request.controllerEvents.size() + request.programChangeEvents.size() + request.pitchBendEvents.size() + request.channelPressureEvents.size());
-            if (!track.liveMidiInput && track.bridge.isFinished())
+            eventsThisCallback += static_cast<int>(request.noteEvents.size() + request.controllerEvents.size()
+                + request.programChangeEvents.size() + request.pitchBendEvents.size()
+                + request.channelPressureEvents.size() + request.polyPressureEvents.size());
+            if (!loopCoordinator.isEnabled() && !track.liveMidiInput && bridge.isFinished())
                 track.finished = true;
             return true;
         }
@@ -1188,13 +1344,15 @@ namespace mw::playback
                              float* const* outputChannelData,
                              int numOutputChannels,
                              int numSamples,
+                             int outputFrameOffset,
                              int& eventsThisCallback,
                              float& localPeak)
         {
+            auto& bridge = activeBridge(track);
             if (!track.prepared || track.failed || track.finished
-                || (!track.liveMidiInput && track.bridge.isFinished()))
+                || (!track.liveMidiInput && !track.loopBoundaryPanicRequested && bridge.isFinished()))
             {
-                if (!track.liveMidiInput && track.bridge.isFinished())
+                if (!loopCoordinator.isEnabled() && !track.liveMidiInput && bridge.isFinished())
                     track.finished = true;
                 return false;
             }
@@ -1205,7 +1363,7 @@ namespace mw::playback
                 skippedBlocks.fetch_add(1);
                 ++track.consecutiveSkippedBlocks;
                 if (track.consecutiveSkippedBlocks >= kMaximumConsecutiveBusyBlocks)
-                    setFailure("Mixed project VST3 instrument stayed busy for too many consecutive audio blocks.");
+                    setRealtimeFailure(RealtimeAudioFault::InstrumentBusy);
                 return false;
             }
             track.consecutiveSkippedBlocks = 0;
@@ -1222,7 +1380,7 @@ namespace mw::playback
             const auto& request = *requestPointer;
             if (request.frameCount > numSamples || request.frameCount > kMaximumBlockSize)
             {
-                setFailure("Mixed project VST3 scheduler block exceeded the device callback block.");
+                setRealtimeFailure(RealtimeAudioFault::InstrumentScheduler);
                 track.failed = true;
                 return false;
             }
@@ -1283,11 +1441,18 @@ namespace mw::playback
                     track.midi.addEvent(juce::MidiMessage::noteOff(channel, key), offset);
                 }
             }
-
-            std::string error;
-            if (!track.session->processBlock(track.processBuffer, track.midi, error))
+            for (const auto& event : request.polyPressureEvents)
             {
-                setFailure("Mixed project VST3 instrument failed: " + juce::String(error));
+                const auto channel = std::clamp(event.midiChannel, 1, 16);
+                const auto key = std::clamp(event.noteNumber, 0, 127);
+                const auto pressure = std::clamp(event.pressure, 0, 127);
+                const auto offset = std::clamp(static_cast<int>(event.frameOffset), 0, request.frameCount - 1);
+                track.midi.addEvent(juce::MidiMessage::aftertouchChange(channel, key, pressure), offset);
+            }
+
+            if (!track.session->processBlockRealtime(track.processBuffer, track.midi))
+            {
+                setRealtimeFailure(RealtimeAudioFault::InstrumentProcess);
                 track.failed = true;
                 return false;
             }
@@ -1298,9 +1463,8 @@ namespace mw::playback
                 clearActiveNotes(track);
             }
 
-            if (!processVstEffects(track, error))
+            if (!processVstEffects(track))
             {
-                setFailure("Mixed project VST3 effect failed: " + juce::String(error));
                 track.failed = true;
                 return false;
             }
@@ -1315,12 +1479,14 @@ namespace mw::playback
                 for (int channel = 0; channel < channelsToCopy; ++channel)
                 {
                     const auto sample = track.processBuffer.getSample(channel, frame) * track.outputGain;
-                    mixOutputSample(outputChannelData, channel, frame, sample, localPeak);
+                    mixOutputSample(outputChannelData, channel, outputFrameOffset + frame, sample, localPeak);
                 }
             }
 
-            eventsThisCallback += static_cast<int>(request.noteEvents.size() + request.controllerEvents.size() + request.programChangeEvents.size() + request.pitchBendEvents.size() + request.channelPressureEvents.size());
-            if (!track.liveMidiInput && track.bridge.isFinished())
+            eventsThisCallback += static_cast<int>(request.noteEvents.size() + request.controllerEvents.size()
+                + request.programChangeEvents.size() + request.pitchBendEvents.size()
+                + request.channelPressureEvents.size() + request.polyPressureEvents.size());
+            if (!loopCoordinator.isEnabled() && !track.liveMidiInput && bridge.isFinished())
                 track.finished = true;
             return true;
         }
@@ -1329,6 +1495,7 @@ namespace mw::playback
                              int numOutputChannels,
                              int numSamples,
                              std::int64_t blockStartSample,
+                             int outputFrameOffset,
                              float& localPeak)
         {
             bool processed = false;
@@ -1363,14 +1530,14 @@ namespace mw::playback
                         const auto index1 = static_cast<std::size_t>(frame1 * source.sourceChannelCount + sourceChannel);
                         if (index0 >= source.interleavedAudio.size() || index1 >= source.interleavedAudio.size())
                         {
-                            setFailure("Mixed project rendered source had invalid buffer dimensions.");
+                            setRealtimeFailure(RealtimeAudioFault::AudioSourceOutput);
                             return false;
                         }
 
                         const auto sample0 = source.interleavedAudio[index0];
                         const auto sample1 = source.interleavedAudio[index1];
                         const auto sample = (sample0 + ((sample1 - sample0) * fraction)) * source.outputGain;
-                        mixOutputSample(outputChannelData, channel, frame, sample, localPeak);
+                        mixOutputSample(outputChannelData, channel, outputFrameOffset + frame, sample, localPeak);
                     }
                     processed = true;
                 }
@@ -1382,6 +1549,7 @@ namespace mw::playback
                                           int numOutputChannels,
                                           int numSamples,
                                           std::int64_t blockStart,
+                                          int outputFrameOffset,
                                           float& localPeak)
         {
             if (!recordingMetronomeActive.load(std::memory_order_acquire)
@@ -1404,7 +1572,7 @@ namespace mw::playback
                     continue;
 
                 for (int channel = 0; channel < numOutputChannels; ++channel)
-                    mixOutputSample(outputChannelData, channel, frame, click, localPeak);
+                    mixOutputSample(outputChannelData, channel, outputFrameOffset + frame, click, localPeak);
                 mixedAny = true;
             }
             return mixedAny;
@@ -1414,11 +1582,11 @@ namespace mw::playback
         {
             for (const auto& track : clapTracks)
                 if (track.prepared && !track.finished
-                    && (track.liveMidiInput || !track.bridge.isFinished()))
+                    && (track.liveMidiInput || !activeBridge(track).isFinished()))
                     return false;
             for (const auto& track : vstTracks)
                 if (track.prepared && !track.finished
-                    && (track.liveMidiInput || !track.bridge.isFinished()))
+                    && (track.liveMidiInput || !activeBridge(track).isFinished()))
                     return false;
             return true;
         }
@@ -1429,6 +1597,28 @@ namespace mw::playback
                 if (!source.finished)
                     return false;
             return true;
+        }
+
+        void beginSampleAccurateLoopIteration()
+        {
+            for (auto& track : clapTracks)
+            {
+                track.usingLoopBridge = true;
+                track.loopBridge.rewind();
+                track.loopBoundaryPanicRequested = true;
+                track.finished = false;
+            }
+            for (auto& track : vstTracks)
+            {
+                track.usingLoopBridge = true;
+                track.loopBridge.rewind();
+                track.loopBoundaryPanicRequested = true;
+                track.finished = false;
+            }
+            for (auto& source : audioSources)
+                source.finished = false;
+            loopWrapMailbox.publish(deviceFramesEmitted, loopCoordinator.loopStartSample());
+            loopWrapCount.fetch_add(1);
         }
 
         void processAudio(const float* const*,
@@ -1443,66 +1633,118 @@ namespace mw::playback
 
             if (numSamples > kMaximumBlockSize || numSamples > configuredBlockSize.load())
             {
-                setFailure("Mixed project audio callback received an unsupported block size.");
+                setRealtimeFailure(RealtimeAudioFault::InvalidBlock);
                 return;
             }
+
+            if (loopConfig.captureClock != nullptr)
+                loopConfig.captureClock->callbackStarted(deviceFramesEmitted, sampleRate.load(), numSamples);
+
+            auto abortCallback = [&]() noexcept
+            {
+                // No previously processed track may leak a partial wet chain.
+                clearOutputs(outputChannelData, numOutputChannels, numSamples);
+                if (loopConfig.captureClock != nullptr)
+                    loopConfig.captureClock->callbackCompleted(deviceFramesEmitted);
+            };
 
             int eventsThisCallback = 0;
             bool processedAnyTrack = false;
+            bool processedAnySource = false;
+            bool processedAnyMetronome = false;
             float localPeak = outputPeak.load();
-
-            for (auto& track : clapTracks)
+            int remainingFrames = numSamples;
+            int outputFrameOffset = 0;
+            SampleAccurateLoopWorkBudget workBudget;
+            while (remainingFrames > 0)
             {
-                processedAnyTrack = processClapTrack(
-                    track,
+                const auto slice = loopCoordinator.nextSlice(remainingFrames);
+                if (slice.frameCount <= 0)
+                {
+                    setRealtimeFailure(RealtimeAudioFault::InvalidSlice);
+                    abortCallback();
+                    return;
+                }
+                if (!workBudget.charge(slice.frameCount))
+                {
+                    setRealtimeFailure(RealtimeAudioFault::SliceBudget);
+                    abortCallback();
+                    return;
+                }
+                if (slice.wrappedBefore)
+                    beginSampleAccurateLoopIteration();
+
+                for (auto& track : clapTracks)
+                {
+                    processedAnyTrack = processClapTrack(
+                        track,
+                        outputChannelData,
+                        numOutputChannels,
+                        slice.frameCount,
+                        outputFrameOffset,
+                        eventsThisCallback,
+                        localPeak) || processedAnyTrack;
+                    if (failed.load())
+                    {
+                        abortCallback();
+                        return;
+                    }
+                }
+
+                for (auto& track : vstTracks)
+                {
+                    processedAnyTrack = processVstTrack(
+                        track,
+                        outputChannelData,
+                        numOutputChannels,
+                        slice.frameCount,
+                        outputFrameOffset,
+                        eventsThisCallback,
+                        localPeak) || processedAnyTrack;
+                    if (failed.load())
+                    {
+                        abortCallback();
+                        return;
+                    }
+                }
+
+                processedAnySource = mixAudioSources(
                     outputChannelData,
                     numOutputChannels,
-                    numSamples,
-                    eventsThisCallback,
-                    localPeak) || processedAnyTrack;
+                    slice.frameCount,
+                    slice.timelineStartSample,
+                    outputFrameOffset,
+                    localPeak) || processedAnySource;
                 if (failed.load())
+                {
+                    abortCallback();
                     return;
-            }
+                }
 
-            for (auto& track : vstTracks)
-            {
-                processedAnyTrack = processVstTrack(
-                    track,
+                processedAnyMetronome = mixMidiRecordingMetronome(
                     outputChannelData,
                     numOutputChannels,
-                    numSamples,
-                    eventsThisCallback,
-                    localPeak) || processedAnyTrack;
-                if (failed.load())
-                    return;
+                    slice.frameCount,
+                    slice.timelineStartSample,
+                    outputFrameOffset,
+                    localPeak) || processedAnyMetronome;
+
+                remainingFrames -= slice.frameCount;
+                outputFrameOffset += slice.frameCount;
+                deviceFramesEmitted += slice.frameCount;
             }
 
-            const auto blockStart = currentSample.load();
-            const bool processedSource = mixAudioSources(
-                outputChannelData,
-                numOutputChannels,
-                numSamples,
-                blockStart,
-                localPeak);
-            if (failed.load())
-                return;
-
-            const bool processedMetronome = mixMidiRecordingMetronome(
-                outputChannelData,
-                numOutputChannels,
-                numSamples,
-                blockStart,
-                localPeak);
-
-            currentSample.store(blockStart + numSamples);
+            if (loopConfig.captureClock != nullptr)
+                loopConfig.captureClock->callbackCompleted(deviceFramesEmitted);
+            currentSample.store(loopCoordinator.currentTimelineSample());
             outputPeak.store(localPeak);
-            if (processedAnyTrack || processedSource || processedMetronome)
+            if (processedAnyTrack || processedAnySource || processedAnyMetronome)
             {
                 processedBlocks.fetch_add(1);
                 submittedEvents.fetch_add(eventsThisCallback);
             }
 
-            if (allTracksFinished() && allSourcesFinished())
+            if (!loopCoordinator.isEnabled() && allTracksFinished() && allSourcesFinished())
                 finished.store(true);
         }
 
@@ -1512,6 +1754,10 @@ namespace mw::playback
         int requestedOutputChannels = 2;
         mw::midi::MidiRecordingMetronomeConfig recordingMetronome;
         double recordingMetronomeProjectStartSeconds = 0.0;
+        MixedLiveProjectLoopConfig loopConfig;
+        SampleAccurateLoopCoordinator loopCoordinator;
+        LoopWrapAcknowledgementMailbox loopWrapMailbox;
+        std::int64_t deviceFramesEmitted = 0; // Callback-thread only.
         std::atomic<bool> recordingMetronomeActive { false };
         std::atomic<int> configuredBlockSize { 512 };
         bool prepared = false;
@@ -1537,9 +1783,12 @@ namespace mw::playback
         std::atomic<int> stopFlushSucceeded { 0 };
         std::atomic<int> stopFlushSkippedBusy { 0 };
         std::atomic<int> clippedSamples { 0 };
+        std::atomic<bool> sampleAccurateLoopActive { false };
+        std::atomic<std::uint64_t> loopWrapCount { 0 };
         std::atomic<std::int64_t> currentSample { 0 };
         std::atomic<std::int64_t> totalSamples { 0 };
         std::atomic<float> outputPeak { 0.0f };
+        RealtimeAudioFaultLatch callbackFault;
         mutable juce::CriticalSection messageLock;
         juce::String lastMessage;
     };
@@ -1586,6 +1835,8 @@ namespace mw::playback
                  << ", stop flush success " << stopFlushSucceeded;
         if (clippedSamples > 0)
             text << ", clipped samples " << clippedSamples;
+        if (sampleAccurateLoopActive)
+            text << ", callback loop wraps " << static_cast<juce::int64>(loopWrapCount);
         text << ", peak " << juce::String(peak, 6) << ".";
         if (hadFailure && lastMessage.isNotEmpty())
             text << " Last callback message: " << lastMessage;
@@ -1619,6 +1870,8 @@ namespace mw::playback
                  << ", skipped stop flushes " << stopFlushSkippedBusy;
         if (clippedSamples > 0)
             text << ", clipped samples " << clippedSamples;
+        if (sampleAccurateLoopActive)
+            text << ", callback loop wraps " << static_cast<juce::int64>(loopWrapCount);
         text << ", peak " << juce::String(peak, 6) << ".";
         if (hadFailure && lastMessage.isNotEmpty())
             text << " Last callback message: " << lastMessage;
@@ -1631,7 +1884,8 @@ namespace mw::playback
         std::vector<mw::clap::ClapLiveDirectPreviewAudioSourceRequest> audioSources,
         int outputChannelCount,
         mw::midi::MidiRecordingMetronomeConfig recordingMetronome,
-        double recordingMetronomeProjectStartSeconds)
+        double recordingMetronomeProjectStartSeconds,
+        MixedLiveProjectLoopConfig loopConfig)
     {
         stop();
 
@@ -1643,7 +1897,8 @@ namespace mw::playback
             std::move(audioSources),
             result.outputChannelCount,
             std::move(recordingMetronome),
-            recordingMetronomeProjectStartSeconds);
+            recordingMetronomeProjectStartSeconds,
+            std::move(loopConfig));
 
         auto copyStartFields = [&]
         {
@@ -1666,6 +1921,8 @@ namespace mw::playback
             result.stopFlushSucceeded = callback->getStopFlushSucceeded();
             result.stopFlushSkippedBusy = callback->getStopFlushSkippedBusy();
             result.clippedSamples = callback->getClippedSamples();
+            result.sampleAccurateLoopActive = callback->isSampleAccurateLoopActive();
+            result.loopWrapCount = callback->getLoopWrapCount();
             result.currentSample = callback->getCurrentSample();
             result.totalSamples = callback->getTotalSamples();
         };
@@ -1710,12 +1967,22 @@ namespace mw::playback
                        << result.audioSourceCount << " prepared source(s).";
         if (result.liveEffectSlotCount > 0)
             result.message << " Live effect slots active: " << result.liveEffectSlotCount << ".";
+        if (result.sampleAccurateLoopActive)
+            result.message << " Sample-accurate callback looping is active.";
         result.message << " Busy-block watchdog, device re-preparation, finite-sample filtering, clipping containment, and stop note-off flushing are enabled.";
 
         activeTrackIndex_ = result.trackIndex;
         active_ = true;
         callback_ = std::move(callback);
         return result;
+    }
+
+    LoopWrapPollResult MixedLiveProjectPreviewEngine::pollLoopWrapAcknowledgement(
+        std::uint64_t& consumedSerial, LoopWrapAcknowledgement& notice) const noexcept
+    {
+        return callback_ != nullptr
+            ? callback_->pollLoopWrapAcknowledgement(consumedSerial, notice)
+            : LoopWrapPollResult::Invalid;
     }
 
     void MixedLiveProjectPreviewEngine::setMidiRecordingMetronomeActive(bool active) noexcept
@@ -1758,6 +2025,8 @@ namespace mw::playback
             summary.stopFlushSucceeded = callback_->getStopFlushSucceeded();
             summary.stopFlushSkippedBusy = callback_->getStopFlushSkippedBusy();
             summary.clippedSamples = callback_->getClippedSamples();
+            summary.sampleAccurateLoopActive = callback_->isSampleAccurateLoopActive();
+            summary.loopWrapCount = callback_->getLoopWrapCount();
             summary.currentSample = callback_->getCurrentSample();
             summary.totalSamples = callback_->getTotalSamples();
             summary.peak = callback_->getPeak();
@@ -1801,6 +2070,8 @@ namespace mw::playback
         result.stopFlushSucceeded = callback_->getStopFlushSucceeded();
         result.stopFlushSkippedBusy = callback_->getStopFlushSkippedBusy();
         result.clippedSamples = callback_->getClippedSamples();
+        result.sampleAccurateLoopActive = callback_->isSampleAccurateLoopActive();
+        result.loopWrapCount = callback_->getLoopWrapCount();
         result.currentSample = callback_->getCurrentSample();
         result.totalSamples = callback_->getTotalSamples();
         result.peak = callback_->getPeak();

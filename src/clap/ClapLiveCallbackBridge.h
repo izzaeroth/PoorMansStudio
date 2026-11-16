@@ -65,6 +65,8 @@ namespace mw::clap
                      std::vector<ClapLivePlaybackNrpnEvent> nrpnEvents, ClapLiveCallbackBridgeConfig config);
         bool isPrepared() const;
         bool isFinished() const;
+        void rewind() noexcept;
+        const ClapLiveProcessRequest& nextRequest(int maximumFrames);
         const ClapLiveProcessRequest& nextRequest();
         const ClapLiveCallbackBridgeState& state() const;
 

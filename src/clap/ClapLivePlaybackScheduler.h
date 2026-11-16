@@ -133,6 +133,8 @@ namespace mw::clap
         int blockSize() const;
         int totalScheduledEvents() const;
         int maxEventsPerBlock() const;
+        void rewind() noexcept;
+        void nextFramesInto(ClapLiveProcessRequest& request, int maximumFrames);
         void nextBlockInto(ClapLiveProcessRequest& request);
 
     private:
